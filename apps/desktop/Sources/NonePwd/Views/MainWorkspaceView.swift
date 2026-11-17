@@ -4,6 +4,8 @@ public struct MainWorkspaceView: View {
     @ObservedObject public var store: VaultStore
     @State private var showNewVaultPopover = false
     @State private var newVaultName = ""
+    @State private var showNewGroupPopover = false
+    @State private var newGroupName = ""
     @State private var pendingDeleteItem: VaultItemPayload?
 
     private let bentoColumns = [
@@ -149,6 +151,26 @@ public struct MainWorkspaceView: View {
                             .padding(.bottom, 4)
 
                         sidebarRow(
+                            title: "API 密钥",
+                            systemImage: "chevron.left.forwardslash.chevron.right",
+                            tint: Color(red: 0.36, green: 0.38, blue: 0.84),
+                            count: store.apiCredentialItemsCount,
+                            isSelected: store.destination == .apiCredentials
+                        ) {
+                            store.destination = .apiCredentials
+                        }
+
+                        sidebarRow(
+                            title: "SSH 密钥",
+                            systemImage: "terminal.fill",
+                            tint: Color(red: 0.24, green: 0.27, blue: 0.33),
+                            count: store.sshKeyItemsCount,
+                            isSelected: store.destination == .sshKeys
+                        ) {
+                            store.destination = .sshKeys
+                        }
+
+                        sidebarRow(
                             title: "银行卡",
                             systemImage: "creditcard.fill",
                             tint: Color(red: 0.18, green: 0.72, blue: 0.32),
@@ -169,13 +191,87 @@ public struct MainWorkspaceView: View {
                         }
 
                         sidebarRow(
-                            title: "密钥与笔记",
+                            title: "安全笔记",
                             systemImage: "lock.doc.fill",
-                            tint: Color(red: 0.36, green: 0.38, blue: 0.84),
-                            count: store.secretsAndNotesCount,
-                            isSelected: store.destination == .secretsAndNotes
+                            tint: Color(red: 0.90, green: 0.54, blue: 0.16),
+                            count: store.secureNoteItemsCount,
+                            isSelected: store.destination == .secureNotes
                         ) {
-                            store.destination = .secretsAndNotes
+                            store.destination = .secureNotes
+                        }
+                    }
+
+                    // 分组（支持一个条目归入多个分组）
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text("分组")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button {
+                                showNewGroupPopover.toggle()
+                            } label: {
+                                Image(systemName: "plus")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("新建分组（可多选归类）")
+                            .popover(isPresented: $showNewGroupPopover) {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text("新建分组")
+                                        .font(.system(size: 13, weight: .semibold))
+                                    BorderlessInputField("例如：AI / 生产环境 / 常用", text: $newGroupName) {
+                                        let trimmed = newGroupName.trimmingCharacters(in: .whitespaces)
+                                        guard !trimmed.isEmpty else { return }
+                                        newGroupName = ""
+                                        showNewGroupPopover = false
+                                        store.addGroup(trimmed)
+                                        store.destination = .group(trimmed)
+                                    }
+                                    .frame(width: 220)
+                                    HStack {
+                                        Spacer()
+                                        Button("创建") {
+                                            let trimmed = newGroupName.trimmingCharacters(in: .whitespaces)
+                                            newGroupName = ""
+                                            showNewGroupPopover = false
+                                            store.addGroup(trimmed)
+                                            store.destination = .group(trimmed)
+                                        }
+                                        .buttonStyle(.glassProminent)
+                                        .disabled(newGroupName.trimmingCharacters(in: .whitespaces).isEmpty)
+                                    }
+                                }
+                                .padding(14)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.bottom, 4)
+
+                        if store.allGroups.isEmpty {
+                            Text("点击 + 新建分组，同一密码可归入多个分组")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                        } else {
+                            ForEach(store.allGroups, id: \.self) { g in
+                                sidebarRow(
+                                    title: g,
+                                    systemImage: "tag.fill",
+                                    tint: .accentColor,
+                                    count: store.groupItemsCount(g),
+                                    isSelected: store.destination == .group(g)
+                                ) {
+                                    store.destination = .group(g)
+                                }
+                                .contextMenu {
+                                    Button("删除分组「\(g)」", role: .destructive) {
+                                        Task { await store.removeGroup(g) }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -396,14 +492,7 @@ public struct MainWorkspaceView: View {
                     }
                     .help("邮件接收过滤规则")
 
-                    Button {
-                        store.showImapSheet = true
-                    } label: {
-                        Image(systemName: "gearshape")
-                            .font(.system(size: 15.5, weight: .regular))
-                            .foregroundStyle(store.imapConfig.status == "error" ? Color.red : .primary)
-                    }
-                    .help("配置邮箱 IMAP 收信")
+                    plusToolbarMenu
                 } else {
                     Menu {
                         Picker("排序方式", selection: $store.sortField) {
@@ -428,14 +517,7 @@ public struct MainWorkspaceView: View {
                     .menuIndicator(.hidden)
                     .help("排序方式")
 
-                    Button {
-                        openNewEditor(defaultCategoryForCurrentDestination)
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 15.5, weight: .regular))
-                            .foregroundStyle(.primary)
-                    }
-                    .help("新建密码")
+                    plusToolbarMenu
                 }
             }
         }
@@ -471,6 +553,7 @@ public struct MainWorkspaceView: View {
                                 item: item,
                                 totp: store.totpSnapshot[item.id],
                                 securityWarning: store.securityIssues[item.id],
+                                allGroups: store.allGroups,
                                 isSelected: isSelected,
                                 showDivider: idx + 1 < filtered.count && !isSelected && !nextSelected,
                                 onSelect: {
@@ -478,6 +561,9 @@ public struct MainWorkspaceView: View {
                                 },
                                 onToggleFavorite: {
                                     Task { await store.toggleFavorite(item) }
+                                },
+                                onToggleGroup: { group in
+                                    Task { await store.toggleItemGroup(item, group: group) }
                                 },
                                 onEdit: {
                                     store.editingItem = item
@@ -517,24 +603,18 @@ public struct MainWorkspaceView: View {
                         Button {
                             Task { await store.runEmailCronAndAIExtract(forceLatest: true) }
                         } label: {
-                            Text(store.isRefreshingEmails ? "正在刷新..." : "刷新收件列表")
+                            Text(store.isRefreshingEmails ? "正在刷新..." : "刷新列表")
+                                .fixedSize(horizontal: true, vertical: false)
                                 .padding(.horizontal, 6)
                         }
                         .buttonStyle(ApplePillButtonStyle(isProminent: true, height: 32, cornerRadius: 8))
                         .disabled(store.isRefreshingEmails)
 
                         Button {
-                            store.showEmailFilterSheet = true
-                        } label: {
-                            Text("过滤规则")
-                                .padding(.horizontal, 6)
-                        }
-                        .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 32, cornerRadius: 8))
-
-                        Button {
                             store.showImapSheet = true
                         } label: {
-                            Text("配置 IMAP 收信")
+                            Text("添加 IMAP 邮箱")
+                                .fixedSize(horizontal: true, vertical: false)
                                 .padding(.horizontal, 6)
                         }
                         .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 32, cornerRadius: 8))
@@ -617,11 +697,87 @@ public struct MainWorkspaceView: View {
         }
     }
 
+    private var plusToolbarMenu: some View {
+        Menu {
+            Button {
+                openNewEditor(.login)
+            } label: {
+                Label("网站登录", systemImage: "globe")
+            }
+
+            Button {
+                openNewEditor(.apiCredential)
+            } label: {
+                Label("API 密钥", systemImage: "chevron.left.forwardslash.chevron.right")
+            }
+
+            Button {
+                openNewEditor(.sshKey)
+            } label: {
+                Label("SSH 密钥", systemImage: "terminal.fill")
+            }
+
+            Button {
+                openNewEditor(.card)
+            } label: {
+                Label("银行卡", systemImage: "creditcard.fill")
+            }
+
+            Button {
+                openNewEditor(.identity)
+            } label: {
+                Label("身份与地址", systemImage: "person.text.rectangle.fill")
+            }
+
+            Button {
+                openNewEditor(.secureNote)
+            } label: {
+                Label("安全笔记", systemImage: "note.text")
+            }
+
+            Divider()
+
+            Button {
+                store.showImapSheet = true
+            } label: {
+                Label("添加 / 配置 IMAP 邮箱…", systemImage: "tray.full.fill")
+            }
+
+            Button {
+                store.showEmailFilterSheet = true
+            } label: {
+                Label("邮件过滤规则…", systemImage: "line.3.horizontal.decrease.circle")
+            }
+
+            Divider()
+
+            Button {
+                showNewVaultPopover = true
+            } label: {
+                Label("新建密码库…", systemImage: "folder.badge.plus")
+            }
+
+            Button {
+                showNewGroupPopover = true
+            } label: {
+                Label("新建分组…", systemImage: "tag")
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 15.5, weight: .regular))
+                .foregroundStyle(.primary)
+        }
+        .menuIndicator(.hidden)
+        .help("新建密钥 / 添加邮箱 / 分组")
+    }
+
     private var defaultCategoryForCurrentDestination: ItemCategory {
         switch store.destination {
+        case .apiCredentials: return .apiCredential
+        case .sshKeys: return .sshKey
         case .card: return .card
         case .identity: return .identity
-        case .secretsAndNotes: return .secureNote
+        case .secureNotes: return .secureNote
         default: return .login
         }
     }
@@ -663,10 +819,12 @@ private struct CredentialRowView: View {
     let item: VaultItemPayload
     let totp: TotpResult?
     let securityWarning: String?
+    let allGroups: [String]
     let isSelected: Bool
     let showDivider: Bool
     let onSelect: () -> Void
     let onToggleFavorite: () -> Void
+    let onToggleGroup: (String) -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
     let onCopyUsername: (() -> Void)?
@@ -777,6 +935,22 @@ private struct CredentialRowView: View {
             }
             Divider()
             Button(item.favorite ? "取消收藏" : "收藏", action: onToggleFavorite)
+            if !allGroups.isEmpty {
+                Menu("所属分组（多选）") {
+                    ForEach(allGroups, id: \.self) { g in
+                        let inGroup = item.tags.contains { $0.caseInsensitiveCompare(g) == .orderedSame }
+                        Button {
+                            onToggleGroup(g)
+                        } label: {
+                            if inGroup {
+                                Label(g, systemImage: "checkmark")
+                            } else {
+                                Text(g)
+                            }
+                        }
+                    }
+                }
+            }
             Button("编辑…", action: onEdit)
             Divider()
             Button("删除…", role: .destructive, action: onDelete)

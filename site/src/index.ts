@@ -34,6 +34,19 @@ export default {
       });
     }
 
+    if (url.pathname === '/llms.txt' || url.pathname === '/SKILL.md' || url.pathname === '/skill.md') {
+      const assetUrl = new URL('/SKILL.md', url.origin);
+      const res = await env.ASSETS.fetch(new Request(assetUrl.toString(), request));
+      const body = await res.arrayBuffer();
+      return new Response(body, {
+        status: res.status,
+        headers: {
+          'Content-Type': 'text/markdown; charset=utf-8',
+          'Cache-Control': 'public, max-age=300',
+        },
+      });
+    }
+
     if (url.pathname === '/api/auth/params' || url.pathname.startsWith('/api/')) {
       return Response.json(
         {

@@ -40,7 +40,8 @@ pub fn parse_secret_ref(uri: &str) -> Result<ParsedSecretRef, String> {
     let trimmed = uri.trim();
     let rest = trimmed
         .strip_prefix("np://")
-        .ok_or_else(|| format!("Invalid secret reference (must start with np://): {uri}"))?;
+        .or_else(|| trimmed.strip_prefix("op://"))
+        .ok_or_else(|| format!("Invalid secret reference (must start with np:// or op://): {uri}"))?;
 
     let (path_part, query_part) = match rest.split_once('?') {
         Some((p, q)) => (p, q),
@@ -52,9 +53,11 @@ pub fn parse_secret_ref(uri: &str) -> Result<ParsedSecretRef, String> {
         .map(|s| percent_decode(s).trim().to_string())
         .collect();
 
-    if segments.len() < 3 || segments[0].is_empty() || segments[1].is_empty() || segments[2].is_empty() {
+    if segments.len() < 3
+        || segments.iter().any(|s| s.is_empty())
+    {
         return Err(format!(
-            "Invalid secret reference \"{uri}\". Expected np://<vault>/<item>/<field>"
+            "Invalid secret reference \"{uri}\". Expected np://<vault>/<item>/<field> (or op://...)"
         ));
     }
 
@@ -69,11 +72,19 @@ pub fn parse_secret_ref(uri: &str) -> Result<ParsedSecretRef, String> {
         }
     }
 
+    let field = if segments.len() >= 4 {
+        let section = segments[2..segments.len() - 1].join("/");
+        params.entry("section".to_string()).or_insert(section);
+        segments.last().cloned().unwrap_or_default()
+    } else {
+        segments[2].clone()
+    };
+
     Ok(ParsedSecretRef {
         raw: trimmed.to_string(),
         vault: segments[0].clone(),
         item: segments[1].clone(),
-        field: segments[2..].join("/"),
+        field,
         params,
     })
 }
@@ -131,7 +142,8 @@ pub fn resolve_item_field(item: &VaultItemPayload, field_name: &str) -> Option<S
                     return id_val;
                 }
             }
-            item.custom_fields
+            if let Some(cf) = item
+                .custom_fields
                 .iter()
                 .find(|cf| {
                     let lbl = cf.label.trim().to_lowercase();
@@ -143,6 +155,15 @@ pub fn resolve_item_field(item: &VaultItemPayload, field_name: &str) -> Option<S
                     lbl == key || id == key || norm_lbl == norm_key
                 })
                 .map(|cf| cf.value.clone())
+            {
+                return Some(cf);
+            }
+            match norm_key.as_str() {
+                "credential" | "apikey" | "token" | "privatekey" | "sshkey" => {
+                    item.password.clone()
+                }
+                _ => None,
+            }
         }
     }
 }
@@ -150,7 +171,7 @@ pub fn resolve_item_field(item: &VaultItemPayload, field_name: &str) -> Option<S
 pub fn find_secret_refs(template: &str) -> Vec<String> {
     static REF_RE: OnceLock<Regex> = OnceLock::new();
     let re = REF_RE
-        .get_or_init(|| Regex::new(r#"\{\{\s*(np://[^\s{}]+)\s*\}\}|(np://[^\s"'`<>|;]+)"#).unwrap());
+        .get_or_init(|| Regex::new(r#"\{\{\s*((?:np|op)://[^\s{}]+)\s*\}\}|((?:np|op)://[^\s"'`<>|;]+)"#).unwrap());
     let mut out = Vec::new();
     for cap in re.captures_iter(template) {
         if let Some(m) = cap.get(1).or_else(|| cap.get(2)) {
@@ -166,7 +187,7 @@ pub fn find_secret_refs(template: &str) -> Vec<String> {
 pub fn replace_secret_refs(template: &str, resolved: &HashMap<String, String>) -> String {
     static REF_RE: OnceLock<Regex> = OnceLock::new();
     let re = REF_RE
-        .get_or_init(|| Regex::new(r#"\{\{\s*(np://[^\s{}]+)\s*\}\}|(np://[^\s"'`<>|;]+)"#).unwrap());
+        .get_or_init(|| Regex::new(r#"\{\{\s*((?:np|op)://[^\s{}]+)\s*\}\}|((?:np|op)://[^\s"'`<>|;]+)"#).unwrap());
     re.replace_all(template, |caps: &regex::Captures| {
         let key = caps
             .get(1)

@@ -8,7 +8,7 @@ export default defineConfig({
     workersDev: true,
     assets: {
       notFoundHandling: "single-page-application",
-      runWorkerFirst: ["/api/*", "/install.sh"],
+      runWorkerFirst: ["/api/*", "/install.sh", "/llms.txt", "/SKILL.md", "/skill.md"],
     },
     env: {
       ASSETS: bindings.assets(),

@@ -62,7 +62,7 @@ public struct ItemDetailView: View {
                     urlsSection
                 }
 
-                if !item.customFields.isEmpty {
+                if !displayCustomFields.isEmpty {
                     customFieldsSection
                 }
 
@@ -76,6 +76,8 @@ public struct ItemDetailView: View {
                             .padding(14)
                     }
                 }
+
+                cliReferenceSection
 
                 HStack {
                     Spacer()
@@ -125,6 +127,27 @@ public struct ItemDetailView: View {
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
 
+            if !item.tags.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(item.tags, id: \.self) { tag in
+                        Button {
+                            store.destination = .group(tag)
+                        } label: {
+                            Text("#\(tag)")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 2.5)
+                                .background(
+                                    Capsule()
+                                        .fill(Color.primary.opacity(0.06))
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
             HStack(spacing: 10) {
                 Button {
                     store.editingItem = item
@@ -142,6 +165,27 @@ public struct ItemDetailView: View {
                         .foregroundStyle(item.favorite ? .orange : .primary)
                 }
                 .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 28, cornerRadius: 7))
+
+                if !store.allGroups.isEmpty {
+                    Menu {
+                        ForEach(store.allGroups, id: \.self) { g in
+                            let inGroup = item.tags.contains { $0.caseInsensitiveCompare(g) == .orderedSame }
+                            Button {
+                                Task { await store.toggleItemGroup(item, group: g) }
+                            } label: {
+                                if inGroup {
+                                    Label(g, systemImage: "checkmark")
+                                } else {
+                                    Text(g)
+                                }
+                            }
+                        }
+                    } label: {
+                        Text("分组")
+                    }
+                    .menuIndicator(.hidden)
+                    .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 28, cornerRadius: 7))
+                }
             }
             .padding(.top, 4)
         }
@@ -194,18 +238,67 @@ public struct ItemDetailView: View {
         )
     }
 
+    private var sshPublicKeyValue: String? {
+        item.customFields.first(where: { $0.label.caseInsensitiveCompare("public_key") == .orderedSame })?.value.nilIfBlank
+    }
+
+    private var sshPassphraseValue: String? {
+        item.customFields.first(where: { $0.label.caseInsensitiveCompare("passphrase") == .orderedSame })?.value.nilIfBlank
+    }
+
+    private var displayCustomFields: [CustomField] {
+        guard item.category == .sshKey else { return item.customFields }
+        return item.customFields.filter {
+            $0.label.caseInsensitiveCompare("public_key") != .orderedSame &&
+            $0.label.caseInsensitiveCompare("passphrase") != .orderedSame
+        }
+    }
+
     @ViewBuilder
     private var loginAndSecretsSection: some View {
         let hasMainFields =
             !(item.username?.nilIfBlank ?? "").isEmpty ||
             !(item.password ?? "").isEmpty ||
-            !(item.emailAlias?.nilIfBlank ?? "").isEmpty
+            !(item.emailAlias?.nilIfBlank ?? "").isEmpty ||
+            (item.category == .sshKey && (sshPublicKeyValue != nil || sshPassphraseValue != nil))
 
         if hasMainFields {
-            InsetGroupCard(header: "凭据") {
+            let headerText: String = {
+                switch item.category {
+                case .apiCredential: return "API 密钥凭据"
+                case .sshKey: return "SSH 密钥对"
+                case .secureNote: return "安全密钥"
+                default: return "凭据"
+                }
+            }()
+            let userLabel = item.category == .apiCredential ? "凭证标识" : "用户名"
+            let secretLabel: String = {
+                switch item.category {
+                case .apiCredential: return "API Key"
+                case .sshKey: return "私钥 (Private Key)"
+                case .secureNote: return "密钥内容"
+                default: return "密码"
+                }
+            }()
+
+            InsetGroupCard(header: headerText) {
+                if item.category == .sshKey, let pub = sshPublicKeyValue {
+                    CopyableFieldRow(
+                        label: "公钥 (Public Key)",
+                        value: pub,
+                        isSecret: false,
+                        isMonospaced: true,
+                        revealedByDefault: true
+                    ) {
+                        store.copySecret(pub, label: "SSH 公钥", autoClear: false)
+                    }
+                    if !(item.password ?? "").isEmpty || sshPassphraseValue != nil {
+                        rowDivider
+                    }
+                }
                 if let user = item.username?.nilIfBlank {
-                    CopyableFieldRow(label: "用户名", value: user) {
-                        store.copySecret(user, label: "用户名", autoClear: false)
+                    CopyableFieldRow(label: userLabel, value: user, isMonospaced: item.category == .apiCredential) {
+                        store.copySecret(user, label: userLabel, autoClear: false)
                     }
                 }
                 if let pw = item.password, !pw.isEmpty {
@@ -213,13 +306,25 @@ public struct ItemDetailView: View {
                         rowDivider
                     }
                     CopyableFieldRow(
-                        label: "密码",
+                        label: secretLabel,
                         value: pw,
                         isSecret: true,
                         isMonospaced: true,
                         revealedByDefault: false
                     ) {
-                        store.copySecret(pw, label: "密码")
+                        store.copySecret(pw, label: secretLabel)
+                    }
+                }
+                if item.category == .sshKey, let pass = sshPassphraseValue {
+                    rowDivider
+                    CopyableFieldRow(
+                        label: "私钥口令",
+                        value: pass,
+                        isSecret: true,
+                        isMonospaced: true,
+                        revealedByDefault: false
+                    ) {
+                        store.copySecret(pass, label: "私钥口令")
                     }
                 }
                 if let alias = item.emailAlias?.nilIfBlank {
@@ -384,7 +489,7 @@ public struct ItemDetailView: View {
 
     private var customFieldsSection: some View {
         InsetGroupCard(header: "自定义字段") {
-            ForEach(Array(item.customFields.enumerated()), id: \.element.id) { idx, cf in
+            ForEach(Array(displayCustomFields.enumerated()), id: \.element.id) { idx, cf in
                 if idx > 0 { rowDivider }
                 CopyableFieldRow(
                     label: cf.label,
@@ -395,6 +500,39 @@ public struct ItemDetailView: View {
                 ) {
                     store.copySecret(cf.value, label: cf.label, autoClear: cf.fieldType == "concealed")
                 }
+            }
+        }
+    }
+
+    private var primaryCliRef: String {
+        let vName = store.vaultName(for: item.vaultId)
+        let field: String = {
+            switch item.category {
+            case .apiCredential: return "api_key"
+            case .sshKey: return "private_key"
+            case .secureNote: return (item.password?.isEmpty == false) ? "password" : "notes"
+            case .card: return "number"
+            case .identity: return "email"
+            case .login:
+                if let cf = item.customFields.first?.label.nilIfBlank, (item.password ?? "").isEmpty {
+                    return cf
+                }
+                return "password"
+            }
+        }()
+        return "np://\(vName)/\(item.title)/\(field)"
+    }
+
+    private var cliReferenceSection: some View {
+        InsetGroupCard(header: "命令行 / Agent 引用（同时支持 np:// 与 op://）") {
+            CopyableFieldRow(
+                label: "Secret Ref",
+                value: primaryCliRef,
+                isSecret: false,
+                isMonospaced: true,
+                revealedByDefault: true
+            ) {
+                store.copySecret(primaryCliRef, label: "CLI 引用地址", autoClear: false)
             }
         }
     }

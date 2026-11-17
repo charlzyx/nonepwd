@@ -26,7 +26,7 @@ export async function injectSecretRefs(
   template: string,
   resolver: (ref: string) => Promise<string>
 ): Promise<string> {
-  const pattern = /\{\{\s*(np:\/\/[^\s{}]+)\s*\}\}|(np:\/\/[^\s"'`<>|;]+)/g;
+  const pattern = /\{\{\s*((?:np|op):\/\/[^\s{}]+)\s*\}\}|((?:np|op):\/\/[^\s"'`<>|;]+)/g;
   const matches = Array.from(template.matchAll(pattern));
   if (matches.length === 0) return template;
 

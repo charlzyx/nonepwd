@@ -25,4 +25,11 @@ for (const filename of ['nonepwd-extension.zip', 'np-darwin-arm64', 'np-linux-x8
   }
 }
 
+// Publish canonical single-source Agent docs at both /SKILL.md and /llms.txt
+const skillSrc = path.join(rootDir, 'SKILL.md');
+if (fs.existsSync(skillSrc)) {
+  fs.copyFileSync(skillSrc, path.join(sitePublicDir, 'SKILL.md'));
+  fs.copyFileSync(skillSrc, path.join(sitePublicDir, 'llms.txt'));
+}
+
 console.log(`Built Cloudflare site static assets in ${sitePublicDir}`);

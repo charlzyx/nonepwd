@@ -418,10 +418,36 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
 
           {/* Developer CLI Showcase */}
           <section id="cli" className="border-t border-border/70 px-5 py-16 md:px-10 md:py-20">
-            <div className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground/80 uppercase">
-              Developer Workflow
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground/80 uppercase">
+                  Developer &amp; Agent Workflow
+                </div>
+                <h2 className="mt-3 text-2xl font-semibold tracking-tight">
+                  原生 Rust `np` 命令行（兼容 1Password `op` 语法）
+                </h2>
+              </div>
+              <div className="flex items-center gap-2 font-mono text-xs">
+                <a
+                  href="/llms.txt"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <span>/llms.txt</span>
+                  <ExternalLink className="size-3" />
+                </a>
+                <a
+                  href="/SKILL.md"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <span>/SKILL.md</span>
+                  <ExternalLink className="size-3" />
+                </a>
+              </div>
             </div>
-            <h2 className="mt-3 text-2xl font-semibold tracking-tight">原生 Rust `np` 命令行</h2>
 
             <div className="mt-8 grid grid-cols-1 gap-px border border-border/70 bg-border/70 lg:grid-cols-12">
               <div className="space-y-2 bg-background p-5 lg:col-span-5">
@@ -722,6 +748,12 @@ pnpm run db:migrate:remote && pnpm run deploy`}
             </button>
             <a href="/install.sh" className="hover:text-foreground">
               /install.sh
+            </a>
+            <a href="/llms.txt" className="hover:text-foreground">
+              /llms.txt
+            </a>
+            <a href="/SKILL.md" className="hover:text-foreground">
+              /SKILL.md
             </a>
           </div>
         </footer>

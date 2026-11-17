@@ -11,7 +11,7 @@ use std::process::{exit, Command};
 
 use nonepwd_core::encoding::to_base64_url;
 use nonepwd_core::random::random_bytes;
-use nonepwd_core::secret_ref::{find_secret_refs, parse_dot_env, replace_secret_refs};
+use nonepwd_core::secret_ref::{find_secret_refs, parse_dot_env, replace_secret_refs, resolve_item_field};
 use nonepwd_core::totp_import::{detect_import_format, ImportFormat};
 use nonepwd_core::types::ItemCategory;
 
@@ -29,7 +29,17 @@ struct ParsedArgs {
 fn is_boolean_flag(name: &str) -> bool {
     matches!(
         name,
-        "json" | "no-dedupe" | "generate" | "auto-alias" | "help" | "h" | "version" | "connect"
+        "json"
+            | "no-dedupe"
+            | "generate"
+            | "auto-alias"
+            | "help"
+            | "h"
+            | "version"
+            | "connect"
+            | "no-newline"
+            | "otp"
+            | "reveal"
     )
 }
 
@@ -66,8 +76,14 @@ fn parse_args(argv: &[String]) -> ParsedArgs {
             } else {
                 booleans.insert(body.to_string());
             }
-        } else if (arg == "-i" || arg == "-o") && i + 1 < main_args.len() {
-            let key = if arg == "-i" { "in" } else { "out" };
+        } else if arg == "-n" {
+            booleans.insert("no-newline".to_string());
+        } else if (arg == "-i" || arg == "-o" || arg == "-f") && i + 1 < main_args.len() {
+            let key = match arg.as_str() {
+                "-i" => "in",
+                "-o" => "out",
+                _ => "format",
+            };
             flags
                 .entry(key.to_string())
                 .or_default()
@@ -96,14 +112,115 @@ fn has_flag(parsed: &ParsedArgs, name: &str) -> bool {
 }
 
 fn parse_category(raw: Option<&str>) -> ItemCategory {
-    match raw.unwrap_or("login") {
-        "api_credential" => ItemCategory::ApiCredential,
-        "secure_note" => ItemCategory::SecureNote,
-        "ssh_key" => ItemCategory::SshKey,
-        "card" => ItemCategory::Card,
+    let norm: String = raw
+        .unwrap_or("login")
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '_' && *c != '-')
+        .collect();
+    match norm.as_str() {
+        "apicredential" | "apikey" | "api" => ItemCategory::ApiCredential,
+        "securenote" | "note" => ItemCategory::SecureNote,
+        "sshkey" | "ssh" => ItemCategory::SshKey,
+        "card" | "creditcard" => ItemCategory::Card,
         "identity" => ItemCategory::Identity,
         _ => ItemCategory::Login,
     }
+}
+
+fn parse_tags_flag(parsed: &ParsedArgs) -> Option<Vec<String>> {
+    let raw_list = parsed.flags.get("tags")?;
+    let mut tags = Vec::new();
+    for entry in raw_list {
+        for part in entry.split(',') {
+            let t = part.trim();
+            if !t.is_empty() && !tags.iter().any(|x: &String| x.eq_ignore_ascii_case(t)) {
+                tags.push(t.to_string());
+            }
+        }
+    }
+    Some(tags)
+}
+
+#[derive(Default)]
+struct FieldOverrides {
+    urls: Vec<String>,
+    username: Option<String>,
+    password: Option<String>,
+    totp: Option<String>,
+    notes: Option<String>,
+    custom_fields: Vec<(String, String, String)>,
+}
+
+fn collect_field_overrides(parsed: &ParsedArgs, positional_start: usize) -> Result<FieldOverrides, String> {
+    let mut out = FieldOverrides::default();
+    let mut raw_assignments: Vec<String> = Vec::new();
+
+    if let Some(fields) = parsed.flags.get("field") {
+        raw_assignments.extend(fields.iter().cloned());
+    }
+    for arg in parsed.positionals.iter().skip(positional_start) {
+        if arg.contains('=') {
+            raw_assignments.push(arg.clone());
+        }
+    }
+
+    for expr in raw_assignments {
+        let (raw_k, raw_v) = expr
+            .split_once('=')
+            .ok_or_else(|| format!("Invalid field assignment \"{expr}\", expected key=value"))?;
+        let raw_k = raw_k.trim();
+        let val = raw_v.to_string();
+
+        let (label, explicit_type) = if let Some(idx) = raw_k.rfind('[') {
+            if raw_k.ends_with(']') {
+                let kind = &raw_k[idx + 1..raw_k.len() - 1];
+                let ft = if kind.eq_ignore_ascii_case("text") || kind.eq_ignore_ascii_case("url") {
+                    "text"
+                } else {
+                    "concealed"
+                };
+                (raw_k[..idx].trim(), Some(ft))
+            } else {
+                (raw_k, None)
+            }
+        } else {
+            (raw_k, None)
+        };
+
+        let norm: String = label
+            .to_lowercase()
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '_' && *c != '-')
+            .collect();
+
+        match norm.as_str() {
+            "username" | "user" if explicit_type.is_none() => out.username = Some(val),
+            "password" | "pass" if explicit_type.is_none() => out.password = Some(val),
+            "totp" | "otp" if explicit_type.is_none() => out.totp = Some(val),
+            "notesplain" | "notes" | "note" if explicit_type.is_none() => out.notes = Some(val),
+            "website" | "url" if explicit_type.is_none() => out.urls.push(val),
+            _ => {
+                if out.password.is_none()
+                    && matches!(norm.as_str(), "credential" | "apikey" | "token" | "privatekey")
+                {
+                    out.password = Some(val.clone());
+                }
+                let field_type = explicit_type.unwrap_or_else(|| {
+                    if matches!(norm.as_str(), "publickey" | "host" | "endpoint" | "region") {
+                        "text"
+                    } else {
+                        "concealed"
+                    }
+                });
+                out.custom_fields
+                    .push((label.to_string(), val, field_type.to_string()));
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 fn inject_template(client: &mut NonePwdClient, template: &str) -> Result<String, String> {
@@ -192,29 +309,30 @@ fn run_import_command(
     Ok(0)
 }
 
-const HELP_TEXT: &str = "nonepwd Native CLI (np) - Cross-platform (macOS/Linux) zero-trust secrets, TOTP & Email OTP (0 > 1)
+const HELP_TEXT: &str = "nonepwd Native CLI (np) - 1Password (`op`)-compatible zero-knowledge secrets, API/SSH keys, TOTP & Email OTP
 
 Usage:
   np setup --server <url> --email <email> --password <pass> [--alias-domain <dom>] [--json]
-  np signin --server <url> --secret-key <NP3-...> --password <pass>
+  np signin [--server <url>] [--secret-key <NP3-...>] [--password <pass>]
   np lock | np signout | np whoami | np version
-  np vault list [--json] | np vault create <name> [--description <d>]
-  np item list [--vault <v>] [--json]
-  np item get <item> [--vault <v>] [--json]
-  np item create --vault <v> --title <t> [--category <c>] [--url <u>] [--username <u>]
-                 [--password <p> | --generate] [--totp <secret>] [--auto-alias]
-                 [--field key=value ...] [--json]
-  np import <file> [--format csv|totp] [--vault Personal] [--no-dedupe] [--json]
+  np vault list [--format json] | np vault get <vault> [--format json] | np vault create <name> [--description <d>]
+  np item list [--vault <v>] [--tags <a,b>] [--categories <c>] [--format json]
+  np item get <item> [--vault <v>] [--fields f1,f2 | --otp] [--format json]
+  np item create [--vault <v>] [--title <t>] [--category login|api_credential|ssh_key|card|identity|secure_note]
+                 [--url <u>] [--username <u>] [--password <p> | --generate] [--totp <secret>] [--auto-alias]
+                 [--tags <a,b>] [--field key=value ...] [key[concealed]=value ...] [--format json]
+  np item edit <item> [--vault <v>] [--title <t>] [--username <u>] [--password <p> | --generate]
+               [--tags <a,b>] [--field key=value ...] [key=value ...] [--format json]
   np item delete <item> [--vault <v>]
-  np read <np://vault/item/field>
-  np otp <item> [--vault <v>] [--json]
-  np run [--env-file <path>] -- <command> [args...]
-  np inject [-i <inputFile>] [-o <outputFile>]
+  np import <file> [--format csv|totp] [--vault Personal] [--no-dedupe] [--json]
+  np read <np://vault/item/field | op://vault/item/field> [-n|--no-newline] [-o|--out-file <path>]
+  np otp <item> [--vault <v>] [--format json]
+  np run [--env-file <path>] -- <command> [args...]        (resolves both np:// and op:// references)
+  np inject [-i <inputFile>] [-o <outputFile>]             (resolves both {{ np://... }} and {{ op://... }})
   np alias list [--json] | np alias create --for <domain> [--json] | np alias toggle <alias>
   np mail list [--json] | np mail otp [--domain <d>] [--alias <a>] [--wait <sec>] [--json]
   np service-account list | create <name> --vault <v1> [--vault <v2>] [--json] | revoke <id>
-  np server [--host 127.0.0.1] [--port 8787] [--data-dir ~/.nonepwd/data] [--web-dist DIR]
-            (native host builds; cross-compiled static musl client binaries omit embedded server)
+  np server [--host 127.0.0.1] [--port 8787] [--data-dir ~/.nonepwd/data]
   np serve --connect [--host 127.0.0.1] [--port 8788] [--token <tok>]";
 
 fn run() -> Result<i32, String> {
@@ -237,7 +355,9 @@ fn run() -> Result<i32, String> {
         return Ok(0);
     }
 
-    let as_json = has_flag(&parsed, "json");
+    let as_json = has_flag(&parsed, "json")
+        || (cmd != "import"
+            && first_flag(&parsed, "format").is_some_and(|f| f.eq_ignore_ascii_case("json")));
     let config_dir = first_flag(&parsed, "config-dir").map(str::to_string);
     let mut client = NonePwdClient::new(
         config_dir.clone(),
@@ -351,6 +471,30 @@ fn run() -> Result<i32, String> {
                     }
                     Ok(0)
                 }
+                "get" => {
+                    let target = parsed
+                        .positionals
+                        .get(2)
+                        .map(String::as_str)
+                        .or_else(|| first_flag(&parsed, "vault"))
+                        .ok_or("vault get requires <vault>")?;
+                    client.sync()?;
+                    let v = client.find_vault(target)?;
+                    if as_json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "id": v.id,
+                                "name": v.metadata.name,
+                                "description": v.metadata.description.clone().unwrap_or_default(),
+                            }))
+                            .unwrap()
+                        );
+                    } else {
+                        println!("{}\t{}", v.id, v.metadata.name);
+                    }
+                    Ok(0)
+                }
                 "create" => {
                     let name = parsed
                         .positionals
@@ -382,15 +526,40 @@ fn run() -> Result<i32, String> {
             match sub {
                 "list" => {
                     client.sync()?;
-                    let vault_filter = first_flag(&parsed, "vault");
+                    let vault_filter = first_flag(&parsed, "vault")
+                        .or_else(|| first_flag(&parsed, "vaults"));
                     let vault_id = match vault_filter {
                         Some(v) => Some(client.find_vault(v)?.id.clone()),
                         None => None,
                     };
+                    let tag_filters = parse_tags_flag(&parsed);
+                    let cat_filters: Option<Vec<ItemCategory>> = parsed
+                        .flags
+                        .get("categories")
+                        .or_else(|| parsed.flags.get("category"))
+                        .map(|list| {
+                            list.iter()
+                                .flat_map(|s| s.split(','))
+                                .map(|c| parse_category(Some(c)))
+                                .collect()
+                        });
                     let filtered: Vec<_> = client
                         .items
                         .iter()
                         .filter(|i| vault_id.as_ref().map(|vid| &i.vault_id == vid).unwrap_or(true))
+                        .filter(|i| {
+                            tag_filters.as_ref().map_or(true, |tf| {
+                                tf.is_empty()
+                                    || tf.iter().any(|wanted| {
+                                        i.payload.tags.iter().any(|t| t.eq_ignore_ascii_case(wanted))
+                                    })
+                            })
+                        })
+                        .filter(|i| {
+                            cat_filters
+                                .as_ref()
+                                .map_or(true, |cf| cf.is_empty() || cf.contains(&i.payload.category))
+                        })
                         .collect();
                     if as_json {
                         let arr: Vec<_> = filtered
@@ -404,12 +573,18 @@ fn run() -> Result<i32, String> {
                         println!("{}", serde_json::to_string_pretty(&arr).unwrap());
                     } else {
                         for i in filtered {
+                            let tags_disp = if i.payload.tags.is_empty() {
+                                String::new()
+                            } else {
+                                format!("\t#{}", i.payload.tags.join(","))
+                            };
                             println!(
-                                "{}\t[{}]\t{}\t{}",
+                                "{}\t[{}]\t{}\t{}{}",
                                 i.id,
                                 i.vault_name,
                                 i.payload.title,
-                                i.payload.username.as_deref().unwrap_or("")
+                                i.payload.username.as_deref().unwrap_or(""),
+                                tags_disp
                             );
                         }
                     }
@@ -420,40 +595,89 @@ fn run() -> Result<i32, String> {
                         .positionals
                         .get(2)
                         .ok_or("item get requires <item>")?;
+                    let vault_opt = first_flag(&parsed, "vault");
+                    if has_flag(&parsed, "otp") {
+                        let totp = client.get_totp(item_arg, vault_opt)?;
+                        if as_json {
+                            println!("{}", serde_json::to_string(&totp).unwrap());
+                        } else {
+                            println!("{}", totp.code);
+                        }
+                        return Ok(0);
+                    }
                     client.sync()?;
-                    let it = client.find_item(item_arg, first_flag(&parsed, "vault"))?;
-                    let mut v = serde_json::to_value(&it.payload).unwrap();
-                    v["vault"] = serde_json::Value::String(it.vault_name.clone());
-                    println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                    let it = client.find_item(item_arg, vault_opt)?;
+                    if let Some(fields_raw) = first_flag(&parsed, "fields") {
+                        let req_fields: Vec<&str> = fields_raw
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        if req_fields.len() == 1 && !as_json {
+                            let val = resolve_item_field(&it.payload, req_fields[0])
+                                .ok_or_else(|| {
+                                    format!(
+                                        "Field \"{}\" not found on item \"{}\"",
+                                        req_fields[0], it.payload.title
+                                    )
+                                })?;
+                            println!("{val}");
+                        } else {
+                            let mut obj = serde_json::Map::new();
+                            for f in req_fields {
+                                let val = resolve_item_field(&it.payload, f);
+                                obj.insert(
+                                    f.to_string(),
+                                    val.map(serde_json::Value::String)
+                                        .unwrap_or(serde_json::Value::Null),
+                                );
+                            }
+                            println!("{}", serde_json::to_string_pretty(&obj).unwrap());
+                        }
+                    } else {
+                        let mut v = serde_json::to_value(&it.payload).unwrap();
+                        v["vault"] = serde_json::Value::String(it.vault_name.clone());
+                        println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                    }
                     Ok(0)
                 }
                 "create" => {
                     let vault = first_flag(&parsed, "vault").unwrap_or("Personal");
                     let title = first_flag(&parsed, "title")
-                        .or_else(|| parsed.positionals.get(2).map(String::as_str))
+                        .or_else(|| {
+                            parsed
+                                .positionals
+                                .get(2)
+                                .filter(|s| !s.contains('='))
+                                .map(String::as_str)
+                        })
                         .ok_or("item create requires --title <title>")?;
-                    let mut custom_fields = Vec::new();
-                    if let Some(fields) = parsed.flags.get("field") {
-                        for expr in fields {
-                            let (k, v) = expr
-                                .split_once('=')
-                                .ok_or_else(|| format!("Invalid --field \"{expr}\", expected label=value"))?;
-                            custom_fields.push((k.to_string(), v.to_string()));
-                        }
-                    }
+                    let overrides = collect_field_overrides(&parsed, 2)?;
+                    let mut urls = parsed.flags.get("url").cloned().unwrap_or_default();
+                    urls.extend(overrides.urls);
+                    let tags = parse_tags_flag(&parsed).unwrap_or_default();
                     let created = client.create_item(
                         vault,
                         title,
                         parse_category(first_flag(&parsed, "category")),
-                        parsed.flags.get("url").cloned().unwrap_or_default(),
-                        first_flag(&parsed, "username").map(str::to_string),
-                        first_flag(&parsed, "password").map(str::to_string),
+                        urls,
+                        first_flag(&parsed, "username")
+                            .map(str::to_string)
+                            .or(overrides.username),
+                        first_flag(&parsed, "password")
+                            .map(str::to_string)
+                            .or(overrides.password),
                         has_flag(&parsed, "generate"),
-                        first_flag(&parsed, "totp").map(str::to_string),
+                        first_flag(&parsed, "totp")
+                            .map(str::to_string)
+                            .or(overrides.totp),
                         first_flag(&parsed, "alias").map(str::to_string),
                         has_flag(&parsed, "auto-alias"),
-                        first_flag(&parsed, "notes").map(str::to_string),
-                        custom_fields,
+                        first_flag(&parsed, "notes")
+                            .map(str::to_string)
+                            .or(overrides.notes),
+                        tags,
+                        overrides.custom_fields,
                     )?;
                     if as_json {
                         let mut v = serde_json::to_value(&created.payload).unwrap();
@@ -463,6 +687,47 @@ fn run() -> Result<i32, String> {
                         println!(
                             "Created item \"{}\" in [{}] ({})",
                             created.payload.title, created.vault_name, created.id
+                        );
+                    }
+                    Ok(0)
+                }
+                "edit" => {
+                    let item_arg = parsed
+                        .positionals
+                        .get(2)
+                        .ok_or("item edit requires <item>")?;
+                    let overrides = collect_field_overrides(&parsed, 3)?;
+                    let mut urls = parsed.flags.get("url").cloned().unwrap_or_default();
+                    urls.extend(overrides.urls);
+                    let updated = client.edit_item(
+                        item_arg,
+                        first_flag(&parsed, "vault"),
+                        first_flag(&parsed, "title").map(str::to_string),
+                        urls,
+                        first_flag(&parsed, "username")
+                            .map(str::to_string)
+                            .or(overrides.username),
+                        first_flag(&parsed, "password")
+                            .map(str::to_string)
+                            .or(overrides.password),
+                        has_flag(&parsed, "generate"),
+                        first_flag(&parsed, "totp")
+                            .map(str::to_string)
+                            .or(overrides.totp),
+                        first_flag(&parsed, "notes")
+                            .map(str::to_string)
+                            .or(overrides.notes),
+                        parse_tags_flag(&parsed),
+                        overrides.custom_fields,
+                    )?;
+                    if as_json {
+                        let mut v = serde_json::to_value(&updated.payload).unwrap();
+                        v["vault"] = serde_json::Value::String(updated.vault_name);
+                        println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                    } else {
+                        println!(
+                            "Updated item \"{}\" in [{}] ({})",
+                            updated.payload.title, updated.vault_name, updated.id
                         );
                     }
                     Ok(0)
@@ -487,9 +752,22 @@ fn run() -> Result<i32, String> {
             let uri = parsed
                 .positionals
                 .get(1)
-                .ok_or("read requires <np://vault/item/field>")?;
+                .ok_or("read requires <np://vault/item/field | op://vault/item/field>")?;
             let val = client.resolve_secret_ref(uri)?;
-            println!("{val}");
+            if let Some(out_file) = first_flag(&parsed, "out").or_else(|| first_flag(&parsed, "out-file")) {
+                fs::write(out_file, &val)
+                    .map_err(|e| format!("Failed writing secret to {out_file}: {e}"))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(out_file, fs::Permissions::from_mode(0o600));
+                }
+                eprintln!("Wrote secret to {out_file}");
+            } else if has_flag(&parsed, "no-newline") {
+                print!("{val}");
+            } else {
+                println!("{val}");
+            }
             Ok(0)
         }
 
@@ -543,7 +821,7 @@ fn run() -> Result<i32, String> {
             }
             let keys_to_resolve: Vec<String> = child_env
                 .iter()
-                .filter(|(_, v)| v.contains("np://"))
+                .filter(|(_, v)| v.contains("np://") || v.contains("op://"))
                 .map(|(k, _)| k.clone())
                 .collect();
             for k in keys_to_resolve {

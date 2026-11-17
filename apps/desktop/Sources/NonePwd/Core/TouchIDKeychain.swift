@@ -41,6 +41,7 @@ public struct DesktopPrefs: Codable, Equatable, Sendable {
     public var unlockDurationRaw: String?
     public var emailCronMinutes: Int?
     public var aiAutoExtractEmail: Bool?
+    public var savedGroups: [String]?
 
     public init(
         serverURL: String = "http://127.0.0.1:8787",
@@ -53,7 +54,8 @@ public struct DesktopPrefs: Codable, Equatable, Sendable {
         aiModel: String? = nil,
         unlockDurationRaw: String? = "24h",
         emailCronMinutes: Int? = 1,
-        aiAutoExtractEmail: Bool? = true
+        aiAutoExtractEmail: Bool? = true,
+        savedGroups: [String]? = nil
     ) {
         self.serverURL = serverURL
         self.email = email
@@ -66,6 +68,7 @@ public struct DesktopPrefs: Codable, Equatable, Sendable {
         self.unlockDurationRaw = unlockDurationRaw
         self.emailCronMinutes = emailCronMinutes
         self.aiAutoExtractEmail = aiAutoExtractEmail
+        self.savedGroups = savedGroups
     }
 }
 

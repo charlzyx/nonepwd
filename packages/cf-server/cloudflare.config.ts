@@ -9,7 +9,7 @@ export default defineConfig({
     domains: ["vault.yourdomain.com"],
     assets: {
       notFoundHandling: "single-page-application",
-      runWorkerFirst: ["/api/*", "/install.sh", "/downloads/*"],
+      runWorkerFirst: ["/api/*", "/install.sh", "/downloads/*", "/llms.txt", "/SKILL.md", "/skill.md"],
     },
     // Optional Cron trigger if the Cloudflare account has free Cron slots available.
     // Even without a Cron trigger, `waitUntil(maybeAutoSnapshot)` snapshots D1->R2 every 6h on activity.

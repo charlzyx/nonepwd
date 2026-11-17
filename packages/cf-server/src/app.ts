@@ -1481,6 +1481,28 @@ exit 1
     });
   });
 
+  app.get('/llms.txt', async (c) => serveAgentGuide(c));
+  app.get('/SKILL.md', async (c) => serveAgentGuide(c));
+  app.get('/skill.md', async (c) => serveAgentGuide(c));
+
+  async function serveAgentGuide(c: Context<{ Bindings: CfServerEnv }>): Promise<Response> {
+    if (c.env.ASSETS) {
+      const targetUrl = new URL('/SKILL.md', c.req.url);
+      const res = await c.env.ASSETS.fetch(new Request(targetUrl.toString(), c.req.raw));
+      if (res.ok) {
+        const body = await res.arrayBuffer();
+        return new Response(body, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/markdown; charset=utf-8',
+            'Cache-Control': 'public, max-age=300',
+          },
+        });
+      }
+    }
+    return c.text('SKILL.md asset not bundled yet.', 404);
+  }
+
   // Binary downloads: check R2 bucket first (`downloads/<filename>`), then static ASSETS
   app.get('/downloads/:filename', async (c) => {
     const filename = c.req.param('filename');

@@ -11,7 +11,10 @@ public enum SidebarDestination: Hashable, Identifiable {
     case favorites
     case card
     case identity
-    case secretsAndNotes
+    case apiCredentials
+    case sshKeys
+    case secureNotes
+    case group(String)
     case vault(String)
 
     public var id: String {
@@ -24,7 +27,10 @@ public enum SidebarDestination: Hashable, Identifiable {
         case .favorites: return "favorites"
         case .card: return "card"
         case .identity: return "identity"
-        case .secretsAndNotes: return "secrets_notes"
+        case .apiCredentials: return "api_credentials"
+        case .sshKeys: return "ssh_keys"
+        case .secureNotes: return "secure_notes"
+        case .group(let g): return "group:\(g)"
         case .vault(let vid): return "vault:\(vid)"
         }
     }
@@ -39,7 +45,10 @@ public enum SidebarDestination: Hashable, Identifiable {
         case .favorites: return "收藏夹"
         case .card: return "银行卡"
         case .identity: return "地址身份"
-        case .secretsAndNotes: return "密钥与笔记"
+        case .apiCredentials: return "API 密钥"
+        case .sshKeys: return "SSH 密钥"
+        case .secureNotes: return "安全笔记"
+        case .group(let g): return g
         case .vault: return "密码库"
         }
     }
@@ -184,6 +193,7 @@ public final class VaultStore: ObservableObject {
     @Published public var aiAutoExtractEmail: Bool {
         didSet { if hasFinishedInit { saveAISettings() } }
     }
+    @Published public var customGroups: [String] = []
     @Published public private(set) var aiEmailExtractions: [String: AIEmailExtraction] = [:]
     @Published public private(set) var aiExtractingIds: Set<String> = []
 
@@ -247,6 +257,7 @@ public final class VaultStore: ObservableObject {
         self.unlockDuration = UnlockRememberDuration(rawValue: prefs.unlockDurationRaw ?? "") ?? .hours24
         self.emailCronMinutes = prefs.emailCronMinutes ?? 1
         self.aiAutoExtractEmail = prefs.aiAutoExtractEmail ?? true
+        self.customGroups = prefs.savedGroups ?? []
         if !forTesting {
             self.hasSavedTouchID = TouchIDKeychain.hasSavedQuickUnlock()
             _ = PrefsStore.syncBundledBrowserExtension()
@@ -400,9 +411,34 @@ public final class VaultStore: ObservableObject {
         items.filter { $0.category == .identity }.count
     }
 
-    public var secretsAndNotesCount: Int {
-        items.filter {
-            $0.category == .apiCredential || $0.category == .sshKey || $0.category == .secureNote
+    public var apiCredentialItemsCount: Int {
+        items.filter { $0.category == .apiCredential }.count
+    }
+
+    public var sshKeyItemsCount: Int {
+        items.filter { $0.category == .sshKey }.count
+    }
+
+    public var secureNoteItemsCount: Int {
+        items.filter { $0.category == .secureNote }.count
+    }
+
+    public var allGroups: [String] {
+        var seen: [String: String] = [:]
+        for g in customGroups + items.flatMap(\.tags) {
+            let trimmed = g.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            if seen[key] == nil {
+                seen[key] = trimmed
+            }
+        }
+        return seen.values.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    public func groupItemsCount(_ group: String) -> Int {
+        items.filter { item in
+            item.tags.contains { $0.caseInsensitiveCompare(group) == .orderedSame }
         }.count
     }
 
@@ -441,9 +477,15 @@ public final class VaultStore: ObservableObject {
             list = list.filter { $0.category == .card }
         case .identity:
             list = list.filter { $0.category == .identity }
-        case .secretsAndNotes:
-            list = list.filter {
-                $0.category == .apiCredential || $0.category == .sshKey || $0.category == .secureNote
+        case .apiCredentials:
+            list = list.filter { $0.category == .apiCredential }
+        case .sshKeys:
+            list = list.filter { $0.category == .sshKey }
+        case .secureNotes:
+            list = list.filter { $0.category == .secureNote }
+        case .group(let g):
+            list = list.filter { item in
+                item.tags.contains { $0.caseInsensitiveCompare(g) == .orderedSame }
             }
         case .vault(let vid):
             list = list.filter { $0.vaultId == vid }
@@ -458,6 +500,13 @@ public final class VaultStore: ObservableObject {
                 if (item.username ?? "").lowercased().contains(q) { return true }
                 if (item.emailAlias ?? "").lowercased().contains(q) { return true }
                 if item.urls.contains(where: { $0.lowercased().contains(q) }) { return true }
+                if item.tags.contains(where: { $0.lowercased().contains(q) }) { return true }
+                if item.customFields.contains(where: {
+                    $0.label.lowercased().contains(q)
+                        || ($0.fieldType != "concealed" && $0.value.lowercased().contains(q))
+                }) {
+                    return true
+                }
                 if let card = item.card {
                     if (card.brand ?? "").lowercased().contains(q) || card.last4.contains(q)
                         || (card.cardholderName ?? "").lowercased().contains(q)
@@ -622,7 +671,8 @@ public final class VaultStore: ObservableObject {
             aiModel: aiModel.nilIfBlank,
             unlockDurationRaw: unlockDuration.rawValue,
             emailCronMinutes: emailCronMinutes,
-            aiAutoExtractEmail: aiAutoExtractEmail
+            aiAutoExtractEmail: aiAutoExtractEmail,
+            savedGroups: customGroups
         ))
     }
 
@@ -1071,6 +1121,48 @@ public final class VaultStore: ObservableObject {
         items = [updated] + items.filter { $0.id != updated.id }
         selectedItemId = updated.id
         refreshTotps()
+    }
+
+    public func addGroup(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if !customGroups.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            customGroups.append(trimmed)
+            saveAISettings()
+        }
+    }
+
+    public func removeGroup(_ name: String) async {
+        customGroups.removeAll { $0.caseInsensitiveCompare(name) == .orderedSame }
+        saveAISettings()
+        let affected = items.filter { item in
+            item.tags.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
+        }
+        for item in affected {
+            var copy = item
+            copy.tags.removeAll { $0.caseInsensitiveCompare(name) == .orderedSame }
+            try? await saveItem(copy, isNew: false)
+        }
+        if case .group(let active) = destination, active.caseInsensitiveCompare(name) == .orderedSame {
+            destination = .all
+        }
+    }
+
+    public func toggleItemGroup(_ item: VaultItemPayload, group: String) async {
+        let trimmed = group.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        addGroup(trimmed)
+        var copy = item
+        if copy.tags.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            copy.tags.removeAll { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
+        } else {
+            copy.tags.append(trimmed)
+        }
+        do {
+            try await saveItem(copy, isNew: false)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     public func toggleFavorite(_ item: VaultItemPayload) async {

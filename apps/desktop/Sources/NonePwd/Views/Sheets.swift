@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -38,6 +39,13 @@ public struct ItemEditorSheet: View {
     @State private var idPostalCode = ""
     @State private var idCountry = "中国"
 
+    // Groups (multi-tag), API Custom Fields & SSH Key helpers
+    @State private var selectedTags: [String] = []
+    @State private var inlineGroupInput = ""
+    @State private var customFieldsDraft: [CustomField] = []
+    @State private var sshPublicKey = ""
+    @State private var sshPassphrase = ""
+
     @State private var showPassword = false
     @State private var busy = false
     @State private var errorMsg: String?
@@ -62,9 +70,11 @@ public struct ItemEditorSheet: View {
                     FullWidthSegmentedTabs(
                         options: [
                             ("登录", ItemCategory.login),
+                            ("API", ItemCategory.apiCredential),
+                            ("SSH", ItemCategory.sshKey),
                             ("银行卡", ItemCategory.card),
                             ("身份", ItemCategory.identity),
-                            ("笔记密钥", ItemCategory.secureNote),
+                            ("笔记", ItemCategory.secureNote),
                         ],
                         selection: $category
                     )
@@ -79,160 +89,354 @@ public struct ItemEditorSheet: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            InsetGroupCard {
-                if store.vaults.count > 1 {
-                    editorRow(label: "密码库") {
-                        Picker("", selection: $vaultId) {
-                            ForEach(store.vaults) { v in
-                                Text(v.metadata.name).tag(v.id)
+            ScrollView {
+                VStack(spacing: 12) {
+                    InsetGroupCard {
+                        if store.vaults.count > 1 {
+                            editorRow(label: "密码库") {
+                                Picker("", selection: $vaultId) {
+                                    ForEach(store.vaults) { v in
+                                        Text(v.metadata.name).tag(v.id)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .labelsHidden()
                             }
+                            editorDivider
                         }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
-                    }
-                    editorDivider
-                }
-                if category == .card {
-                    editorRow(label: "持卡人") {
-                        TextField("姓名", text: $cardholderName)
-                    }
-                    editorDivider
-                    editorRow(label: "卡号") {
-                        TextField("•••• •••• •••• ••••", text: $cardNumber)
-                    }
-                    editorDivider
-                    editorRow(label: "有效期") {
-                        HStack(spacing: 6) {
-                            TextField("MM", text: $cardExpMonth)
-                                .frame(width: 34)
-                            Text("/")
-                                .foregroundStyle(.tertiary)
-                            TextField("YYYY", text: $cardExpYear)
-                                .frame(width: 48)
-                        }
-                    }
-                    editorDivider
-                    editorRow(label: "安全码") {
-                        SecureField("CVV", text: $cardCvv)
-                    }
-                    editorDivider
-                    editorRow(label: "卡组织") {
-                        TextField("Visa / 银联", text: $cardBrand)
-                    }
-                } else if category == .identity {
-                    editorRow(label: "姓名") {
-                        TextField("全名", text: $idFullName)
-                    }
-                    editorDivider
-                    editorRow(label: "手机") {
-                        TextField("联系电话", text: $idPhone)
-                    }
-                    editorDivider
-                    editorRow(label: "邮箱") {
-                        TextField("name@example.com", text: $idEmail)
-                    }
-                    editorDivider
-                    editorRow(label: "公司") {
-                        TextField("公司 / 机构", text: $idCompany)
-                    }
-                    editorDivider
-                    editorRow(label: "街道") {
-                        TextField("街道详细地址", text: $idAddress1)
-                    }
-                    editorDivider
-                    editorRow(label: "门牌") {
-                        TextField("楼栋 / 门牌", text: $idAddress2)
-                    }
-                    editorDivider
-                    editorRow(label: "城市") {
-                        HStack(spacing: 6) {
-                            TextField("城市", text: $idCity)
-                                .frame(width: 84)
-                            Text("·")
-                                .foregroundStyle(.tertiary)
-                            TextField("省 / 州", text: $idState)
-                                .frame(width: 84)
-                        }
-                    }
-                    editorDivider
-                    editorRow(label: "邮编") {
-                        HStack(spacing: 6) {
-                            TextField("邮政编码", text: $idPostalCode)
-                                .frame(width: 84)
-                            Text("·")
-                                .foregroundStyle(.tertiary)
-                            TextField("国家", text: $idCountry)
-                                .frame(width: 68)
-                        }
-                    }
-                } else {
-                    editorRow(label: "用户名") {
-                        TextField("用户", text: $username)
-                    }
-                    editorDivider
-                    editorRow(label: category == .login ? "密码" : "密钥") {
-                        HStack(spacing: 8) {
-                            Group {
-                                if showPassword {
-                                    TextField("必填或点击生成", text: $password)
-                                        .font(.system(size: 13, design: .monospaced))
-                                } else {
-                                    SecureField("••••••••••••", text: $password)
-                                        .font(.system(size: 13, design: .monospaced))
+
+                        // Multi-group selection row (one item can belong to multiple groups)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 8) {
+                                Text("分组（可多选）")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                                HStack(spacing: 4) {
+                                    TextField("新建分组...", text: $inlineGroupInput)
+                                        .textFieldStyle(.plain)
+                                        .font(.system(size: 12))
+                                        .multilineTextAlignment(.trailing)
+                                        .frame(width: 100)
+                                        .onSubmit { addInlineGroup() }
+                                    Button {
+                                        addInlineGroup()
+                                    } label: {
+                                        Image(systemName: "plus.circle.fill")
+                                            .font(.system(size: 13))
+                                            .foregroundStyle(
+                                                inlineGroupInput.trimmingCharacters(in: .whitespaces).isEmpty
+                                                    ? Color.secondary.opacity(0.4)
+                                                    : Color.accentColor
+                                            )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(inlineGroupInput.trimmingCharacters(in: .whitespaces).isEmpty)
                                 }
                             }
-                            Button {
-                                showPassword.toggle()
-                            } label: {
-                                Image(systemName: showPassword ? "eye.slash" : "eye")
-                                    .font(.system(size: 12.5, weight: .regular))
+
+                            let candidateGroups = mergedCandidateGroups
+                            if !candidateGroups.isEmpty {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 6) {
+                                        ForEach(candidateGroups, id: \.self) { groupName in
+                                            let active = selectedTags.contains {
+                                                $0.caseInsensitiveCompare(groupName) == .orderedSame
+                                            }
+                                            Button {
+                                                toggleTag(groupName)
+                                            } label: {
+                                                HStack(spacing: 4) {
+                                                    if active {
+                                                        Image(systemName: "checkmark")
+                                                            .font(.system(size: 10, weight: .semibold))
+                                                    }
+                                                    Text(groupName)
+                                                        .font(.system(size: 11.5))
+                                                }
+                                                .foregroundStyle(active ? Color.white : Color.primary)
+                                                .padding(.horizontal, 9)
+                                                .padding(.vertical, 4)
+                                                .background(
+                                                    Capsule()
+                                                        .fill(active ? Color.accentColor : Color.primary.opacity(0.08))
+                                                )
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        editorDivider
+
+                        if category == .card {
+                            editorRow(label: "持卡人") {
+                                TextField("姓名", text: $cardholderName)
+                            }
+                            editorDivider
+                            editorRow(label: "卡号") {
+                                TextField("•••• •••• •••• ••••", text: $cardNumber)
+                            }
+                            editorDivider
+                            editorRow(label: "有效期") {
+                                HStack(spacing: 6) {
+                                    TextField("MM", text: $cardExpMonth)
+                                        .frame(width: 34)
+                                    Text("/")
+                                        .foregroundStyle(.tertiary)
+                                    TextField("YYYY", text: $cardExpYear)
+                                        .frame(width: 48)
+                                }
+                            }
+                            editorDivider
+                            editorRow(label: "安全码") {
+                                SecureField("CVV", text: $cardCvv)
+                            }
+                            editorDivider
+                            editorRow(label: "卡组织") {
+                                TextField("Visa / 银联", text: $cardBrand)
+                            }
+                        } else if category == .identity {
+                            editorRow(label: "姓名") {
+                                TextField("全名", text: $idFullName)
+                            }
+                            editorDivider
+                            editorRow(label: "手机") {
+                                TextField("联系电话", text: $idPhone)
+                            }
+                            editorDivider
+                            editorRow(label: "邮箱") {
+                                TextField("name@example.com", text: $idEmail)
+                            }
+                            editorDivider
+                            editorRow(label: "公司") {
+                                TextField("公司 / 机构", text: $idCompany)
+                            }
+                            editorDivider
+                            editorRow(label: "街道") {
+                                TextField("街道详细地址", text: $idAddress1)
+                            }
+                            editorDivider
+                            editorRow(label: "门牌") {
+                                TextField("楼栋 / 门牌", text: $idAddress2)
+                            }
+                            editorDivider
+                            editorRow(label: "城市") {
+                                HStack(spacing: 6) {
+                                    TextField("城市", text: $idCity)
+                                        .frame(width: 84)
+                                    Text("·")
+                                        .foregroundStyle(.tertiary)
+                                    TextField("省 / 州", text: $idState)
+                                        .frame(width: 84)
+                                }
+                            }
+                            editorDivider
+                            editorRow(label: "邮编") {
+                                HStack(spacing: 6) {
+                                    TextField("邮政编码", text: $idPostalCode)
+                                        .frame(width: 84)
+                                    Text("·")
+                                        .foregroundStyle(.tertiary)
+                                    TextField("国家", text: $idCountry)
+                                        .frame(width: 68)
+                                }
+                            }
+                        } else if category == .sshKey {
+                            HStack(spacing: 8) {
+                                Text("SSH 密钥对")
+                                    .font(.system(size: 12))
                                     .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                            .help(showPassword ? "隐藏" : "显示")
-
-                            Button {
-                                if let pw = try? NpCoreBridge.generatePassword(length: 20) {
-                                    password = pw
-                                    showPassword = true
+                                Spacer()
+                                Button {
+                                    generateEd25519Keypair()
+                                } label: {
+                                    Label("一键生成 Ed25519", systemImage: "wand.and.stars")
+                                        .font(.system(size: 11.5))
                                 }
-                            } label: {
-                                Image(systemName: "wand.and.stars")
-                                    .font(.system(size: 12.5, weight: .regular))
-                                    .foregroundStyle(Color.accentColor)
+                                .buttonStyle(.plain)
+                                .foregroundStyle(Color.accentColor)
+
+                                Button {
+                                    importSshKeyFile()
+                                } label: {
+                                    Label("导入密钥文件…", systemImage: "folder")
+                                        .font(.system(size: 11.5))
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
                             }
-                            .buttonStyle(.plain)
-                            .help("生成 20 位强密码")
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            editorDivider
+
+                            editorRow(label: "公钥") {
+                                TextField("ssh-ed25519 AAAA...", text: $sshPublicKey)
+                                    .font(.system(size: 12, design: .monospaced))
+                            }
+                            editorDivider
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("私钥 (Private Key)")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                                ZStack(alignment: .topLeading) {
+                                    if password.isEmpty {
+                                        Text("-----BEGIN OPENSSH PRIVATE KEY-----")
+                                            .font(.system(size: 11.5, design: .monospaced))
+                                            .foregroundStyle(.tertiary)
+                                            .padding(.top, 3)
+                                            .padding(.leading, 4)
+                                    }
+                                    TextEditor(text: $password)
+                                        .scrollContentBackground(.hidden)
+                                        .font(.system(size: 11.5, design: .monospaced))
+                                        .frame(height: 92)
+                                }
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            editorDivider
+
+                            editorRow(label: "私钥口令") {
+                                SecureField("选填 Passphrase", text: $sshPassphrase)
+                                    .font(.system(size: 13, design: .monospaced))
+                            }
+                            editorDivider
+
+                            editorRow(label: "主机 / Git") {
+                                TextField("github.com / ssh://root@host", text: $urlsText)
+                            }
+                        } else {
+                            editorRow(label: category == .apiCredential ? "凭证标识" : "用户名") {
+                                TextField(category == .apiCredential ? "org-xxx / AccessKey ID / 账号" : "用户", text: $username)
+                            }
+                            editorDivider
+                            editorRow(label: category == .login ? "密码" : (category == .apiCredential ? "API Key" : "密钥")) {
+                                HStack(spacing: 8) {
+                                    Group {
+                                        if showPassword {
+                                            TextField("必填或点击生成", text: $password)
+                                                .font(.system(size: 13, design: .monospaced))
+                                        } else {
+                                            SecureField("••••••••••••", text: $password)
+                                                .font(.system(size: 13, design: .monospaced))
+                                        }
+                                    }
+                                    Button {
+                                        showPassword.toggle()
+                                    } label: {
+                                        Image(systemName: showPassword ? "eye.slash" : "eye")
+                                            .font(.system(size: 12.5, weight: .regular))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help(showPassword ? "隐藏" : "显示")
+
+                                    Button {
+                                        if let pw = try? NpCoreBridge.generatePassword(length: category == .apiCredential ? 32 : 20) {
+                                            password = pw
+                                            showPassword = true
+                                        }
+                                    } label: {
+                                        Image(systemName: "wand.and.stars")
+                                            .font(.system(size: 12.5, weight: .regular))
+                                            .foregroundStyle(Color.accentColor)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("生成随机强密钥")
+                                }
+                            }
+                            editorDivider
+                            editorRow(label: category == .apiCredential ? "Endpoint" : "网站") {
+                                TextField(category == .apiCredential ? "https://api.openai.com/v1" : "example.com", text: $urlsText)
+                            }
+                            if category == .login {
+                                editorDivider
+                                editorRow(label: "验证码") {
+                                    TextField("选填 TOTP / otpauth://", text: $totp)
+                                }
+                            }
+                        }
+
+                        editorDivider
+
+                        ZStack(alignment: .topLeading) {
+                            if notes.isEmpty {
+                                Text("备注")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.tertiary)
+                                    .padding(.top, 2)
+                                    .padding(.leading, 4)
+                            }
+                            TextEditor(text: $notes)
+                                .scrollContentBackground(.hidden)
+                                .font(.system(size: 13))
+                                .frame(height: 62)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                    }
+
+                    if category == .apiCredential || !customFieldsDraft.isEmpty {
+                        InsetGroupCard(header: "扩展键值字段（可用于 np:// / op:// 引用）") {
+                            VStack(spacing: 0) {
+                                ForEach(Array(customFieldsDraft.enumerated()), id: \.element.id) { idx, _ in
+                                    if idx > 0 { editorDivider }
+                                    HStack(spacing: 8) {
+                                        TextField("字段名（如 org_id）", text: $customFieldsDraft[idx].label)
+                                            .textFieldStyle(.plain)
+                                            .font(.system(size: 12.5, design: .monospaced))
+                                            .frame(width: 125)
+                                        Divider().frame(height: 16)
+                                        TextField("值", text: $customFieldsDraft[idx].value)
+                                            .textFieldStyle(.plain)
+                                            .font(.system(size: 12.5, design: .monospaced))
+                                        Button {
+                                            let cur = customFieldsDraft[idx].fieldType
+                                            customFieldsDraft[idx].fieldType = cur == "concealed" ? "text" : "concealed"
+                                        } label: {
+                                            Image(systemName: customFieldsDraft[idx].fieldType == "concealed" ? "lock.fill" : "text.alignleft")
+                                                .font(.system(size: 11))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .help(customFieldsDraft[idx].fieldType == "concealed" ? "敏感字段" : "明文字段")
+
+                                        Button {
+                                            customFieldsDraft.remove(at: idx)
+                                        } label: {
+                                            Image(systemName: "minus.circle")
+                                                .font(.system(size: 12))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                    .padding(.horizontal, 14)
+                                    .frame(height: 36)
+                                }
+                                if !customFieldsDraft.isEmpty { editorDivider }
+                                Button {
+                                    let newId = (try? NpCoreBridge.randomID()) ?? UUID().uuidString
+                                    customFieldsDraft.append(CustomField(id: newId, label: "", value: "", fieldType: "concealed"))
+                                } label: {
+                                    Label("添加自定义字段", systemImage: "plus.circle")
+                                        .font(.system(size: 12.5))
+                                        .foregroundStyle(Color.accentColor)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.horizontal, 14)
+                                        .frame(height: 34)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
-                    editorDivider
-                    editorRow(label: "网站") {
-                        TextField("example.com", text: $urlsText)
-                    }
-                    editorDivider
-                    editorRow(label: "验证码") {
-                        TextField("选填 TOTP / otpauth://", text: $totp)
-                    }
                 }
-
-                editorDivider
-
-                ZStack(alignment: .topLeading) {
-                    if notes.isEmpty {
-                        Text("备注")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.tertiary)
-                            .padding(.top, 2)
-                            .padding(.leading, 4)
-                    }
-                    TextEditor(text: $notes)
-                        .scrollContentBackground(.hidden)
-                        .font(.system(size: 13))
-                        .frame(height: 68)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
             }
+            .frame(maxHeight: 450)
 
             HStack(spacing: 10) {
                 Spacer()
@@ -259,9 +463,99 @@ public struct ItemEditorSheet: View {
         .padding(.horizontal, 22)
         .padding(.top, 22)
         .padding(.bottom, 16)
-        .frame(width: 440)
+        .frame(width: 480)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear { populate() }
+    }
+
+    private var mergedCandidateGroups: [String] {
+        var seen: [String: String] = [:]
+        for g in store.allGroups + selectedTags {
+            let trimmed = g.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            if seen[key] == nil { seen[key] = trimmed }
+        }
+        return seen.values.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    private func toggleTag(_ name: String) {
+        if selectedTags.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) {
+            selectedTags.removeAll { $0.caseInsensitiveCompare(name) == .orderedSame }
+        } else {
+            selectedTags.append(name)
+        }
+    }
+
+    private func addInlineGroup() {
+        let trimmed = inlineGroupInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        inlineGroupInput = ""
+        store.addGroup(trimmed)
+        if !selectedTags.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            selectedTags.append(trimmed)
+        }
+    }
+
+    private func generateEd25519Keypair() {
+        errorMsg = nil
+        let tmpDir = FileManager.default.temporaryDirectory
+        let keyURL = tmpDir.appendingPathComponent("np-ed25519-\(UUID().uuidString)")
+        let pubURL = URL(fileURLWithPath: keyURL.path + ".pub")
+        defer {
+            try? FileManager.default.removeItem(at: keyURL)
+            try? FileManager.default.removeItem(at: pubURL)
+        }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
+        let comment = title.nilIfBlank ?? store.accountEmail.nilIfBlank ?? "nonepwd"
+        proc.arguments = ["-t", "ed25519", "-N", "", "-C", comment, "-f", keyURL.path]
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0 else {
+                errorMsg = "ssh-keygen 生成密钥对失败"
+                return
+            }
+            password = (try? String(contentsOf: keyURL, encoding: .utf8)) ?? ""
+            sshPublicKey = ((try? String(contentsOf: pubURL, encoding: .utf8)) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            errorMsg = "调用 ssh-keygen 失败: \(error.localizedDescription)"
+        }
+    }
+
+    private func importSshKeyFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                let text = try String(contentsOf: url, encoding: .utf8)
+                if url.pathExtension.lowercased() == "pub" {
+                    sshPublicKey = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let privURL = url.deletingPathExtension()
+                    if let privText = try? String(contentsOf: privURL, encoding: .utf8) {
+                        password = privText
+                    }
+                } else {
+                    password = text
+                    let pubURL = URL(fileURLWithPath: url.path + ".pub")
+                    if let pubText = try? String(contentsOf: pubURL, encoding: .utf8) {
+                        sshPublicKey = pubText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+                if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    title = url.deletingPathExtension().lastPathComponent
+                }
+            } catch {
+                errorMsg = "读取密钥文件失败: \(error.localizedDescription)"
+            }
+        }
     }
 
     private var editorDivider: some View {
@@ -289,11 +583,22 @@ public struct ItemEditorSheet: View {
             vaultId = item.vaultId
             category = item.category
             title = item.title
+            selectedTags = item.tags
             username = item.username ?? ""
             password = item.password ?? ""
             totp = item.totp ?? ""
             urlsText = item.urls.joined(separator: ", ")
             notes = item.notes ?? ""
+            if item.category == .sshKey {
+                sshPublicKey = item.customFields.first(where: { $0.label.caseInsensitiveCompare("public_key") == .orderedSame })?.value ?? ""
+                sshPassphrase = item.customFields.first(where: { $0.label.caseInsensitiveCompare("passphrase") == .orderedSame })?.value ?? ""
+                customFieldsDraft = item.customFields.filter {
+                    $0.label.caseInsensitiveCompare("public_key") != .orderedSame &&
+                    $0.label.caseInsensitiveCompare("passphrase") != .orderedSame
+                }
+            } else {
+                customFieldsDraft = item.customFields
+            }
             if let card = item.card {
                 cardholderName = card.cardholderName ?? ""
                 cardNumber = card.number ?? ""
@@ -321,6 +626,11 @@ public struct ItemEditorSheet: View {
             } else {
                 vaultId = store.vaults.first?.id ?? ""
             }
+            if case .group(let g) = store.destination {
+                selectedTags = [g]
+            } else {
+                selectedTags = []
+            }
         }
     }
 
@@ -337,6 +647,26 @@ public struct ItemEditorSheet: View {
                 .split(whereSeparator: { $0 == "," || $0 == "\n" })
                 .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
+
+            for g in selectedTags {
+                store.addGroup(g)
+            }
+
+            var finalCustomFields = customFieldsDraft.filter {
+                !$0.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                !$0.value.isEmpty
+            }
+
+            if category == .sshKey {
+                if let pub = sshPublicKey.nilIfBlank {
+                    let pubId = (try? NpCoreBridge.randomID()) ?? UUID().uuidString
+                    finalCustomFields.append(CustomField(id: pubId, label: "public_key", value: pub, fieldType: "text"))
+                }
+                if let pass = sshPassphrase.nilIfBlank {
+                    let passId = (try? NpCoreBridge.randomID()) ?? UUID().uuidString
+                    finalCustomFields.append(CustomField(id: passId, label: "passphrase", value: pass, fieldType: "concealed"))
+                }
+            }
 
             let cardObj: CardDetails? = category == .card ? CardDetails(
                 cardholderName: cardholderName.nilIfBlank,
@@ -360,22 +690,23 @@ public struct ItemEditorSheet: View {
                 country: idCountry.nilIfBlank
             ) : initialItem?.identity
 
+            let keepUser = category == .login || category == .apiCredential || category == .sshKey || category == .secureNote
             let payload = VaultItemPayload(
                 id: itemId,
                 vaultId: vaultId,
                 category: category,
                 title: title.trimmingCharacters(in: .whitespacesAndNewlines),
                 favorite: initialItem?.favorite ?? false,
-                tags: initialItem?.tags ?? [],
+                tags: selectedTags,
                 urls: urls,
-                username: category == .login || category == .apiCredential ? username.nilIfBlank : nil,
+                username: keepUser ? username.nilIfBlank : nil,
                 password: category == .card || category == .identity ? nil : (password.isEmpty ? nil : password),
                 totp: totp.nilIfBlank,
                 emailAlias: initialItem?.emailAlias,
                 notes: notes.nilIfBlank,
                 card: cardObj,
                 identity: idObj,
-                customFields: initialItem?.customFields ?? [],
+                customFields: finalCustomFields,
                 createdAt: initialItem?.createdAt ?? now,
                 updatedAt: now
             )

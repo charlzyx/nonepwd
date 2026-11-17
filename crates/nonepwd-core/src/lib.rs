@@ -175,6 +175,15 @@ mod tests {
         assert_eq!(parsed.vault, "DevOps");
         assert_eq!(parsed.params.get("wait").map(String::as_str), Some("30"));
 
+        let parsed_op = parse_secret_ref("op://DevOps/OpenAI/credential").unwrap();
+        assert_eq!(parsed_op.vault, "DevOps");
+        assert_eq!(parsed_op.item, "OpenAI");
+        assert_eq!(parsed_op.field, "credential");
+
+        let parsed_op_sec = parse_secret_ref("op://DevOps/OpenAI/API/api_key").unwrap();
+        assert_eq!(parsed_op_sec.field, "api_key");
+        assert_eq!(parsed_op_sec.params.get("section").map(String::as_str), Some("API"));
+
         let item = VaultItemPayload {
             id: "1".into(),
             vault_id: "v".into(),
@@ -201,6 +210,24 @@ mod tests {
             last_used_at: None,
         };
         assert_eq!(resolve_item_field(&item, "api_key").as_deref(), Some("sk-abc"));
+
+        let mut ssh_item = item.clone();
+        ssh_item.category = ItemCategory::SshKey;
+        ssh_item.password = Some("-----BEGIN OPENSSH PRIVATE KEY-----".into());
+        ssh_item.custom_fields = vec![CustomField {
+            id: "pk1".into(),
+            label: "public_key".into(),
+            value: "ssh-ed25519 AAAA".into(),
+            field_type: "text".into(),
+        }];
+        assert_eq!(
+            resolve_item_field(&ssh_item, "private_key").as_deref(),
+            Some("-----BEGIN OPENSSH PRIVATE KEY-----")
+        );
+        assert_eq!(
+            resolve_item_field(&ssh_item, "public_key").as_deref(),
+            Some("ssh-ed25519 AAAA")
+        );
 
         let env = parse_dot_env("export A=\"hello\"\n# c\nB=np://Dev/X/p");
         assert_eq!(env.get("A").map(String::as_str), Some("hello"));

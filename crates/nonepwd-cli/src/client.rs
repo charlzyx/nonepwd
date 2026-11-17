@@ -677,7 +677,8 @@ impl NonePwdClient {
         email_alias: Option<String>,
         auto_alias: bool,
         notes: Option<String>,
-        custom_fields: Vec<(String, String)>,
+        tags: Vec<String>,
+        custom_fields: Vec<(String, String, String)>,
     ) -> Result<DecryptedItem, String> {
         self.sync()?;
         if self.active_mode != "owner" {
@@ -702,12 +703,12 @@ impl NonePwdClient {
         };
 
         let mut cf_list = Vec::with_capacity(custom_fields.len());
-        for (label, value) in custom_fields {
+        for (label, value, field_type) in custom_fields {
             cf_list.push(CustomField {
                 id: random_id()?,
                 label,
                 value,
-                field_type: "concealed".into(),
+                field_type,
             });
         }
 
@@ -717,7 +718,7 @@ impl NonePwdClient {
             category,
             title: title.trim().to_string(),
             favorite: false,
-            tags: Vec::new(),
+            tags,
             urls,
             username: username.or_else(|| final_alias.clone()),
             password: final_pass,
@@ -750,6 +751,99 @@ impl NonePwdClient {
         };
         self.items.insert(0, created.clone());
         Ok(created)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_item(
+        &mut self,
+        item_ref: &str,
+        vault_ref: Option<&str>,
+        new_title: Option<String>,
+        urls: Vec<String>,
+        username: Option<String>,
+        password: Option<String>,
+        generate_pass: bool,
+        totp: Option<String>,
+        notes: Option<String>,
+        tags: Option<Vec<String>>,
+        custom_fields: Vec<(String, String, String)>,
+    ) -> Result<DecryptedItem, String> {
+        self.sync()?;
+        if self.active_mode != "owner" {
+            return Err("Only owner session can edit items".into());
+        }
+        let existing = self.find_item(item_ref, vault_ref)?.clone();
+        let vault = self.find_vault(&existing.vault_id)?.clone();
+        let mut payload = existing.payload.clone();
+
+        if let Some(t) = new_title {
+            let trimmed = t.trim().to_string();
+            if !trimmed.is_empty() {
+                payload.title = trimmed;
+            }
+        }
+        if !urls.is_empty() {
+            payload.urls = urls;
+        }
+        if let Some(u) = username {
+            payload.username = Some(u);
+        }
+        if generate_pass {
+            payload.password = Some(generate_password(&PasswordOptions::default())?);
+        } else if let Some(p) = password {
+            payload.password = Some(p);
+        }
+        if let Some(t) = totp {
+            payload.totp = Some(t);
+        }
+        if let Some(n) = notes {
+            payload.notes = Some(n);
+        }
+        if let Some(next_tags) = tags {
+            payload.tags = next_tags;
+        }
+        for (label, value, field_type) in custom_fields {
+            if let Some(cf) = payload
+                .custom_fields
+                .iter_mut()
+                .find(|c| c.label.eq_ignore_ascii_case(&label))
+            {
+                cf.value = value;
+                cf.field_type = field_type;
+            } else {
+                payload.custom_fields.push(CustomField {
+                    id: random_id()?,
+                    label,
+                    value,
+                    field_type,
+                });
+            }
+        }
+        payload.updated_at = now_iso_utc();
+
+        let encrypted_data = encrypt_json(
+            &vault.key_bytes,
+            &payload,
+            Some(&aad::vault_item(&vault.id, &payload.id)),
+        )?;
+        let path = format!("/api/vaults/{}/items/{}", vault.id, payload.id);
+        let _: serde_json::Value = self.request_json(
+            "PUT",
+            &path,
+            Some(&serde_json::json!({ "encryptedData": encrypted_data })),
+            false,
+        )?;
+
+        let updated = DecryptedItem {
+            id: payload.id.clone(),
+            vault_id: vault.id,
+            vault_name: vault.metadata.name,
+            payload,
+        };
+        if let Some(slot) = self.items.iter_mut().find(|i| i.id == updated.id) {
+            *slot = updated.clone();
+        }
+        Ok(updated)
     }
 
     pub fn import_csv(

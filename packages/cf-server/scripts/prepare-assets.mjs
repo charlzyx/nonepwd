@@ -65,4 +65,10 @@ if (mode === 'pre') {
       fs.copyFileSync(src, path.join(downloadsDir, filename));
     }
   }
+
+  const skillSrc = path.join(rootDir, 'SKILL.md');
+  if (fs.existsSync(skillSrc)) {
+    fs.copyFileSync(skillSrc, path.join(publicDir, 'SKILL.md'));
+    fs.copyFileSync(skillSrc, path.join(publicDir, 'llms.txt'));
+  }
 }
