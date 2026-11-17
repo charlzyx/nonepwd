@@ -277,7 +277,7 @@ const RouterView: React.FC = () => {
   if (routePath.startsWith('/vault')) {
     return <WorkspaceApp onNavigateHome={() => navigate('/')} />;
   }
-  return <LandingPage onOpenVault={() => navigate('/vault')} />;
+  return <LandingPage onOpenVault={() => window.location.assign('/vault')} />;
 };
 
 export const App: React.FC = () => (

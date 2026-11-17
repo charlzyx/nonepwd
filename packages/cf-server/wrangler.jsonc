@@ -2,7 +2,7 @@
   "name": "nonepwd-cf-server",
   "main": "dist/index.js",
   "compatibility_date": "2025-10-01",
-  "workers_dev": true,
+  "workers_dev": false,
   "routes": [
     { "pattern": "vault.yourdomain.com", "custom_domain": true }
   ],

@@ -5,7 +5,7 @@ export default defineConfig({
     name: "nonepwd-cf-server",
     compatibilityDate: "2025-10-01",
     entrypoint: "dist/index.js",
-    workersDev: true,
+    workersDev: false,
     domains: ["vault.yourdomain.com"],
     assets: {
       notFoundHandling: "single-page-application",
