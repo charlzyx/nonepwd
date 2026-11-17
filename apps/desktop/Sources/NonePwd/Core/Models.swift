@@ -520,7 +520,68 @@ public struct ImapConfigPublic: Codable, Equatable, Sendable {
     }
 }
 
-public struct ImapSavePayload: Encodable, Sendable {
+public struct ImapAccountPublic: Codable, Identifiable, Equatable, Hashable, Sendable {
+    public var id: String
+    public var label: String
+    public var enabled: Bool
+    public var host: String
+    public var port: Int
+    public var tls: Bool
+    public var username: String
+    public var hasPassword: Bool
+    public var status: String
+    public var lastError: String?
+    public var lastSyncAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, label, enabled, host, port, tls, username, hasPassword, status, lastError, lastSyncAt
+    }
+
+    public init(
+        id: String,
+        label: String = "",
+        enabled: Bool = true,
+        host: String = "",
+        port: Int = 993,
+        tls: Bool = true,
+        username: String = "",
+        hasPassword: Bool = false,
+        status: String = "disabled",
+        lastError: String? = nil,
+        lastSyncAt: String? = nil
+    ) {
+        self.id = id
+        self.label = label
+        self.enabled = enabled
+        self.host = host
+        self.port = port
+        self.tls = tls
+        self.username = username
+        self.hasPassword = hasPassword
+        self.status = status
+        self.lastError = lastError
+        self.lastSyncAt = lastSyncAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        label = try c.decodeIfPresent(String.self, forKey: .label) ?? ""
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        host = try c.decodeIfPresent(String.self, forKey: .host) ?? ""
+        port = try c.decodeIfPresent(Int.self, forKey: .port) ?? 993
+        tls = try c.decodeIfPresent(Bool.self, forKey: .tls) ?? true
+        username = try c.decodeIfPresent(String.self, forKey: .username) ?? ""
+        hasPassword = try c.decodeIfPresent(Bool.self, forKey: .hasPassword) ?? false
+        status = try c.decodeIfPresent(String.self, forKey: .status) ?? "disabled"
+        lastError = try c.decodeIfPresent(String.self, forKey: .lastError)
+        lastSyncAt = try c.decodeIfPresent(String.self, forKey: .lastSyncAt)
+    }
+}
+
+public struct ImapAccountSavePayload: Encodable, Sendable {
+    public var id: String?
+    public var label: String
     public var enabled: Bool
     public var host: String
     public var port: Int
@@ -529,6 +590,37 @@ public struct ImapSavePayload: Encodable, Sendable {
     public var password: String?
 
     public init(
+        id: String? = nil,
+        label: String = "",
+        enabled: Bool = true,
+        host: String,
+        port: Int = 993,
+        tls: Bool = true,
+        username: String,
+        password: String? = nil
+    ) {
+        self.id = id
+        self.label = label
+        self.enabled = enabled
+        self.host = host
+        self.port = port
+        self.tls = tls
+        self.username = username
+        self.password = password
+    }
+}
+
+public struct ImapSavePayload: Encodable, Sendable {
+    public var id: String?
+    public var enabled: Bool
+    public var host: String
+    public var port: Int
+    public var tls: Bool
+    public var username: String
+    public var password: String?
+
+    public init(
+        id: String? = nil,
         enabled: Bool,
         host: String,
         port: Int,
@@ -536,7 +628,33 @@ public struct ImapSavePayload: Encodable, Sendable {
         username: String,
         password: String? = nil
     ) {
+        self.id = id
         self.enabled = enabled
+        self.host = host
+        self.port = port
+        self.tls = tls
+        self.username = username
+        self.password = password
+    }
+}
+
+public struct ImapTestPayload: Encodable, Sendable {
+    public var id: String?
+    public var host: String
+    public var port: Int
+    public var tls: Bool
+    public var username: String
+    public var password: String?
+
+    public init(
+        id: String? = nil,
+        host: String,
+        port: Int = 993,
+        tls: Bool = true,
+        username: String,
+        password: String? = nil
+    ) {
+        self.id = id
         self.host = host
         self.port = port
         self.tls = tls

@@ -122,6 +122,7 @@ private struct SyncResponse: Decodable {
     let aliases: [AliasRecord]?
     let emails: [EncryptedEmailRecord]?
     let imapStatus: ImapConfigPublic?
+    let imapAccounts: [ImapAccountPublic]?
     let emailFilter: EmailFilterConfig?
 }
 
@@ -167,6 +168,7 @@ public final class VaultStore: ObservableObject {
     @Published public var aliases: [AliasRecord] = []
     @Published public var emails: [DecryptedEmailPayload] = []
     @Published public var imapConfig: ImapConfigPublic = ImapConfigPublic()
+    @Published public var imapAccounts: [ImapAccountPublic] = []
     @Published public var emailFilter: EmailFilterConfig = EmailFilterConfig()
     @Published public var wsConnected = false
     @Published public var isRefreshingEmails = false
@@ -928,6 +930,7 @@ public final class VaultStore: ObservableObject {
         aliases = []
         emails = []
         imapConfig = ImapConfigPublic()
+        imapAccounts = []
         totpSnapshot = [:]
         aiEmailExtractions = [:]
         aiExtractingIds = []
@@ -959,6 +962,11 @@ public final class VaultStore: ObservableObject {
         aliasDomain = syncRes.account?.aliasDomain ?? aliasDomain
         if let imapStatus = syncRes.imapStatus {
             imapConfig = imapStatus
+        }
+        if let accounts = syncRes.imapAccounts {
+            imapAccounts = accounts
+        } else {
+            imapAccounts = legacyAccountFallback(from: imapConfig)
         }
         emailFilter = syncRes.emailFilter ?? EmailFilterConfig()
 
@@ -1348,18 +1356,132 @@ public final class VaultStore: ObservableObject {
 
     // MARK: - IMAP & Email Filter Settings
 
-    public func loadImapConfig() async throws {
-        struct ImapResp: Decodable { let imap: ImapConfigPublic }
+    private func legacyAccountFallback(from cfg: ImapConfigPublic) -> [ImapAccountPublic] {
+        guard !cfg.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !cfg.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return []
+        }
+        return [
+            ImapAccountPublic(
+                id: "legacy-1",
+                label: cfg.username,
+                enabled: cfg.enabled,
+                host: cfg.host,
+                port: cfg.port,
+                tls: cfg.tls,
+                username: cfg.username,
+                hasPassword: cfg.hasPassword,
+                status: cfg.status,
+                lastError: cfg.lastError,
+                lastSyncAt: nil
+            ),
+        ]
+    }
+
+    public func loadImapAccounts() async throws {
+        struct ImapResp: Decodable {
+            let imap: ImapConfigPublic
+            let accounts: [ImapAccountPublic]?
+        }
         let res: ImapResp = try await apiRequest("/api/imap")
         imapConfig = res.imap
+        imapAccounts = res.accounts ?? legacyAccountFallback(from: res.imap)
+    }
+
+    public func loadImapConfig() async throws {
+        try await loadImapAccounts()
+    }
+
+    @discardableResult
+    public func saveImapAccount(_ payload: ImapAccountSavePayload) async throws -> ImapAccountPublic {
+        struct ImapAccountResp: Decodable {
+            let account: ImapAccountPublic?
+            let accounts: [ImapAccountPublic]?
+            let imap: ImapConfigPublic?
+        }
+        let data = try JSONEncoder().encode(payload)
+        let res: ImapAccountResp
+        if let id = payload.id?.nilIfBlank {
+            let safeId = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+            res = try await apiRequest("/api/imap/accounts/\(safeId)", method: "PUT", bodyObj: data)
+        } else {
+            res = try await apiRequest("/api/imap/accounts", method: "POST", bodyObj: data)
+        }
+        if let accounts = res.accounts {
+            imapAccounts = accounts
+        }
+        if let cfg = res.imap {
+            imapConfig = cfg
+        }
+        try? await syncAll()
+        if let acct = res.account {
+            return acct
+        }
+        if let id = payload.id?.nilIfBlank, let found = imapAccounts.first(where: { $0.id == id }) {
+            return found
+        }
+        if let matched = imapAccounts.last(where: { $0.username.caseInsensitiveCompare(payload.username) == .orderedSame }) {
+            return matched
+        }
+        return ImapAccountPublic(
+            id: payload.id ?? UUID().uuidString,
+            label: payload.label.nilIfBlank ?? payload.username,
+            enabled: payload.enabled,
+            host: payload.host,
+            port: payload.port,
+            tls: payload.tls,
+            username: payload.username,
+            hasPassword: payload.password?.nilIfBlank != nil,
+            status: res.imap?.status ?? (payload.enabled ? "listening" : "disabled"),
+            lastError: res.imap?.lastError,
+            lastSyncAt: nil
+        )
+    }
+
+    public func deleteImapAccount(id: String) async throws {
+        struct DeleteImapResp: Decodable {
+            let ok: Bool?
+            let accounts: [ImapAccountPublic]?
+            let imap: ImapConfigPublic?
+        }
+        let safeId = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        let res: DeleteImapResp = try await apiRequest("/api/imap/accounts/\(safeId)", method: "DELETE")
+        if let accounts = res.accounts {
+            imapAccounts = accounts
+        } else {
+            imapAccounts.removeAll { $0.id == id }
+        }
+        if let cfg = res.imap {
+            imapConfig = cfg
+        }
+    }
+
+    public func testImapAccount(_ payload: ImapAccountSavePayload) async throws -> ImapTestResponse {
+        let testPayload = ImapTestPayload(
+            id: payload.id,
+            host: payload.host,
+            port: payload.port,
+            tls: payload.tls,
+            username: payload.username,
+            password: payload.password
+        )
+        let data = try JSONEncoder().encode(testPayload)
+        return try await apiRequest("/api/imap/test", method: "POST", bodyObj: data)
     }
 
     @discardableResult
     public func saveImapConfig(_ payload: ImapSavePayload) async throws -> ImapConfigPublic {
-        struct ImapResp: Decodable { let imap: ImapConfigPublic }
+        struct ImapResp: Decodable {
+            let imap: ImapConfigPublic
+            let accounts: [ImapAccountPublic]?
+        }
         let data = try JSONEncoder().encode(payload)
         let res: ImapResp = try await apiRequest("/api/imap", method: "PUT", bodyObj: data)
         imapConfig = res.imap
+        if let accounts = res.accounts {
+            imapAccounts = accounts
+        }
         try? await syncAll()
         return res.imap
     }
@@ -1369,16 +1491,27 @@ public final class VaultStore: ObservableObject {
         return try await apiRequest("/api/imap/test", method: "POST", bodyObj: data)
     }
 
-    public func triggerImapSync() async {
+    @discardableResult
+    public func triggerImapSync(accountId: String? = nil) async -> (ok: Bool, synced: Int, error: String?) {
         struct ImapSyncResp: Decodable {
             let ok: Bool
             let synced: Int?
+            let error: String?
+            let accounts: [ImapAccountPublic]?
             let imap: ImapConfigPublic?
         }
-        if let res: ImapSyncResp = try? await apiRequest("/api/imap/sync", method: "POST") {
+        let body: [String: String]? = accountId?.nilIfBlank.map { ["id": $0] }
+        do {
+            let res: ImapSyncResp = try await apiRequest("/api/imap/sync", method: "POST", bodyObj: body)
+            if let accounts = res.accounts {
+                imapAccounts = accounts
+            }
             if let cfg = res.imap {
                 imapConfig = cfg
             }
+            return (res.ok, res.synced ?? 0, res.error)
+        } catch {
+            return (false, 0, error.localizedDescription)
         }
     }
 
@@ -1681,7 +1814,7 @@ public final class VaultStore: ObservableObject {
         isRefreshingEmails = true
         defer { isRefreshingEmails = false }
         do {
-            if imapConfig.enabled || forceLatest {
+            if !imapAccounts.filter(\.enabled).isEmpty || imapConfig.enabled || forceLatest {
                 await triggerImapSync()
             }
             try await syncAll()

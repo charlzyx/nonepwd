@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
+  ClipboardPaste,
   Copy,
   CreditCard,
   Dices,
   Eye,
   EyeOff,
   Globe,
+  ImagePlus,
   Lock,
   MailCheck,
   MapPin,
@@ -15,6 +17,7 @@ import {
   MoreHorizontal,
   Pin,
   RefreshCw,
+  ScanLine,
   Search,
   ShieldCheck,
   Sun,
@@ -26,6 +29,13 @@ import {
   type DecryptedEmailPayload,
 } from '@nonepwd/core';
 import { formatCardDisplay, formatCardExpiry } from '../filler';
+import {
+  decodeQrFromFiles,
+  extractClipboardImages,
+  extractClipboardText,
+  extractOtpUrisFromQrResults,
+  readQrFromSystemClipboard,
+} from '../qr';
 import {
   applyDocumentTheme,
   loadInlineBadgeHidden,
@@ -42,6 +52,24 @@ import {
 import type { PendingCredentialCapture } from '../capture';
 import type { ExtendedVaultItem } from '../types';
 
+interface PendingQrImport {
+  uris: string[];
+  pageUrl: string;
+  tabId?: number;
+  previewTitle: string;
+  expiresAt: number;
+}
+
+interface QrImportResult {
+  importedCount: number;
+  createdCount: number;
+  attachedCount: number;
+  skippedCount: number;
+  title: string;
+  code: string;
+  remainingSeconds: number;
+}
+
 interface PopupState {
   unlocked: boolean;
   expiresAt?: number | null;
@@ -50,6 +78,7 @@ interface PopupState {
   emails: Array<DecryptedEmailPayload & { id: string }>;
   aliasDomain: string;
   pendingCapture?: PendingCredentialCapture | null;
+  pendingQrImport?: PendingQrImport | null;
 }
 
 interface LoginMatch {
@@ -159,6 +188,10 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [qrBusy, setQrBusy] = useState(false);
+  const [qrNotice, setQrNotice] = useState<{ kind: 'success' | 'error'; text: string } | null>(
+    null
+  );
   const [showAdvancedUnlock, setShowAdvancedUnlock] = useState(false);
   const [inlineBadgeHidden, setInlineBadgeHidden] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
@@ -168,6 +201,7 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
 
   const filterInputRef = useRef<HTMLInputElement>(null);
   const menuWrapRef = useRef<HTMLDivElement>(null);
+  const qrFileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     void loadThemePreference().then((stored) => {
@@ -318,6 +352,185 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
     setTimeout(() => setCopiedId((cur) => (cur === id ? null : cur)), 1200);
   };
 
+  useEffect(() => {
+    if (!qrNotice || qrNotice.kind !== 'success') return;
+    const timer = setTimeout(() => setQrNotice(null), 5000);
+    return () => clearTimeout(timer);
+  }, [qrNotice]);
+
+  const importDecodedUris = useCallback(
+    async (uris: string[]) => {
+      const res = (await chrome.runtime.sendMessage({
+        type: 'NONEPWD_IMPORT_QR_URIS',
+        uris,
+        pageUrl: tabUrl,
+      })) as ({ ok: boolean; error?: string } & Partial<QrImportResult>);
+      if (!res.ok) {
+        throw new Error(res.error || '导入 2FA 二维码失败');
+      }
+      await loadAll();
+      setActiveTab('2fa');
+      if (res.code && typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(res.code).catch(() => {});
+      }
+      const title = res.title || '2FA';
+      const code = res.code || '';
+      if (res.importedCount === 0 && (res.skippedCount ?? 0) > 0) {
+        setQrNotice({
+          kind: 'success',
+          text: `该 2FA 已存在（${title}）· 验证码 ${code} 已复制`,
+        });
+      } else if ((res.importedCount ?? 0) > 1) {
+        setQrNotice({
+          kind: 'success',
+          text: `✓ 已导入 ${res.importedCount} 个 2FA（${title} · 验证码 ${code} 已复制）`,
+        });
+      } else {
+        setQrNotice({
+          kind: 'success',
+          text: `✓ 已导入 2FA：${title} · 验证码 ${code} 已复制`,
+        });
+      }
+    },
+    [loadAll, tabUrl]
+  );
+
+  const handleStartQrSnip = useCallback(async () => {
+    setShowMenu(false);
+    setQrNotice(null);
+    setQrBusy(true);
+    try {
+      const res = (await chrome.runtime.sendMessage({
+        type: 'NONEPWD_START_QR_SNIP',
+        tabId,
+      })) as { ok: boolean; error?: string };
+      if (!res.ok) {
+        throw new Error(
+          res.error || '当前页面不支持网页截图框选，请切换到普通网页或直接在弹窗中粘贴截图'
+        );
+      }
+      if (!isPinnedWindow) {
+        window.close();
+      } else {
+        setQrNotice({ kind: 'success', text: '请在网页中拖拽框选 2FA 二维码' });
+      }
+    } catch (error) {
+      setQrNotice({
+        kind: 'error',
+        text: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setQrBusy(false);
+    }
+  }, [tabId]);
+
+  const handlePasteQrFromClipboard = useCallback(async () => {
+    setShowMenu(false);
+    setQrNotice(null);
+    setQrBusy(true);
+    try {
+      const { rawValues, otpUris } = await readQrFromSystemClipboard();
+      if (otpUris.length === 0) {
+        throw new Error(
+          rawValues.length > 0
+            ? '剪贴板二维码内容不是有效的 2FA 密钥（otpauth://）'
+            : '剪贴板图片中未识别到有效的 2FA 二维码'
+        );
+      }
+      await importDecodedUris(otpUris);
+    } catch (error) {
+      setQrNotice({
+        kind: 'error',
+        text: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setQrBusy(false);
+    }
+  }, [importDecodedUris]);
+
+  const handleQrFileChange = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files;
+      if (!files || files.length === 0) return;
+      setQrNotice(null);
+      setQrBusy(true);
+      try {
+        const { rawValues, otpUris, imageFilesCount } = await decodeQrFromFiles(files);
+        if (imageFilesCount === 0) {
+          throw new Error('请选择二维码图片文件（PNG / JPG / WebP）');
+        }
+        if (otpUris.length === 0) {
+          throw new Error(
+            rawValues.length > 0
+              ? '所选图片中的二维码不是有效的 2FA 密钥（otpauth://）'
+              : '未在所选图片中识别到有效的 2FA 二维码'
+          );
+        }
+        await importDecodedUris(otpUris);
+      } catch (error) {
+        setQrNotice({
+          kind: 'error',
+          text: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        e.target.value = '';
+        setQrBusy(false);
+      }
+    },
+    [importDecodedUris]
+  );
+
+  useEffect(() => {
+    if (!state?.unlocked) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const images = extractClipboardImages(e.clipboardData);
+      if (images.length > 0) {
+        e.preventDefault();
+        setQrNotice(null);
+        setQrBusy(true);
+        void (async () => {
+          try {
+            const { rawValues, otpUris } = await decodeQrFromFiles(images);
+            if (otpUris.length === 0) {
+              throw new Error(
+                rawValues.length > 0
+                  ? '粘贴的图片二维码不是有效的 2FA 密钥（otpauth://）'
+                  : '粘贴的截图中未识别到有效的 2FA 二维码'
+              );
+            }
+            await importDecodedUris(otpUris);
+          } catch (error) {
+            setQrNotice({
+              kind: 'error',
+              text: error instanceof Error ? error.message : String(error),
+            });
+          } finally {
+            setQrBusy(false);
+          }
+        })();
+        return;
+      }
+
+      const text = extractClipboardText(e.clipboardData);
+      const uris = extractOtpUrisFromQrResults([text]);
+      if (uris.length > 0) {
+        e.preventDefault();
+        setQrNotice(null);
+        setQrBusy(true);
+        void importDecodedUris(uris)
+          .catch((error) => {
+            setQrNotice({
+              kind: 'error',
+              text: error instanceof Error ? error.message : String(error),
+            });
+          })
+          .finally(() => setQrBusy(false));
+      }
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [importDecodedUris, state?.unlocked]);
+
   const handleUnlock = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr(null);
@@ -329,11 +542,20 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
         secretKey,
         masterPassword,
         rememberDuration: unlockDuration,
-      })) as { ok: boolean; error?: string };
+      })) as { ok: boolean; error?: string; qrImportResult?: QrImportResult | null };
       if (!res.ok) throw new Error(res.error || '解锁失败');
       setMasterPassword('');
       setActiveTab('2fa');
       await loadAll();
+      if (res.qrImportResult) {
+        if (res.qrImportResult.code && navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(res.qrImportResult.code).catch(() => {});
+        }
+        setQrNotice({
+          kind: 'success',
+          text: `✓ 已自动导入 2FA：${res.qrImportResult.title} · 验证码 ${res.qrImportResult.code} 已复制`,
+        });
+      }
     } catch (error) {
       setErr(error instanceof Error ? error.message : String(error));
     } finally {
@@ -683,6 +905,12 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
             </div>
           )}
 
+          {state.pendingQrImport && (
+            <div className="mb-3 w-full rounded-[12px] bg-primary/10 px-3.5 py-2.5 text-[12px] font-medium text-primary">
+              已识别网页 2FA 二维码（{state.pendingQrImport.previewTitle}），解锁后自动保存
+            </div>
+          )}
+
           {err && (
             <div className="mb-3 w-full rounded-[12px] bg-rose-500/10 px-3.5 py-2.5 text-[12px] font-medium text-rose-600 dark:text-rose-400">
               {err}
@@ -857,6 +1085,36 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
               </button>
               <button
                 type="button"
+                disabled={qrBusy}
+                onClick={() => void handleStartQrSnip()}
+                className="flex w-full items-center gap-2 rounded-[8px] px-2.5 py-1.5 text-left text-[12.5px] font-normal text-foreground transition-colors hover:bg-muted disabled:opacity-50"
+              >
+                <ScanLine className="h-3.5 w-3.5 text-primary" strokeWidth={1.65} />
+                <span>框选网页二维码</span>
+              </button>
+              <button
+                type="button"
+                disabled={qrBusy}
+                onClick={() => void handlePasteQrFromClipboard()}
+                className="flex w-full items-center gap-2 rounded-[8px] px-2.5 py-1.5 text-left text-[12.5px] font-normal text-foreground transition-colors hover:bg-muted disabled:opacity-50"
+              >
+                <ClipboardPaste className="h-3.5 w-3.5 text-muted-foreground" strokeWidth={1.65} />
+                <span>粘贴截图识别 2FA</span>
+              </button>
+              <button
+                type="button"
+                disabled={qrBusy}
+                onClick={() => {
+                  setShowMenu(false);
+                  qrFileInputRef.current?.click();
+                }}
+                className="flex w-full items-center gap-2 rounded-[8px] px-2.5 py-1.5 text-left text-[12.5px] font-normal text-foreground transition-colors hover:bg-muted disabled:opacity-50"
+              >
+                <ImagePlus className="h-3.5 w-3.5 text-muted-foreground" strokeWidth={1.65} />
+                <span>选图识别 2FA</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   void handleToggleInlineBadge();
                 }}
@@ -917,8 +1175,38 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
         </div>
       </div>
 
+      {/* Hidden file input for 2FA QR image upload */}
+      <input
+        ref={qrFileInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(e) => void handleQrFileChange(e)}
+      />
+
       {/* Single Active Tab Body */}
       <div className="flex-1 space-y-2.5 overflow-y-auto px-4 pb-4">
+        {qrNotice && (
+          <div
+            className={`flex items-start justify-between gap-2 rounded-[12px] px-3.5 py-2.5 text-[12px] font-medium ${
+              qrNotice.kind === 'error'
+                ? 'bg-rose-500/10 text-rose-600 dark:text-rose-400'
+                : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
+            }`}
+          >
+            <span className="min-w-0 flex-1 leading-relaxed">{qrNotice.text}</span>
+            <button
+              type="button"
+              onClick={() => setQrNotice(null)}
+              aria-label="关闭提示"
+              className="mt-0.5 shrink-0 opacity-70 transition-opacity hover:opacity-100"
+            >
+              <X className="h-3.5 w-3.5" strokeWidth={1.75} />
+            </button>
+          </div>
+        )}
+
         {/* Contextual Pending Save Banner (only in 当前匹配 tab) */}
         {state.pendingCapture && activeTab === 'site' && (
           <div className="flex items-center justify-between gap-2 rounded-[12px] bg-primary/10 px-3.5 py-2.5">
@@ -1121,10 +1409,83 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
         {/* Tab 1: Persistent Authenticator-Style 2FA Codes */}
         {activeTab === '2fa' && (
           <section aria-label="验证码" className="space-y-2">
+            {totpItems.length > 0 && (
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={qrBusy}
+                  onClick={() => void handleStartQrSnip()}
+                  className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-[9px] bg-primary/10 px-2.5 text-[12px] font-medium text-primary transition-colors hover:bg-primary/15 disabled:opacity-50"
+                >
+                  <ScanLine className="h-3.5 w-3.5 shrink-0" strokeWidth={1.75} />
+                  <span className="truncate">框选网页二维码</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={qrBusy}
+                  onClick={() => void handlePasteQrFromClipboard()}
+                  title="粘贴剪贴板截图或按 ⌘V / Ctrl+V"
+                  className="inline-flex h-8 items-center justify-center gap-1 rounded-[9px] bg-muted px-2.5 text-[12px] font-normal text-foreground transition-colors hover:bg-muted/80 disabled:opacity-50"
+                >
+                  <ClipboardPaste className="h-3.5 w-3.5 shrink-0 text-muted-foreground" strokeWidth={1.65} />
+                  <span>粘贴截图</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={qrBusy}
+                  onClick={() => qrFileInputRef.current?.click()}
+                  className="inline-flex h-8 items-center justify-center gap-1 rounded-[9px] bg-muted px-2.5 text-[12px] font-normal text-foreground transition-colors hover:bg-muted/80 disabled:opacity-50"
+                >
+                  <ImagePlus className="h-3.5 w-3.5 shrink-0 text-muted-foreground" strokeWidth={1.65} />
+                  <span>选图识别</span>
+                </button>
+              </div>
+            )}
+
             {filteredTotpItems.length === 0 ? (
-              <div className="rounded-[12px] bg-card px-4 py-10 text-center text-[13px] font-normal text-muted-foreground">
+              <div className="rounded-[12px] bg-card px-4 py-8 text-center text-[13px] font-normal text-muted-foreground">
                 <ShieldCheck className="mx-auto mb-2 h-6 w-6 text-muted-foreground/65" strokeWidth={1.65} />
-                {localFilter.trim() ? '没有找到匹配的 2FA 验证码' : '暂无 2FA 验证器密钥'}
+                <div className="text-[13.5px] font-medium text-foreground">
+                  {localFilter.trim() ? '没有找到匹配的 2FA 验证码' : '暂无 2FA 验证器密钥'}
+                </div>
+                {!localFilter.trim() && (
+                  <>
+                    <p className="mt-1.5 text-[12px] font-normal leading-relaxed text-muted-foreground">
+                      支持框选网页上的 2FA 二维码，或直接 ⌘V / Ctrl+V 粘贴截图识别。
+                    </p>
+                    <div className="mt-4 flex flex-col gap-2">
+                      <button
+                        type="button"
+                        disabled={qrBusy}
+                        onClick={() => void handleStartQrSnip()}
+                        className="inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-[9px] bg-primary px-3 text-[12.5px] font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                      >
+                        <ScanLine className="h-3.5 w-3.5" strokeWidth={1.75} />
+                        <span>{qrBusy ? '正在处理...' : '框选网页二维码'}</span>
+                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={qrBusy}
+                          onClick={() => void handlePasteQrFromClipboard()}
+                          className="inline-flex h-8.5 flex-1 items-center justify-center gap-1.5 rounded-[9px] bg-background px-2.5 text-[12px] font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-50"
+                        >
+                          <ClipboardPaste className="h-3.5 w-3.5 text-muted-foreground" strokeWidth={1.65} />
+                          <span>粘贴截图</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={qrBusy}
+                          onClick={() => qrFileInputRef.current?.click()}
+                          className="inline-flex h-8.5 flex-1 items-center justify-center gap-1.5 rounded-[9px] bg-background px-2.5 text-[12px] font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-50"
+                        >
+                          <ImagePlus className="h-3.5 w-3.5 text-muted-foreground" strokeWidth={1.65} />
+                          <span>选图识别</span>
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             ) : (
               filteredTotpItems.map((it, idx) => {

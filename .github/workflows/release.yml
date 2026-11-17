@@ -18,11 +18,27 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build macOS universal target binaries
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Rust WASM, native dylib, core, and MV3 extension
+        run: |
+          pnpm build:rust
+          pnpm --filter @nonepwd/core build
+          pnpm --filter @nonepwd/extension build
+
+      - name: Build macOS universal CLI binaries
         run: |
           mkdir -p release-assets
           cargo build -p nonepwd-cli --target aarch64-apple-darwin --release
@@ -31,9 +47,195 @@ jobs:
           cp target/x86_64-apple-darwin/release/np release-assets/np-darwin-x86_64
           chmod 755 release-assets/np-darwin-*
 
+      - name: Test and package macOS NonePwd.app
+        run: |
+          ./apps/desktop/scripts/test.sh
+          ./apps/desktop/scripts/build-app.sh
+          ditto -c -k --sequesterRsrc --keepParent apps/desktop/dist/NonePwd.app release-assets/NonePwd-macos-arm64.zip
+
+      - name: Install nsh and package iOS artifacts
+        run: |
+          brew install longbridge/tap/nsh
+          nsh component add ios
+          (cd apps/nsh && nsh check && nsh test)
+          WORK_DIR="$PWD"
+          mkdir -p "$WORK_DIR/dist-ios" "$WORK_DIR/dist-ios-sim" "$WORK_DIR/ipa-stage/Payload"
+          nsh package --target ios -o "$WORK_DIR/dist-ios" apps/nsh
+          cp -R "$WORK_DIR/dist-ios/NonePwd.app" "$WORK_DIR/ipa-stage/Payload/"
+          (cd "$WORK_DIR/ipa-stage" && zip -qry "$WORK_DIR/release-assets/NonePwd-ios-unsigned.ipa" Payload)
+          nsh package --target ios-simulator -o "$WORK_DIR/dist-ios-sim" apps/nsh
+          ditto -c -k --sequesterRsrc --keepParent "$WORK_DIR/dist-ios-sim/NonePwd.app" "$WORK_DIR/release-assets/NonePwd-ios-sim-arm64.app.zip"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-binaries
+          name: macos-and-ios-assets
+          path: release-assets/*
+
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        run: |
+          set +o pipefail
+          yes | sdkmanager --licenses >/dev/null
+          set -o pipefail
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Install nsh and Android component
+        run: |
+          curl -fsSL https://nsh.dev/install.sh | sh
+          if [ -x "$HOME/.nsh/bin/nsh" ]; then
+            NSH_DIR="$HOME/.nsh/bin"
+          elif [ -x "$HOME/.local/bin/nsh" ]; then
+            NSH_DIR="$HOME/.local/bin"
+          elif [ -x "$HOME/.cargo/bin/nsh" ]; then
+            NSH_DIR="$HOME/.cargo/bin"
+          elif command -v nsh >/dev/null 2>&1; then
+            NSH_DIR="$(dirname "$(command -v nsh)")"
+          else
+            echo "ERROR: nsh binary not found after install.sh" >&2
+            exit 1
+          fi
+          "$NSH_DIR/nsh" component add android
+          echo "$NSH_DIR" >> "$GITHUB_PATH"
+
+      - name: Check, test, and package Android APK
+        run: |
+          (cd apps/nsh && nsh check && nsh test)
+          mkdir -p "$PWD/dist-android" release-assets
+          nsh package --target android -o "$PWD/dist-android" apps/nsh
+          APK_FILE="$(find "$PWD/dist-android" -maxdepth 2 -name '*.apk' -print -quit)"
+          if [ -z "$APK_FILE" ]; then
+            echo "ERROR: No .apk produced in $PWD/dist-android" >&2
+            ls -la "$PWD/dist-android" >&2 || true
+            exit 1
+          fi
+          cp "$APK_FILE" release-assets/NonePwd-android.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-assets
+          path: release-assets/NonePwd-android.apk
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Windows CLI binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          cargo build -p nonepwd-cli --release
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+          Copy-Item target\release\np.exe -Destination release-assets\np-windows-x64.exe -Force
+
+      - name: Download nsh for Windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $headers = @{
+            'User-Agent' = 'nonepwd-ci'
+            'Accept'     = 'application/vnd.github+json'
+          }
+          $release = $null
+          try {
+            $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/longbridge/nsh/releases/latest' -Headers $headers
+          } catch {
+            Write-Warning "GitHub API lookup for longbridge/nsh failed ($($_.Exception.Message)); falling back to latest release URL."
+          }
+
+          if ($release) {
+            $asset = $release.assets | Where-Object {
+              ($_.name -like '*x86_64-pc-windows*.zip' -or $_.name -like '*windows*x86_64*.zip' -or $_.name -like '*x86_64*windows*.zip') -and
+              $_.name -notlike '*.sha256*'
+            } | Select-Object -First 1
+            if (-not $asset) {
+              $asset = $release.assets | Where-Object {
+                $_.name -like '*windows*.zip' -and
+                $_.name -notmatch 'arm64|aarch64' -and
+                $_.name -notlike '*.sha256*'
+              } | Select-Object -First 1
+            }
+            if (-not $asset) {
+              $available = ($release.assets | ForEach-Object { $_.name }) -join ', '
+              throw "No Windows x86_64 zip asset found in longbridge/nsh $($release.tag_name). Available assets: $available"
+            }
+            $downloadUrl = $asset.browser_download_url
+          } else {
+            $downloadUrl = 'https://github.com/longbridge/nsh/releases/latest/download/nsh-windows-x86_64.zip'
+          }
+
+          $zipPath = Join-Path $env:RUNNER_TEMP 'nsh-windows.zip'
+          $extractDir = Join-Path $env:RUNNER_TEMP 'nsh-bin'
+          if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
+          try {
+            Invoke-WebRequest -Uri $downloadUrl -Headers @{ 'User-Agent' = 'nonepwd-ci' } -OutFile $zipPath
+          } catch {
+            throw "Failed to download nsh Windows binary from ${downloadUrl}: $($_.Exception.Message)"
+          }
+
+          Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+          $nshExe = Get-ChildItem -Path $extractDir -Filter 'nsh.exe' -Recurse -File | Select-Object -First 1
+          if (-not $nshExe) {
+            throw "nsh.exe not found in extracted archive from $downloadUrl"
+          }
+          $nshExe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+          & $nshExe.FullName --version
+          if ($LASTEXITCODE -ne 0) { throw "nsh --version failed" }
+          $componentList = (& $nshExe.FullName component list 2>&1) -join "`n"
+          Write-Host $componentList
+          if ($componentList -match '(?m)^\s*windows\b') {
+            & $nshExe.FullName component add windows
+            if ($LASTEXITCODE -ne 0) { throw "nsh component add windows failed" }
+          }
+
+      - name: Check, test, and package Windows NSH app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location apps\nsh
+          try {
+            nsh check
+            if ($LASTEXITCODE -ne 0) { throw "nsh check failed with exit code $LASTEXITCODE" }
+            nsh test
+            if ($LASTEXITCODE -ne 0) { throw "nsh test failed with exit code $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+
+          $outDir = Join-Path (Get-Location) 'dist-win'
+          if (Test-Path $outDir) { Remove-Item $outDir -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $outDir, 'release-assets' | Out-Null
+
+          nsh package --target windows -o $outDir apps\nsh
+          if ($LASTEXITCODE -ne 0) { throw "nsh package --target windows failed with exit code $LASTEXITCODE" }
+
+          $existingZip = Get-ChildItem -Path $outDir -Filter '*.zip' -File | Select-Object -First 1
+          if ($existingZip) {
+            Copy-Item $existingZip.FullName -Destination 'release-assets\NonePwd-windows-x64.zip' -Force
+          } else {
+            Compress-Archive -Path "$outDir\*" -DestinationPath 'release-assets\NonePwd-windows-x64.zip' -Force
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-assets
           path: release-assets/*
 
   build-linux-and-extension:
@@ -147,7 +349,7 @@ jobs:
           done
 
   publish-release:
-    needs: [build-macos, build-linux-and-extension, docker-ghcr]
+    needs: [build-macos, build-android, build-windows, build-linux-and-extension, docker-ghcr]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -158,7 +360,10 @@ jobs:
       - name: Generate SHA-256 checksums
         run: |
           cd artifacts
-          sha256sum np-* nonepwd-extension.zip > SHA256SUMS.txt
+          rm -f SHA256SUMS.txt
+          sha256sum -- * > /tmp/SHA256SUMS.txt
+          mv /tmp/SHA256SUMS.txt SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
         with:

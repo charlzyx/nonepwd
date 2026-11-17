@@ -1,5 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Cloud, Filter, HardDrive, Inbox, Plus, RefreshCw, RotateCcw, Save, TestTube2, Trash2 } from 'lucide-react';
+import {
+  Cloud,
+  Filter,
+  HardDrive,
+  Inbox,
+  Pencil,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  TestTube2,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { randomId } from '@nonepwd/core';
 import {
   useVault,
@@ -7,6 +20,7 @@ import {
   type EmailFilterField,
   type EmailFilterMode,
   type EmailFilterRule,
+  type ImapAccountPublic,
   type R2BackupMeta,
 } from '../state/VaultContext';
 import { CopyButton } from './CopyButton';
@@ -24,6 +38,31 @@ const IMAP_PRESETS = [
   { label: 'iCloud', host: 'imap.mail.me.com', port: 993, tls: true },
   { label: 'Outlook', host: 'outlook.office365.com', port: 993, tls: true },
 ] as const;
+
+function getAccountStatusBadge(acc: ImapAccountPublic): { label: string; className: string } {
+  if (!acc.enabled || acc.status === 'disabled') {
+    return {
+      label: '已禁用',
+      className: 'border-border bg-muted text-muted-foreground',
+    };
+  }
+  if (acc.status === 'listening') {
+    return {
+      label: '监听中',
+      className: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+    };
+  }
+  if (acc.status === 'connecting') {
+    return {
+      label: '连接中',
+      className: 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+    };
+  }
+  return {
+    label: '连接异常',
+    className: 'border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400',
+  };
+}
 
 const DEFAULT_FILTER: EmailFilterConfig = {
   enabled: false,
@@ -57,9 +96,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialFocus }) => {
   const {
     account,
     imapConfig,
+    imapAccounts,
     updateSettings,
-    saveImapConfig,
+    saveImapAccount,
+    deleteImapAccount,
     testImapConfig,
+    syncImapNow,
     getEmailFilter,
     saveEmailFilter,
     listBackups,
@@ -69,7 +111,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialFocus }) => {
   } = useVault();
 
   const filterRef = useRef<HTMLFormElement>(null);
-  const imapRef = useRef<HTMLFormElement>(null);
+  const imapRef = useRef<HTMLDivElement>(null);
   const aliasRef = useRef<HTMLDivElement>(null);
   const backupRef = useRef<HTMLDivElement>(null);
   const [highlightedTab, setHighlightedTab] = useState<SettingsFocusTab | null>(
@@ -81,16 +123,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialFocus }) => {
   const [aliasNotice, setAliasNotice] = useState<string | null>(null);
   const [aliasError, setAliasError] = useState<string | null>(null);
 
-  const [imapEnabled, setImapEnabled] = useState(
-    Boolean(imapConfig?.enabled) || (!imapConfig?.enabled && !imapConfig?.host)
-  );
-  const [imapHost, setImapHost] = useState(imapConfig?.host ?? '');
-  const [imapPort, setImapPort] = useState(imapConfig?.port ?? 993);
-  const [imapTls, setImapTls] = useState(imapConfig?.tls ?? true);
-  const [imapUser, setImapUser] = useState(imapConfig?.username ?? '');
+  const [imapEditorOpen, setImapEditorOpen] = useState(false);
+  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
+  const [editingHasPassword, setEditingHasPassword] = useState(false);
+  const [imapLabel, setImapLabel] = useState('');
+  const [imapEnabled, setImapEnabled] = useState(true);
+  const [imapHost, setImapHost] = useState('');
+  const [imapPort, setImapPort] = useState(993);
+  const [imapTls, setImapTls] = useState(true);
+  const [imapUser, setImapUser] = useState('');
   const [imapPass, setImapPass] = useState('');
-  const [testResult, setTestResult] = useState<string | null>(null);
+  const [testingImap, setTestingImap] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok?: boolean; message: string } | null>(null);
   const [savingImap, setSavingImap] = useState(false);
+  const [busyAccountId, setBusyAccountId] = useState<string | null>(null);
+  const [syncingAccountId, setSyncingAccountId] = useState<string | null>(null);
   const [imapNotice, setImapNotice] = useState<string | null>(null);
   const [imapError, setImapError] = useState<string | null>(null);
 
@@ -290,26 +337,163 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialFocus }) => {
     }
   };
 
-  const handleSaveImap = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSavingImap(true);
+  const openAddImapEditor = () => {
+    setEditingAccountId(null);
+    setEditingHasPassword(false);
+    setImapLabel('');
+    setImapEnabled(true);
+    setImapHost('');
+    setImapPort(993);
+    setImapTls(true);
+    setImapUser('');
+    setImapPass('');
+    setTestResult(null);
     setImapNotice(null);
     setImapError(null);
+    setImapEditorOpen(true);
+  };
+
+  const openEditImapEditor = (acc: ImapAccountPublic) => {
+    setEditingAccountId(acc.id);
+    setEditingHasPassword(acc.hasPassword);
+    setImapLabel(acc.label);
+    setImapEnabled(acc.enabled);
+    setImapHost(acc.host);
+    setImapPort(acc.port);
+    setImapTls(acc.tls);
+    setImapUser(acc.username);
+    setImapPass('');
+    setTestResult(null);
+    setImapNotice(null);
+    setImapError(null);
+    setImapEditorOpen(true);
+  };
+
+  const handleSaveImap = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setImapNotice(null);
+    setImapError(null);
+
+    const host = imapHost.trim();
+    const username = imapUser.trim();
+    const label = imapLabel.trim() || username;
+    if (!host) {
+      setImapError('请填写 IMAP Host（可点击上方预设自动填充）');
+      return;
+    }
+    if (!username) {
+      setImapError('请填写邮箱账号');
+      return;
+    }
+    if (!editingAccountId && !imapPass.trim()) {
+      setImapError('新建邮箱账号时请填写应用专用密码 / 授权码');
+      return;
+    }
+
+    setSavingImap(true);
     try {
-      await saveImapConfig({
+      const saved = await saveImapAccount({
+        id: editingAccountId ?? undefined,
+        label,
         enabled: imapEnabled,
-        host: imapHost.trim(),
-        port: Number(imapPort),
+        host,
+        port: Number(imapPort) || 993,
         tls: imapTls,
-        username: imapUser.trim(),
+        username,
         password: imapPass || undefined,
       });
       setImapPass('');
-      setImapNotice(imapEnabled ? 'IMAP 设置已保存并启用收信监听' : 'IMAP 设置已保存');
+      setEditingAccountId(null);
+      setEditingHasPassword(false);
+      setImapLabel('');
+      setImapHost('');
+      setImapPort(993);
+      setImapTls(true);
+      setImapUser('');
+      setImapEnabled(true);
+      setTestResult(null);
+      setImapEditorOpen(false);
+      setImapNotice(
+        saved.enabled
+          ? `已保存并启用「${saved.label || saved.username}」收信监听`
+          : `已保存「${saved.label || saved.username}」`
+      );
     } catch (err) {
-      setImapError(err instanceof Error ? err.message : '保存 IMAP 设置失败');
+      setImapError(err instanceof Error ? err.message : '保存邮箱账号失败');
     } finally {
       setSavingImap(false);
+    }
+  };
+
+  const handleToggleImapAccount = async (acc: ImapAccountPublic) => {
+    setBusyAccountId(acc.id);
+    setImapNotice(null);
+    setImapError(null);
+    try {
+      const nextEnabled = !acc.enabled;
+      await saveImapAccount({
+        id: acc.id,
+        label: acc.label,
+        enabled: nextEnabled,
+        host: acc.host,
+        port: acc.port,
+        tls: acc.tls,
+        username: acc.username,
+      });
+      setImapNotice(
+        nextEnabled
+          ? `已启用「${acc.label || acc.username}」`
+          : `已停用「${acc.label || acc.username}」`
+      );
+    } catch (err) {
+      setImapError(err instanceof Error ? err.message : '切换邮箱状态失败');
+    } finally {
+      setBusyAccountId(null);
+    }
+  };
+
+  const handleSyncImapAccount = async (acc: ImapAccountPublic) => {
+    setSyncingAccountId(acc.id);
+    setImapNotice(null);
+    setImapError(null);
+    try {
+      const res = await syncImapNow(acc.id);
+      if (res.ok) {
+        setImapNotice(
+          res.synced && res.synced > 0
+            ? `「${acc.label || acc.username}」同步完成，拉取 ${res.synced} 封新邮件`
+            : `「${acc.label || acc.username}」同步完成，已是最新`
+        );
+      } else {
+        setImapError(res.error || `「${acc.label || acc.username}」同步失败`);
+      }
+    } finally {
+      setSyncingAccountId(null);
+    }
+  };
+
+  const handleDeleteImapAccount = async (acc: ImapAccountPublic) => {
+    setBusyAccountId(acc.id);
+    setImapNotice(null);
+    setImapError(null);
+    try {
+      await deleteImapAccount(acc.id);
+      if (editingAccountId === acc.id) {
+        setEditingAccountId(null);
+        setEditingHasPassword(false);
+        setImapLabel('');
+        setImapHost('');
+        setImapPort(993);
+        setImapTls(true);
+        setImapUser('');
+        setImapPass('');
+        setImapEditorOpen(false);
+      }
+      setImapNotice(`已删除邮箱账号「${acc.label || acc.username}」`);
+    } catch (err) {
+      setImapError(err instanceof Error ? err.message : '删除邮箱账号失败');
+    } finally {
+      setBusyAccountId(null);
     }
   };
 
@@ -360,22 +544,45 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialFocus }) => {
   };
 
   const handleTestImap = async () => {
-    setTestResult('正在连接 IMAP 服务器...');
+    const host = imapHost.trim();
+    const username = imapUser.trim();
+    if (!host || !username) {
+      setTestResult({ ok: false, message: '请先填写 IMAP Host 和邮箱账号。' });
+      return;
+    }
+    setTestingImap(true);
+    setTestResult({ message: '正在连接 IMAP 服务器...' });
     try {
       const res = await testImapConfig({
-        host: imapHost,
-        port: Number(imapPort),
+        id: editingAccountId ?? undefined,
+        host,
+        port: Number(imapPort) || 993,
         tls: imapTls,
-        username: imapUser,
+        username,
         password: imapPass || undefined,
       });
-      setTestResult(
-        res.ok ? `连接成功，INBOX 当前共有 ${res.messages ?? 0} 封邮件。` : `连接失败：${res.error}`
-      );
+      setTestResult({
+        ok: res.ok,
+        message: res.ok
+          ? `连接成功，INBOX 当前共有 ${res.messages ?? 0} 封邮件。`
+          : `连接失败：${res.error ?? '未知错误'}`,
+      });
     } catch (err) {
-      setTestResult(err instanceof Error ? err.message : '测试连接失败');
+      setTestResult({
+        ok: false,
+        message: err instanceof Error ? err.message : '测试连接失败',
+      });
+    } finally {
+      setTestingImap(false);
     }
   };
+
+  const showImapEditor = imapEditorOpen || imapAccounts.length === 0;
+  const enabledImapCount = imapAccounts.filter((a) => a.enabled).length;
+  const aggregateListening =
+    imapAccounts.some((a) => a.status === 'listening') || imapConfig?.status === 'listening';
+  const aggregateError =
+    imapAccounts.some((a) => a.status === 'error') || imapConfig?.status === 'error';
 
   return (
     <div className="flex-1 overflow-y-auto bg-background p-6 text-foreground">
@@ -617,29 +824,45 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialFocus }) => {
           </div>
         </form>
 
-        {/* IMAP IDLE Card */}
-        <form
+        {/* Multi-Account IMAP IDLE Card */}
+        <div
           ref={imapRef}
           data-settings-section="imap"
-          onSubmit={handleSaveImap}
           className={`space-y-4 rounded-xl border border-border bg-card p-5 ${cardFocusClass('imap')}`}
         >
-          <div className="flex items-center justify-between">
-            <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-              <Inbox className="h-4 w-4 text-muted-foreground" />
-              IMAP IDLE 收信配置
-            </h3>
-            <span
-              className={`rounded-full border border-border bg-background px-2.5 py-0.5 font-mono text-[11px] font-medium ${
-                imapConfig?.status === 'listening'
-                  ? 'text-emerald-600 dark:text-emerald-400'
-                  : imapConfig?.status === 'error'
-                  ? 'text-rose-600 dark:text-rose-400'
-                  : 'text-muted-foreground'
-              }`}
-            >
-              状态：{imapConfig?.status ?? 'disabled'}
-            </span>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                <Inbox className="h-4 w-4 text-muted-foreground" />
+                多邮箱 IMAP 收信
+              </h3>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                支持同时绑定多个 QQ、Gmail、163、iCloud、Outlook 或自定义企业 IMAP 邮箱实时提取验证码。
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={`rounded-full border border-border bg-background px-2.5 py-0.5 font-mono text-[11px] font-medium ${
+                  aggregateListening
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : aggregateError
+                      ? 'text-rose-600 dark:text-rose-400'
+                      : 'text-muted-foreground'
+                }`}
+              >
+                {imapAccounts.length > 0
+                  ? `已启用 ${enabledImapCount}/${imapAccounts.length}`
+                  : `状态：${imapConfig?.status ?? 'disabled'}`}
+              </span>
+              <button
+                type="button"
+                onClick={openAddImapEditor}
+                className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/85"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>添加邮箱账号</span>
+              </button>
+            </div>
           </div>
 
           {imapError && (
@@ -654,130 +877,300 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialFocus }) => {
             </div>
           )}
 
-          {imapConfig?.lastError && (
-            <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
-              最近错误：{imapConfig.lastError}
+          {/* Configured Accounts List */}
+          {imapAccounts.length > 0 && (
+            <div className="space-y-2.5">
+              {imapAccounts.map((acc) => {
+                const badge = getAccountStatusBadge(acc);
+                const isBusy = busyAccountId === acc.id;
+                const isSyncing = syncingAccountId === acc.id;
+                const isEditingThis = editingAccountId === acc.id && showImapEditor;
+                return (
+                  <div
+                    key={acc.id}
+                    className={`rounded-lg border bg-background p-3.5 transition-colors ${
+                      isEditingThis ? 'border-primary/60' : 'border-border'
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="truncate text-xs font-semibold text-foreground">
+                            {acc.label || acc.username}
+                          </span>
+                          <span
+                            className={`rounded-full border px-2 py-0.5 font-mono text-[10px] font-medium ${badge.className}`}
+                          >
+                            {badge.label}
+                          </span>
+                          {acc.hasPassword && (
+                            <span className="rounded border border-border bg-card px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                              已加密凭据
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-[11px] text-muted-foreground">
+                          <span className="text-foreground/85">{acc.username}</span>
+                          <span>
+                            {acc.host}:{acc.port}
+                            {acc.tls ? ' · TLS' : ''}
+                          </span>
+                          {acc.lastSyncAt && <span>上次同步：{acc.lastSyncAt}</span>}
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={acc.enabled}
+                          aria-label={acc.enabled ? `停用 ${acc.username}` : `启用 ${acc.username}`}
+                          disabled={isBusy}
+                          onClick={() => void handleToggleImapAccount(acc)}
+                          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-50"
+                        >
+                          <span
+                            className={`relative inline-flex h-3.5 w-6 shrink-0 items-center rounded-full transition-colors ${
+                              acc.enabled ? 'bg-emerald-500' : 'bg-muted-foreground/40'
+                            }`}
+                          >
+                            <span
+                              className={`inline-block h-2.5 w-2.5 rounded-full bg-white transition-transform ${
+                                acc.enabled ? 'translate-x-3' : 'translate-x-0.5'
+                              }`}
+                            />
+                          </span>
+                          <span>{acc.enabled ? '已启用' : '已停用'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={isSyncing || isBusy}
+                          onClick={() => void handleSyncImapAccount(acc)}
+                          className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50"
+                        >
+                          <RefreshCw className={`h-3 w-3 ${isSyncing ? 'animate-spin' : ''}`} />
+                          <span>{isSyncing ? '同步中' : '同步'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => openEditImapEditor(acc)}
+                          className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50"
+                        >
+                          <Pencil className="h-3 w-3" />
+                          <span>编辑</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => void handleDeleteImapAccount(acc)}
+                          aria-label={`删除 ${acc.username}`}
+                          className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-xs font-medium text-muted-foreground hover:border-rose-500/40 hover:text-rose-600 disabled:opacity-50 dark:hover:text-rose-400"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                          <span>删除</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {acc.lastError && (
+                      <div className="mt-2 rounded-md border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[11px] text-rose-600 dark:text-rose-400">
+                        最近错误：{acc.lastError}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-xs text-muted-foreground">常用预设：</span>
-            {IMAP_PRESETS.map((preset) => {
-              const selected = imapHost.trim().toLowerCase() === preset.host.toLowerCase();
-              return (
-                <button
-                  key={preset.label}
-                  type="button"
-                  onClick={() => {
-                    setImapHost(preset.host);
-                    setImapPort(preset.port);
-                    setImapTls(preset.tls);
-                    setImapEnabled(true);
-                    setImapNotice(null);
-                    setImapError(null);
-                  }}
-                  className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
-                    selected
-                      ? 'bg-primary text-primary-foreground'
-                      : 'border border-border bg-background text-foreground hover:bg-muted'
+          {/* Inline Add / Edit IMAP Account Card */}
+          {showImapEditor && (
+            <form
+              onSubmit={handleSaveImap}
+              className="space-y-4 rounded-lg border border-border bg-background p-4"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs font-semibold text-foreground">
+                  {editingAccountId ? '编辑邮箱账号' : '添加邮箱账号'}
+                </div>
+                {imapAccounts.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingAccountId(null);
+                      setEditingHasPassword(false);
+                      setImapEditorOpen(false);
+                      setTestResult(null);
+                    }}
+                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    <span>取消</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs text-muted-foreground">常用预设：</span>
+                {IMAP_PRESETS.map((preset) => {
+                  const selected = imapHost.trim().toLowerCase() === preset.host.toLowerCase();
+                  return (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => {
+                        setImapHost(preset.host);
+                        setImapPort(preset.port);
+                        setImapTls(preset.tls);
+                        setImapEnabled(true);
+                        setImapNotice(null);
+                        setImapError(null);
+                        setTestResult(null);
+                      }}
+                      className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+                        selected
+                          ? 'bg-primary text-primary-foreground'
+                          : 'border border-border bg-card text-foreground hover:bg-muted'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+                <span className="text-[11px] text-muted-foreground">（或下方填写自定义 IMAP）</span>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs text-muted-foreground">
+                  账号备注 (如 主力 QQ / 工作邮箱 / 备用 Gmail)
+                </label>
+                <input
+                  type="text"
+                  value={imapLabel}
+                  onChange={(e) => setImapLabel(e.target.value)}
+                  placeholder="主力 QQ / 工作 Gmail / 企业邮箱"
+                  className="w-full rounded-md border border-input bg-card px-3 py-2 text-xs text-foreground outline-none focus:border-ring"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div className="sm:col-span-2">
+                  <label className="mb-1 block text-xs text-muted-foreground">IMAP Host</label>
+                  <input
+                    type="text"
+                    value={imapHost}
+                    onChange={(e) => setImapHost(e.target.value)}
+                    placeholder="imap.qq.com / imap.gmail.com / mail.company.com"
+                    className="w-full rounded-md border border-input bg-card px-3 py-2 text-xs text-foreground outline-none focus:border-ring"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-muted-foreground">端口</label>
+                  <input
+                    type="number"
+                    value={imapPort}
+                    onChange={(e) => setImapPort(Number(e.target.value))}
+                    className="w-full rounded-md border border-input bg-card px-3 py-2 text-xs text-foreground outline-none focus:border-ring"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs text-muted-foreground">邮箱账号</label>
+                  <input
+                    type="text"
+                    value={imapUser}
+                    onChange={(e) => setImapUser(e.target.value)}
+                    placeholder="you@qq.com / you@gmail.com"
+                    className="w-full rounded-md border border-input bg-card px-3 py-2 text-xs text-foreground outline-none focus:border-ring"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-muted-foreground">
+                    应用专用密码 / 授权码 (App Password)
+                    {editingAccountId && editingHasPassword ? ' · 已加密存储' : ''}
+                  </label>
+                  <input
+                    type="password"
+                    value={imapPass}
+                    onChange={(e) => setImapPass(e.target.value)}
+                    placeholder={
+                      editingAccountId && editingHasPassword
+                        ? '留空保持原密码不变'
+                        : '输入邮箱授权码或应用专用密码'
+                    }
+                    className="w-full rounded-md border border-input bg-card px-3 py-2 text-xs text-foreground outline-none focus:border-ring"
+                  />
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    QQ / 163 请使用 IMAP 授权码；Gmail 请使用 Google 应用专用密码。
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                <div className="flex items-center gap-4 text-xs text-foreground">
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={imapTls}
+                      onChange={(e) => setImapTls(e.target.checked)}
+                      className="accent-primary"
+                    />
+                    <span>启用 TLS/SSL</span>
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={imapEnabled}
+                      onChange={(e) => setImapEnabled(e.target.checked)}
+                      className="accent-primary"
+                    />
+                    <span>启用此邮箱收信监听</span>
+                  </label>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={testingImap || savingImap}
+                    onClick={() => void handleTestImap()}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-2 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50"
+                  >
+                    <TestTube2 className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span>{testingImap ? '测试中...' : '测试连接'}</span>
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingImap}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/85 disabled:opacity-50"
+                  >
+                    <Save className="h-3.5 w-3.5" />
+                    <span>{savingImap ? '保存中...' : '保存账号'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {testResult && (
+                <p
+                  className={`text-xs ${
+                    testResult.ok === true
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : testResult.ok === false
+                        ? 'text-rose-600 dark:text-rose-400'
+                        : 'text-muted-foreground'
                   }`}
                 >
-                  {preset.label}
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div className="sm:col-span-2">
-              <label className="mb-1 block text-xs text-muted-foreground">IMAP Host</label>
-              <input
-                type="text"
-                value={imapHost}
-                onChange={(e) => setImapHost(e.target.value)}
-                placeholder="imap.gmail.com / imap.qq.com"
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs text-foreground outline-none focus:border-ring"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-muted-foreground">端口</label>
-              <input
-                type="number"
-                value={imapPort}
-                onChange={(e) => setImapPort(Number(e.target.value))}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs text-foreground outline-none focus:border-ring"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <label className="mb-1 block text-xs text-muted-foreground">邮箱账号</label>
-              <input
-                type="text"
-                value={imapUser}
-                onChange={(e) => setImapUser(e.target.value)}
-                placeholder="you@gmail.com"
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs text-foreground outline-none focus:border-ring"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-muted-foreground">
-                应用专用密码 (App Password){imapConfig?.hasPassword ? ' · 已加密存储' : ''}
-              </label>
-              <input
-                type="password"
-                value={imapPass}
-                onChange={(e) => setImapPass(e.target.value)}
-                placeholder={imapConfig?.hasPassword ? '留空保持原密码不变' : '输入应用密码'}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs text-foreground outline-none focus:border-ring"
-              />
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-            <div className="flex items-center gap-4 text-xs text-foreground">
-              <label className="flex cursor-pointer items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={imapTls}
-                  onChange={(e) => setImapTls(e.target.checked)}
-                  className="accent-primary"
-                />
-                <span>启用 TLS/SSL</span>
-              </label>
-              <label className="flex cursor-pointer items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={imapEnabled}
-                  onChange={(e) => setImapEnabled(e.target.checked)}
-                  className="accent-primary"
-                />
-                <span>启用后台 IMAP IDLE 监听</span>
-              </label>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleTestImap}
-                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground hover:bg-muted"
-              >
-                <TestTube2 className="h-3.5 w-3.5 text-muted-foreground" />
-                测试连接
-              </button>
-              <button
-                type="submit"
-                disabled={savingImap}
-                className="inline-flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/85"
-              >
-                <Save className="h-3.5 w-3.5" />
-                保存 IMAP 设置
-              </button>
-            </div>
-          </div>
-          {testResult && <p className="text-xs text-muted-foreground">{testResult}</p>}
-        </form>
+                  {testResult.message}
+                </p>
+              )}
+            </form>
+          )}
+        </div>
 
         {/* Cloudflare Email Worker Card */}
         <div

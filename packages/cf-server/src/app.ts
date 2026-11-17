@@ -27,11 +27,18 @@ import {
   saveEmailFilter,
 } from './email.js';
 import {
-  encryptImapPassword,
+  ImapAccountValidationError,
+  computeAggregateImapConfig,
+  deleteImapAccount,
+  getImapAccountById,
   getImapPublicConfig,
-  getStoredImapPassword,
+  listImapAccounts,
+  resolveImapTestParams,
+  saveImapAccount,
+  syncImapAccount,
   syncImapInbox,
   testImapConnection,
+  type SaveImapAccountInput,
 } from './imap.js';
 import {
   createEncryptedSnapshot,
@@ -414,7 +421,7 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       });
     }
 
-    const [account, vaults, itemsRes, aliases, emails, emailFilter, imapStatus] = await Promise.all([
+    const [account, vaults, itemsRes, aliases, emails, emailFilter, imapAccounts] = await Promise.all([
       c.env.DB.prepare(
         `SELECT email, encrypted_root_keyset AS encryptedRootKeyset,
                 email_public_key AS emailPublicKey, cf_webhook_secret AS cfWebhookSecret,
@@ -430,8 +437,10 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       queryAliases(c.env.DB),
       queryEmails(c.env, 100),
       getEmailFilter(c.env.DB),
-      getImapPublicConfig(c.env.DB),
+      listImapAccounts(c.env.DB),
     ]);
+
+    const imapStatus = computeAggregateImapConfig(imapAccounts);
 
     if (imapStatus.enabled) {
       scheduleImapSync(c);
@@ -445,6 +454,7 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       aliases,
       emails,
       imapStatus,
+      imapAccounts,
       emailFilter,
       cfRuntime: {
         runtime: 'cloudflare-workers',
@@ -1116,88 +1126,110 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
   app.get('/api/imap', async (c) => {
     const ownerOrRes = await requireOwner(c);
     if (ownerOrRes instanceof Response) return ownerOrRes;
-    return c.json({ imap: await getImapPublicConfig(c.env.DB) });
+    const accounts = await listImapAccounts(c.env.DB);
+    return c.json({ imap: computeAggregateImapConfig(accounts), accounts });
   });
 
   app.put('/api/imap', async (c) => {
     const ownerOrRes = await requireOwner(c);
     if (ownerOrRes instanceof Response) return ownerOrRes;
 
-    const body = (await c.req.json()) as {
-      enabled?: boolean;
-      host?: string;
-      port?: number;
-      tls?: boolean;
-      username?: string;
-      password?: string;
-    };
+    const body = (await c.req.json()) as SaveImapAccountInput;
 
-    const existing = await c.env.DB.prepare(
-      'SELECT enabled, host, port, tls, username, password_enc, last_uid FROM imap_config WHERE id = 1'
-    ).first<{
-      enabled: number;
-      host: string;
-      port: number;
-      tls: number;
-      username: string;
-      password_enc: string;
-      last_uid: number;
-    }>();
-
-    const account = await c.env.DB.prepare(
-      'SELECT cf_webhook_secret FROM account WHERE id = 1'
-    ).first<{ cf_webhook_secret: string }>();
-    if (!account) {
-      return c.json({ error: 'Account not initialized' }, 400);
+    try {
+      const saved = await saveImapAccount(c.env.DB, body, 'legacy_put');
+      if (saved.id && saved.enabled && saved.hasPassword) {
+        await syncImapAccount(c.env, saved.id, { force: true });
+      }
+    } catch (err) {
+      if (err instanceof ImapAccountValidationError) {
+        return c.json({ error: err.message }, err.statusCode);
+      }
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
 
-    const nextEnabled =
-      body.enabled !== undefined ? Boolean(body.enabled) : Boolean(existing?.enabled);
-    const nextHost = body.host !== undefined ? body.host.trim() : existing?.host ?? '';
-    const parsedPort = body.port !== undefined ? Number(body.port) : existing?.port ?? 993;
-    const nextPort =
-      Number.isFinite(parsedPort) && parsedPort >= 1 && parsedPort <= 65535
-        ? Math.floor(parsedPort)
-        : 993;
-    const nextTls = body.tls !== undefined ? Boolean(body.tls) : (existing?.tls ?? 1) === 1;
-    const nextUsername =
-      body.username !== undefined ? body.username.trim() : existing?.username ?? '';
+    const accounts = await listImapAccounts(c.env.DB);
+    return c.json({ imap: computeAggregateImapConfig(accounts), accounts });
+  });
 
-    let nextPasswordEnc = existing?.password_enc ?? '';
-    if (body.password && body.password.length > 0) {
-      nextPasswordEnc = await encryptImapPassword(account.cf_webhook_secret, body.password);
+  app.post('/api/imap/accounts', async (c) => {
+    const ownerOrRes = await requireOwner(c);
+    if (ownerOrRes instanceof Response) return ownerOrRes;
+
+    const body = (await c.req.json()) as SaveImapAccountInput;
+
+    let saved: Awaited<ReturnType<typeof saveImapAccount>>;
+    try {
+      saved = await saveImapAccount(c.env.DB, body, 'create_or_upsert');
+    } catch (err) {
+      if (err instanceof ImapAccountValidationError) {
+        return c.json({ error: err.message }, err.statusCode);
+      }
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
 
-    const endpointChanged =
-      nextHost !== (existing?.host ?? '') || nextUsername !== (existing?.username ?? '');
-    const nextLastUid = endpointChanged ? 0 : existing?.last_uid ?? 0;
-    const nextStatus = nextEnabled ? 'listening' : 'disabled';
-    const now = new Date().toISOString();
-
-    await c.env.DB.prepare(
-      `UPDATE imap_config
-       SET enabled = ?, host = ?, port = ?, tls = ?, username = ?, password_enc = ?,
-           last_uid = ?, status = ?, last_error = NULL, updated_at = ?
-       WHERE id = 1`
-    )
-      .bind(
-        nextEnabled ? 1 : 0,
-        nextHost,
-        nextPort,
-        nextTls ? 1 : 0,
-        nextUsername,
-        nextPasswordEnc,
-        nextLastUid,
-        nextStatus,
-        now
-      )
-      .run();
-
-    if (nextEnabled && nextHost && nextUsername && nextPasswordEnc) {
-      await syncImapInbox(c.env, { force: true });
+    if (saved.id && saved.enabled && saved.hasPassword) {
+      await syncImapAccount(c.env, saved.id, { force: true });
     }
 
-    return c.json({ imap: await getImapPublicConfig(c.env.DB) });
+    const accounts = await listImapAccounts(c.env.DB);
+    const account = saved.id ? accounts.find((a) => a.id === saved.id) ?? null : null;
+    return c.json(
+      {
+        account,
+        accounts,
+        imap: computeAggregateImapConfig(accounts),
+      },
+      saved.created ? 201 : 200
+    );
+  });
+
+  app.put('/api/imap/accounts/:id', async (c) => {
+    const ownerOrRes = await requireOwner(c);
+    if (ownerOrRes instanceof Response) return ownerOrRes;
+
+    const id = c.req.param('id');
+    const body = (await c.req.json()) as SaveImapAccountInput;
+
+    let saved: Awaited<ReturnType<typeof saveImapAccount>>;
+    try {
+      saved = await saveImapAccount(c.env.DB, { ...body, id }, 'update_strict');
+    } catch (err) {
+      if (err instanceof ImapAccountValidationError) {
+        return c.json({ error: err.message }, err.statusCode);
+      }
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+
+    if (saved.id && saved.enabled && saved.hasPassword) {
+      await syncImapAccount(c.env, saved.id, { force: true });
+    }
+
+    const accounts = await listImapAccounts(c.env.DB);
+    const account = accounts.find((a) => a.id === id) ?? null;
+    return c.json({
+      account,
+      accounts,
+      imap: computeAggregateImapConfig(accounts),
+    });
+  });
+
+  app.delete('/api/imap/accounts/:id', async (c) => {
+    const ownerOrRes = await requireOwner(c);
+    if (ownerOrRes instanceof Response) return ownerOrRes;
+
+    const id = c.req.param('id');
+    const removed = await deleteImapAccount(c.env.DB, id);
+    if (!removed) {
+      return c.json({ error: 'IMAP account not found' }, 404);
+    }
+
+    const accounts = await listImapAccounts(c.env.DB);
+    return c.json({
+      ok: true,
+      accounts,
+      imap: computeAggregateImapConfig(accounts),
+    });
   });
 
   app.post('/api/imap/test', async (c) => {
@@ -1205,6 +1237,7 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     if (ownerOrRes instanceof Response) return ownerOrRes;
 
     const body = (await c.req.json().catch(() => ({}))) as {
+      id?: string;
       host?: string;
       port?: number;
       tls?: boolean;
@@ -1212,40 +1245,21 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       password?: string;
     };
 
-    const existing = await c.env.DB.prepare(
-      'SELECT host, port, tls, username, password_enc FROM imap_config WHERE id = 1'
-    ).first<{
-      host: string;
-      port: number;
-      tls: number;
-      username: string;
-      password_enc: string;
-    }>();
+    const account = await c.env.DB.prepare(
+      'SELECT cf_webhook_secret FROM account WHERE id = 1'
+    ).first<{ cf_webhook_secret: string }>();
 
-    const host = (body.host ?? existing?.host ?? '').trim();
-    const parsedPort = Number(body.port ?? existing?.port ?? 993);
-    const port =
-      Number.isFinite(parsedPort) && parsedPort >= 1 && parsedPort <= 65535
-        ? Math.floor(parsedPort)
-        : 993;
-    const tls = body.tls ?? (existing?.tls ?? 1) === 1;
-    const username = (body.username ?? existing?.username ?? '').trim();
+    const resolved = await resolveImapTestParams(
+      c.env.DB,
+      account?.cf_webhook_secret,
+      body
+    );
 
-    let password = body.password ?? '';
-    if (!password && existing?.password_enc) {
-      const account = await c.env.DB.prepare(
-        'SELECT cf_webhook_secret FROM account WHERE id = 1'
-      ).first<{ cf_webhook_secret: string }>();
-      if (account?.cf_webhook_secret) {
-        password = await getStoredImapPassword(c.env.DB, account.cf_webhook_secret);
-      }
-    }
-
-    if (!host || !username || !password) {
+    if (!resolved.host || !resolved.username || !resolved.password) {
       return c.json({ ok: false, error: '请填写完整的 IMAP 服务器、邮箱账号与授权码' });
     }
 
-    const result = await testImapConnection({ host, port, tls, username, password });
+    const result = await testImapConnection(resolved);
     return c.json(result);
   });
 
@@ -1253,12 +1267,23 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     const ownerOrRes = await requireOwner(c);
     if (ownerOrRes instanceof Response) return ownerOrRes;
 
-    const syncRes = await syncImapInbox(c.env, { force: true });
+    const body = (await c.req.json().catch(() => ({}))) as { id?: string };
+    const accountId = body.id?.trim() || undefined;
+    if (accountId) {
+      const existing = await getImapAccountById(c.env.DB, accountId);
+      if (!existing) {
+        return c.json({ error: 'IMAP account not found' }, 404);
+      }
+    }
+
+    const syncRes = await syncImapInbox(c.env, { force: true, accountId });
+    const accounts = await listImapAccounts(c.env.DB);
     return c.json({
       ok: !syncRes.error,
       synced: syncRes.synced,
       error: syncRes.error ?? null,
-      imap: await getImapPublicConfig(c.env.DB),
+      accounts,
+      imap: computeAggregateImapConfig(accounts),
     });
   });
 

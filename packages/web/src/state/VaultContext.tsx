@@ -78,6 +78,20 @@ export interface EmailFilterConfig {
   rules: EmailFilterRule[];
 }
 
+export interface ImapAccountPublic {
+  id: string;
+  label: string;
+  enabled: boolean;
+  host: string;
+  port: number;
+  tls: boolean;
+  username: string;
+  hasPassword: boolean;
+  status: 'disabled' | 'connecting' | 'listening' | 'error';
+  lastError: string | null;
+  lastSyncAt: string | null;
+}
+
 export interface R2BackupMeta {
   key: string;
   size: number;
@@ -136,6 +150,33 @@ function saveCustomGroups(groups: string[]): void {
   }
 }
 
+function normalizeImapAccounts(
+  imapAccounts: ImapAccountPublic[] | undefined,
+  imapStatus: ImapConfigPublic | null | undefined
+): ImapAccountPublic[] {
+  if (Array.isArray(imapAccounts)) {
+    return imapAccounts;
+  }
+  if (imapStatus && (imapStatus.host || imapStatus.username || imapStatus.enabled)) {
+    return [
+      {
+        id: 'legacy-1',
+        label: imapStatus.username || imapStatus.host || '默认邮箱',
+        enabled: imapStatus.enabled,
+        host: imapStatus.host,
+        port: imapStatus.port,
+        tls: imapStatus.tls,
+        username: imapStatus.username,
+        hasPassword: imapStatus.hasPassword,
+        status: imapStatus.status,
+        lastError: imapStatus.lastError,
+        lastSyncAt: null,
+      },
+    ];
+  }
+  return [];
+}
+
 interface VaultContextValue {
   phase: AuthPhase;
   wsConnected: boolean;
@@ -148,6 +189,7 @@ interface VaultContextValue {
   emails: DecryptedEmailItem[];
   serviceAccounts: ServiceAccountRecord[];
   imapConfig: ImapConfigPublic | null;
+  imapAccounts: ImapAccountPublic[];
   customGroups: string[];
   allGroups: string[];
   securityIssues: Record<string, string>;
@@ -203,14 +245,26 @@ interface VaultContextValue {
     username: string;
     password?: string;
   }): Promise<void>;
+  saveImapAccount(params: {
+    id?: string;
+    label?: string;
+    enabled: boolean;
+    host: string;
+    port: number;
+    tls: boolean;
+    username: string;
+    password?: string;
+  }): Promise<ImapAccountPublic>;
+  deleteImapAccount(id: string): Promise<void>;
   testImapConfig(params: {
+    id?: string;
     host: string;
     port: number;
     tls: boolean;
     username: string;
     password?: string;
   }): Promise<{ ok: boolean; messages?: number; error?: string }>;
-  syncImapNow(): Promise<{ ok: boolean; synced?: number; error?: string | null }>;
+  syncImapNow(accountId?: string): Promise<{ ok: boolean; synced?: number; error?: string | null }>;
   addGroup(name: string): void;
   removeGroup(name: string): Promise<void>;
   toggleItemGroup(item: VaultItemPayload, group: string): Promise<void>;
@@ -245,6 +299,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [emails, setEmails] = useState<DecryptedEmailItem[]>([]);
   const [serviceAccounts, setServiceAccounts] = useState<ServiceAccountRecord[]>([]);
   const [imapConfig, setImapConfig] = useState<ImapConfigPublic | null>(null);
+  const [imapAccounts, setImapAccounts] = useState<ImapAccountPublic[]>([]);
   const [customGroups, setCustomGroups] = useState<string[]>(() => loadCustomGroups());
   const [error, setError] = useState<string | null>(null);
 
@@ -304,6 +359,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         aliases: AliasRecord[];
         emails: EncryptedEmailRecord[];
         imapStatus: ImapConfigPublic;
+        imapAccounts?: ImapAccountPublic[];
       }>('/api/sync'),
       apiFetch<{ serviceAccounts: ServiceAccountRecord[] }>('/api/service-accounts'),
     ]);
@@ -352,6 +408,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setAliases(syncData.aliases);
     setEmails(decryptedEmails);
     setImapConfig(syncData.imapStatus);
+    setImapAccounts(normalizeImapAccounts(syncData.imapAccounts, syncData.imapStatus));
     setServiceAccounts(saData.serviceAccounts);
   }, [apiFetch, decryptEmailRecord]);
 
@@ -396,8 +453,17 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         } else if (msg.type === 'alias.deleted' && msg.id) {
           setAliases((prev) => prev.filter((a) => a.id !== msg.id));
         } else if (msg.type === 'imap.status' && msg.status) {
+          const accountId = (msg as { accountId?: string }).accountId;
           setImapConfig((prev) =>
             prev ? { ...prev, status: msg.status!, lastError: msg.lastError ?? null } : prev
+          );
+          setImapAccounts((prev) =>
+            prev.map((acc) => {
+              if (accountId ? acc.id === accountId : prev.length === 1 && acc.id === 'legacy-1') {
+                return { ...acc, status: msg.status!, lastError: msg.lastError ?? null };
+              }
+              return acc;
+            })
           );
         } else if (
           msg.type === 'item.upserted' ||
@@ -596,6 +662,8 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setAliases([]);
     setEmails([]);
     setServiceAccounts([]);
+    setImapConfig(null);
+    setImapAccounts([]);
     setPhase('locked');
   }, [apiFetch]);
 
@@ -926,13 +994,75 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const saveImapConfig = useCallback<VaultContextValue['saveImapConfig']>(
     async (params) => {
-      const res = await apiFetch<{ imap: ImapConfigPublic }>('/api/imap', {
+      const res = await apiFetch<{
+        imap: ImapConfigPublic;
+        accounts?: ImapAccountPublic[];
+      }>('/api/imap', {
         method: 'PUT',
         body: JSON.stringify(params),
       });
       setImapConfig(res.imap);
+      if (Array.isArray(res.accounts)) {
+        setImapAccounts(res.accounts);
+      }
+      await refreshAll();
     },
-    [apiFetch]
+    [apiFetch, refreshAll]
+  );
+
+  const saveImapAccount = useCallback<VaultContextValue['saveImapAccount']>(
+    async (params) => {
+      const isEdit = Boolean(params.id);
+      const path = isEdit
+        ? `/api/imap/accounts/${encodeURIComponent(params.id!)}`
+        : '/api/imap/accounts';
+      const res = await apiFetch<{
+        account: ImapAccountPublic;
+        accounts?: ImapAccountPublic[];
+        imap?: ImapConfigPublic;
+      }>(path, {
+        method: isEdit ? 'PUT' : 'POST',
+        body: JSON.stringify(params),
+      });
+      if (Array.isArray(res.accounts)) {
+        setImapAccounts(res.accounts);
+      } else if (res.account) {
+        setImapAccounts((prev) => {
+          const exists = prev.some((a) => a.id === res.account.id);
+          return exists
+            ? prev.map((a) => (a.id === res.account.id ? res.account : a))
+            : [...prev, res.account];
+        });
+      }
+      if (res.imap) {
+        setImapConfig(res.imap);
+      }
+      await refreshAll();
+      return res.account;
+    },
+    [apiFetch, refreshAll]
+  );
+
+  const deleteImapAccount = useCallback<VaultContextValue['deleteImapAccount']>(
+    async (id) => {
+      const res = await apiFetch<{
+        ok: boolean;
+        accounts?: ImapAccountPublic[];
+        imap?: ImapConfigPublic;
+      }>(`/api/imap/accounts/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+      if (Array.isArray(res.accounts)) {
+        setImapAccounts(res.accounts);
+      } else {
+        setImapAccounts((prev) => prev.filter((a) => a.id !== id));
+      }
+      if (res.imap) {
+        setImapConfig(res.imap);
+      }
+      await refreshAll();
+    },
+    [apiFetch, refreshAll]
   );
 
   const testImapConfig = useCallback<VaultContextValue['testImapConfig']>(
@@ -945,35 +1075,45 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [apiFetch]
   );
 
-  const syncImapNow = useCallback<VaultContextValue['syncImapNow']>(async () => {
-    try {
-      const res = await apiFetch<{
-        ok: boolean;
-        synced?: number;
-        error?: string | null;
-        imap?: ImapConfigPublic;
-      }>('/api/imap/sync', { method: 'POST' });
-      if (res.imap) {
-        setImapConfig(res.imap);
-      }
-      await refreshAll();
-      return {
-        ok: Boolean(res.ok),
-        synced: res.synced,
-        error: res.error ?? null,
-      };
-    } catch (err) {
+  const syncImapNow = useCallback<VaultContextValue['syncImapNow']>(
+    async (accountId) => {
       try {
+        const res = await apiFetch<{
+          ok: boolean;
+          synced?: number;
+          error?: string | null;
+          accounts?: ImapAccountPublic[];
+          imap?: ImapConfigPublic;
+        }>('/api/imap/sync', {
+          method: 'POST',
+          body: accountId ? JSON.stringify({ id: accountId }) : undefined,
+        });
+        if (Array.isArray(res.accounts)) {
+          setImapAccounts(res.accounts);
+        }
+        if (res.imap) {
+          setImapConfig(res.imap);
+        }
         await refreshAll();
-      } catch {
-        // ignore refresh errors when surfacing sync failure
+        return {
+          ok: Boolean(res.ok),
+          synced: res.synced,
+          error: res.error ?? null,
+        };
+      } catch (err) {
+        try {
+          await refreshAll();
+        } catch {
+          // ignore refresh errors when surfacing sync failure
+        }
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : 'IMAP 同步失败',
+        };
       }
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : 'IMAP 同步失败',
-      };
-    }
-  }, [apiFetch, refreshAll]);
+    },
+    [apiFetch, refreshAll]
+  );
 
   const addGroup = useCallback<VaultContextValue['addGroup']>((name) => {
     const trimmed = name.trim();
@@ -1124,6 +1264,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       emails,
       serviceAccounts,
       imapConfig,
+      imapAccounts,
       customGroups,
       allGroups,
       securityIssues,
@@ -1147,6 +1288,8 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       revokeServiceAccount,
       updateSettings,
       saveImapConfig,
+      saveImapAccount,
+      deleteImapAccount,
       testImapConfig,
       syncImapNow,
       addGroup,
@@ -1172,6 +1315,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       emails,
       serviceAccounts,
       imapConfig,
+      imapAccounts,
       customGroups,
       allGroups,
       securityIssues,
@@ -1194,6 +1338,8 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       revokeServiceAccount,
       updateSettings,
       saveImapConfig,
+      saveImapAccount,
+      deleteImapAccount,
       testImapConfig,
       syncImapNow,
       addGroup,

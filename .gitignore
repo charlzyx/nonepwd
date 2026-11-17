@@ -1,5 +1,6 @@
 node_modules
 dist
+dist/
 target
 data
 .DS_Store
@@ -18,6 +19,16 @@ site/public
 site/.cloudflare
 site/dist
 apps/desktop/npcore/build/
+apps/desktop/dist/
 .build/
 packages/cf-server/public
 packages/cf-server/src/nonepwd_core.wasm
+apps/nsh/.nsh/
+apps/nsh/out*/
+apps/nsh/dist*/
+dist-android/
+dist-ios/
+dist-ios-sim/
+dist-win/
+ipa-stage/
+release-assets/

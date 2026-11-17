@@ -10,13 +10,17 @@ import {
   generateTotp,
   initNonePwdCore,
   openSealedJson,
+  parseAuthenticatorExport,
+  planTotpImport,
   randomId,
+  totpIssuerMatchesItem,
   type AliasRecord,
   type DecryptedEmailPayload,
   type EncryptedEmailRecord,
   type EncryptedItemRecord,
   type EncryptedVaultRecord,
   type RootKeysetPayload,
+  type TotpImportEntry,
   type VaultItemPayload,
   type VaultMetadata,
 } from '@nonepwd/core';
@@ -26,10 +30,31 @@ import {
   urlsMatchWithLocalhost,
   type PendingCredentialCapture,
 } from './capture.js';
+import { cropAndDecodeQrDataUrl, type QrCropRect } from './qr.js';
 import { unlockDurationToMs, type UnlockDuration } from './theme.js';
 import type { ExtendedVaultItem } from './types.js';
 
 const PERSISTED_SESSION_KEY = 'nonepwd_persisted_session';
+const PENDING_QR_IMPORT_KEY = 'pendingQrImport';
+const PENDING_QR_TTL_MS = 10 * 60_000;
+
+export interface PendingQrImport {
+  uris: string[];
+  pageUrl: string;
+  tabId?: number;
+  previewTitle: string;
+  expiresAt: number;
+}
+
+export interface QrImportResult {
+  importedCount: number;
+  createdCount: number;
+  attachedCount: number;
+  skippedCount: number;
+  title: string;
+  code: string;
+  remainingSeconds: number;
+}
 
 interface LocalPrefs {
   serverUrl?: string;
@@ -60,6 +85,7 @@ interface SessionCache {
 
 let memoryFallbackSession: SessionCache | null = null;
 let memoryPendingCaptures: Record<string, PendingCredentialCapture> = {};
+let memoryPendingQrImport: PendingQrImport | null = null;
 let activeWs: WebSocket | null = null;
 
 async function getPrefs(): Promise<LocalPrefs> {
@@ -130,6 +156,268 @@ async function getPendingCaptureForTab(tabId?: number): Promise<PendingCredentia
   }
   const sorted = Object.values(captures).sort((a, b) => b.capturedAt - a.capturedAt);
   return sorted[0] ?? null;
+}
+
+async function getPendingQrImport(): Promise<PendingQrImport | null> {
+  let candidate: PendingQrImport | null = memoryPendingQrImport;
+  try {
+    if (chrome.storage.session) {
+      const res = await chrome.storage.session.get(PENDING_QR_IMPORT_KEY);
+      if (res[PENDING_QR_IMPORT_KEY]) {
+        candidate = res[PENDING_QR_IMPORT_KEY] as PendingQrImport;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  if (!candidate) return null;
+  if (candidate.expiresAt <= Date.now()) {
+    await savePendingQrImport(null);
+    return null;
+  }
+  return candidate;
+}
+
+async function savePendingQrImport(pending: PendingQrImport | null): Promise<void> {
+  memoryPendingQrImport = pending;
+  try {
+    if (chrome.storage.session) {
+      if (pending) {
+        await chrome.storage.session.set({ [PENDING_QR_IMPORT_KEY]: pending });
+      } else {
+        await chrome.storage.session.remove(PENDING_QR_IMPORT_KEY);
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function syncActionBadge(): Promise<void> {
+  const pendingQr = await getPendingQrImport();
+  if (pendingQr) {
+    await chrome.action.setBadgeText({ text: '2FA' });
+    await chrome.action.setBadgeBackgroundColor({ color: '#3555f5' });
+    return;
+  }
+  const captures = await getPendingCaptures();
+  if (Object.keys(captures).length > 0) {
+    await chrome.action.setBadgeText({ text: 'SAVE' });
+    await chrome.action.setBadgeBackgroundColor({ color: '#3555f5' });
+    return;
+  }
+  await chrome.action.setBadgeText({ text: '' });
+}
+
+async function importOtpUrisIntoSession(
+  session: SessionCache,
+  uris: string[],
+  pageUrl: string
+): Promise<QrImportResult> {
+  const cleanUris = uris.map((u) => u.trim()).filter(Boolean);
+  if (cleanUris.length === 0) {
+    throw new Error('未识别到有效的 2FA 二维码链接');
+  }
+
+  let entries: TotpImportEntry[];
+  try {
+    entries = parseAuthenticatorExport(cleanUris.join('\n'));
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`二维码内容不是有效的 2FA 密钥：${detail}`);
+  }
+  if (entries.length === 0) {
+    throw new Error('二维码中未包含有效的 TOTP 2FA 密钥');
+  }
+
+  const defaultVault = session.vaults[0];
+  if (!defaultVault) {
+    throw new Error('未找到可用的密码库 Vault');
+  }
+
+  const plan = planTotpImport(session.items, entries);
+  const attachedIds = new Set<string>();
+  for (const step of plan) {
+    if (step.action === 'attach') {
+      attachedIds.add(step.itemId);
+    }
+  }
+
+  const isHttpPage = /^https?:\/\//i.test(pageUrl);
+  let pageOrigin = '';
+  if (isHttpPage) {
+    try {
+      pageOrigin = new URL(pageUrl).origin;
+    } catch {
+      pageOrigin = '';
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  let createdCount = 0;
+  let attachedCount = 0;
+  let skippedCount = 0;
+  let primaryTitle = '';
+  let primaryOtpUri = '';
+
+  const persistUpdatedItem = async (existing: VaultItemPayload, otpauthUri: string, usernameFallback?: string) => {
+    const targetVault =
+      session.vaults.find((v) => v.id === existing.vaultId) ?? defaultVault;
+    const savedItem: VaultItemPayload = {
+      ...existing,
+      username: existing.username || usernameFallback || undefined,
+      totp: otpauthUri,
+      updatedAt: nowIso,
+    };
+    const vkBytes = fromBase64Url(targetVault.keyB64);
+    const encryptedData = await encryptJson(
+      vkBytes,
+      savedItem,
+      AAD.vaultItem(targetVault.id, savedItem.id)
+    );
+    await apiJson(
+      session.serverUrl,
+      `/api/vaults/${targetVault.id}/items/${savedItem.id}`,
+      session.token,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ encryptedData }),
+      }
+    );
+    session.items = session.items.map((it) => (it.id === savedItem.id ? savedItem : it));
+    attachedCount++;
+    if (!primaryOtpUri) {
+      primaryTitle = savedItem.title;
+      primaryOtpUri = otpauthUri;
+    }
+  };
+
+  const persistCreatedItem = async (
+    title: string,
+    username: string | undefined,
+    totp: string
+  ) => {
+    const id = randomId();
+    const resolvedTitle =
+      title === 'Imported TOTP' && entries.length === 1 && isHttpPage
+        ? extractHost(pageUrl) || 'Imported TOTP'
+        : title;
+    const savedItem: VaultItemPayload = {
+      id,
+      vaultId: defaultVault.id,
+      category: 'login',
+      title: resolvedTitle,
+      favorite: false,
+      tags: ['2fa-qr'],
+      urls: entries.length === 1 && pageOrigin ? [pageOrigin] : [],
+      username: username || undefined,
+      totp,
+      customFields: [],
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    const vkBytes = fromBase64Url(defaultVault.keyB64);
+    const encryptedData = await encryptJson(
+      vkBytes,
+      savedItem,
+      AAD.vaultItem(defaultVault.id, id)
+    );
+    await apiJson(session.serverUrl, `/api/vaults/${defaultVault.id}/items`, session.token, {
+      method: 'POST',
+      body: JSON.stringify({ id, encryptedData }),
+    });
+    session.items = [savedItem, ...session.items];
+    createdCount++;
+    if (!primaryOtpUri) {
+      primaryTitle = savedItem.title;
+      primaryOtpUri = totp;
+    }
+  };
+
+  for (const step of plan) {
+    if (step.action === 'skip_duplicate') {
+      skippedCount++;
+      if (!primaryOtpUri) {
+        const dupItem = step.existingItemId
+          ? session.items.find((it) => it.id === step.existingItemId)
+          : undefined;
+        primaryTitle =
+          dupItem?.title ||
+          step.entry.issuer ||
+          step.entry.account ||
+          (isHttpPage ? extractHost(pageUrl) : '') ||
+          '2FA 密钥';
+        primaryOtpUri = dupItem?.totp || step.entry.otpauthUri;
+      }
+      continue;
+    }
+
+    if (step.action === 'attach') {
+      const existing = session.items.find((it) => it.id === step.itemId);
+      if (existing) {
+        await persistUpdatedItem(existing, step.otpauthUri, step.entry.account);
+      } else {
+        await persistCreatedItem(
+          step.entry.issuer || step.entry.account || 'Imported TOTP',
+          step.entry.account,
+          step.otpauthUri
+        );
+      }
+      continue;
+    }
+
+    // step.action === 'create': check if an existing site login matching pageUrl has empty totp
+    let siteMatch: VaultItemPayload | undefined;
+    if (isHttpPage) {
+      const candidates = session.items.filter(
+        (it) =>
+          it.category === 'login' &&
+          !attachedIds.has(it.id) &&
+          !it.totp?.trim() &&
+          it.urls.some((u) => urlsMatchWithLocalhost(pageUrl, u))
+      );
+      const entryAcc = step.entry.account?.trim().toLowerCase();
+      if (entryAcc) {
+        siteMatch =
+          candidates.find(
+            (it) => (it.username || it.emailAlias || '').trim().toLowerCase() === entryAcc
+          ) ??
+          (candidates.length === 1 &&
+          !(candidates[0].username || candidates[0].emailAlias || '').trim()
+            ? candidates[0]
+            : undefined);
+      } else if (candidates.length === 1) {
+        siteMatch = candidates[0];
+      } else if (step.entry.issuer) {
+        const issuerMatches = candidates.filter((it) =>
+          totpIssuerMatchesItem(step.entry.issuer!, it)
+        );
+        if (issuerMatches.length === 1) {
+          siteMatch = issuerMatches[0];
+        }
+      }
+    }
+
+    if (siteMatch) {
+      attachedIds.add(siteMatch.id);
+      await persistUpdatedItem(siteMatch, step.entry.otpauthUri, step.username);
+    } else {
+      await persistCreatedItem(step.title, step.username, step.totp);
+    }
+  }
+
+  await saveSession(session);
+
+  const totpRes = await generateTotp(primaryOtpUri || entries[0].otpauthUri);
+  return {
+    importedCount: createdCount + attachedCount,
+    createdCount,
+    attachedCount,
+    skippedCount,
+    title: primaryTitle || entries[0].issuer || entries[0].account || '2FA 密钥',
+    code: totpRes.code,
+    remainingSeconds: totpRes.remainingSeconds,
+  };
 }
 
 async function clearSession(): Promise<void> {
@@ -486,6 +774,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const session = await getSession();
           const tabId = typeof message.tabId === 'number' ? message.tabId : sender.tab?.id;
           const pendingCapture = await getPendingCaptureForTab(tabId);
+          const pendingQrImport = await getPendingQrImport();
           sendResponse({
             ok: true,
             unlocked: Boolean(session),
@@ -496,6 +785,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             emails: session?.decryptedEmails ?? [],
             aliasDomain: session?.aliasDomain ?? '',
             pendingCapture,
+            pendingQrImport,
           });
           return;
         }
@@ -579,13 +869,51 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             };
           }
           await savePendingCaptures(nextCaptures);
-          await chrome.action.setBadgeText({
-            text: Object.keys(nextCaptures).length > 0 ? 'SAVE' : '',
-          });
-          if (Object.keys(nextCaptures).length > 0) {
-            await chrome.action.setBadgeBackgroundColor({ color: '#3555f5' });
+
+          let qrImportResult: QrImportResult | null = null;
+          const pendingQr = await getPendingQrImport();
+          if (pendingQr && pendingQr.uris.length > 0) {
+            try {
+              qrImportResult = await importOtpUrisIntoSession(
+                session,
+                pendingQr.uris,
+                pendingQr.pageUrl
+              );
+              await savePendingQrImport(null);
+              if (pendingQr.tabId !== undefined) {
+                void chrome.tabs
+                  .sendMessage(
+                    pendingQr.tabId,
+                    {
+                      type: 'NONEPWD_QR_IMPORT_RESULT',
+                      ok: true,
+                      locked: false,
+                      ...qrImportResult,
+                    },
+                    { frameId: 0 }
+                  )
+                  .catch(() => {});
+              }
+            } catch (qrErr) {
+              await savePendingQrImport(null);
+              if (pendingQr.tabId !== undefined) {
+                void chrome.tabs
+                  .sendMessage(
+                    pendingQr.tabId,
+                    {
+                      type: 'NONEPWD_QR_IMPORT_RESULT',
+                      ok: false,
+                      error: qrErr instanceof Error ? qrErr.message : String(qrErr),
+                    },
+                    { frameId: 0 }
+                  )
+                  .catch(() => {});
+              }
+            }
           }
-          sendResponse({ ok: true });
+
+          await syncActionBadge();
+          sendResponse({ ok: true, qrImportResult });
           return;
         }
 
@@ -604,6 +932,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           activeWs = null;
           await saveSession(null);
           await savePendingCaptures({});
+          await savePendingQrImport(null);
           await chrome.action.setBadgeText({ text: '' });
           sendResponse({ ok: true });
           return;
@@ -895,9 +1224,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           await savePendingCaptures(captures);
           await saveSession(session);
-          await chrome.action.setBadgeText({
-            text: Object.keys(captures).length > 0 ? 'SAVE' : '',
-          });
+          await syncActionBadge();
 
           sendResponse({ ok: true, item: savedItem, mode: savedMode });
           return;
@@ -919,10 +1246,199 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             await addNeverSaveDomain(String(message.host));
           }
 
-          await chrome.action.setBadgeText({
-            text: Object.keys(captures).length > 0 ? 'SAVE' : '',
-          });
+          await syncActionBadge();
           sendResponse({ ok: true });
+          return;
+        }
+
+        case 'NONEPWD_START_QR_SNIP': {
+          let tab: chrome.tabs.Tab | undefined;
+          if (typeof message.tabId === 'number') {
+            tab = await chrome.tabs.get(message.tabId).catch(() => undefined);
+          } else {
+            const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+            tab = tabs[0];
+          }
+          const tabUrl = tab?.url ?? '';
+          if (!tab?.id || !/^https?:\/\//i.test(tabUrl)) {
+            throw new Error(
+              '当前页面不支持网页截图框选，请切换到普通网页或直接在弹窗中粘贴截图'
+            );
+          }
+
+          try {
+            await chrome.tabs.sendMessage(
+              tab.id,
+              { type: 'NONEPWD_BEGIN_QR_SNIP' },
+              { frameId: 0 }
+            );
+          } catch {
+            await chrome.scripting.executeScript({
+              target: { tabId: tab.id, frameIds: [0] },
+              files: ['content.js'],
+            });
+            await chrome.tabs.sendMessage(
+              tab.id,
+              { type: 'NONEPWD_BEGIN_QR_SNIP' },
+              { frameId: 0 }
+            );
+          }
+          sendResponse({ ok: true });
+          return;
+        }
+
+        case 'NONEPWD_CAPTURE_QR_RECT': {
+          const tabId = sender.tab?.id;
+          const windowId = sender.tab?.windowId;
+          const rect = message.rect as
+            | (QrCropRect & { pageUrl?: string; pageTitle?: string })
+            | undefined;
+          const pageUrl = String(rect?.pageUrl || sender.tab?.url || '');
+          const pageTitle = String(rect?.pageTitle || sender.tab?.title || '');
+
+          if (tabId === undefined || windowId === undefined) {
+            throw new Error('无法定位当前网页标签，请重试框选');
+          }
+
+          try {
+            const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
+
+            let decoded: { rawValues: string[]; otpUris: string[] } | null = null;
+            let swError: unknown = null;
+            try {
+              decoded = await cropAndDecodeQrDataUrl(dataUrl, rect);
+            } catch (err) {
+              swError = err;
+            }
+
+            if (swError || !decoded || decoded.otpUris.length === 0) {
+              const fallback = (await chrome.tabs
+                .sendMessage(
+                  tabId,
+                  { type: 'NONEPWD_DECODE_QR_DATAURL', dataUrl, rect },
+                  { frameId: 0 }
+                )
+                .catch(() => null)) as {
+                ok?: boolean;
+                rawValues?: string[];
+                otpUris?: string[];
+                error?: string;
+              } | null;
+
+              if (fallback?.ok) {
+                const fbRaw = Array.isArray(fallback.rawValues) ? fallback.rawValues : [];
+                const fbUris = Array.isArray(fallback.otpUris) ? fallback.otpUris : [];
+                if (
+                  swError ||
+                  !decoded ||
+                  fbUris.length > 0 ||
+                  fbRaw.length > decoded.rawValues.length
+                ) {
+                  decoded = { rawValues: fbRaw, otpUris: fbUris };
+                  swError = null;
+                }
+              } else if (swError && fallback?.error) {
+                throw new Error(fallback.error);
+              }
+            }
+
+            if (swError) {
+              throw swError instanceof Error ? swError : new Error(String(swError));
+            }
+            if (!decoded || decoded.otpUris.length === 0) {
+              if (decoded && decoded.rawValues.length > 0) {
+                throw new Error('已识别到二维码，但内容不是有效的 2FA 密钥（otpauth://）');
+              }
+              throw new Error('所选区域未识别到有效的 2FA 二维码，请放大页面或保留少许白边后重试');
+            }
+
+            const entries = parseAuthenticatorExport(decoded.otpUris.join('\n'));
+            if (entries.length === 0) {
+              throw new Error('二维码中未包含有效的 TOTP 2FA 密钥');
+            }
+
+            const previewTitle =
+              entries[0]?.issuer ||
+              entries[0]?.account ||
+              extractHost(pageUrl) ||
+              pageTitle ||
+              '2FA 密钥';
+
+            const session = await getSession();
+            if (!session) {
+              await savePendingQrImport({
+                uris: decoded.otpUris,
+                pageUrl,
+                tabId,
+                previewTitle,
+                expiresAt: Date.now() + PENDING_QR_TTL_MS,
+              });
+              await syncActionBadge();
+              await chrome.tabs
+                .sendMessage(
+                  tabId,
+                  {
+                    type: 'NONEPWD_QR_IMPORT_RESULT',
+                    ok: true,
+                    locked: true,
+                    previewTitle,
+                  },
+                  { frameId: 0 }
+                )
+                .catch(() => {});
+              await chrome.windows.create({
+                url: chrome.runtime.getURL('popup.html?pinned=1'),
+                type: 'popup',
+                width: 386,
+                height: 550,
+              });
+              sendResponse({ ok: true, locked: true, previewTitle });
+              return;
+            }
+
+            const result = await importOtpUrisIntoSession(session, decoded.otpUris, pageUrl);
+            await syncActionBadge();
+            await chrome.tabs
+              .sendMessage(
+                tabId,
+                {
+                  type: 'NONEPWD_QR_IMPORT_RESULT',
+                  ok: true,
+                  locked: false,
+                  ...result,
+                },
+                { frameId: 0 }
+              )
+              .catch(() => {});
+            sendResponse({ ok: true, locked: false, ...result });
+            return;
+          } catch (captureErr) {
+            const errMsg =
+              captureErr instanceof Error ? captureErr.message : String(captureErr);
+            await chrome.tabs
+              .sendMessage(
+                tabId,
+                {
+                  type: 'NONEPWD_QR_IMPORT_RESULT',
+                  ok: false,
+                  error: errMsg,
+                },
+                { frameId: 0 }
+              )
+              .catch(() => {});
+            sendResponse({ ok: false, error: errMsg });
+            return;
+          }
+        }
+
+        case 'NONEPWD_IMPORT_QR_URIS': {
+          const session = await getSession();
+          if (!session) throw new Error('请先解锁 NonePwd 密码库');
+          const uris = Array.isArray(message.uris) ? message.uris.map(String) : [];
+          const pageUrl = String(message.pageUrl || '');
+          const result = await importOtpUrisIntoSession(session, uris, pageUrl);
+          await syncActionBadge();
+          sendResponse({ ok: true, ...result });
           return;
         }
 

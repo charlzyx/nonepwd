@@ -1,8 +1,20 @@
-import React, { useMemo, useState } from 'react';
-import { Check, Dices, MailPlus, Plus, Trash2, X } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Camera,
+  Check,
+  ClipboardPaste,
+  Dices,
+  ImagePlus,
+  MailPlus,
+  Plus,
+  Trash2,
+  VideoOff,
+  X,
+} from 'lucide-react';
 import {
   generatePassphrase,
   generatePassword,
+  parseAuthenticatorExport,
   randomId,
   type CardDetails,
   type CustomField,
@@ -11,6 +23,13 @@ import {
   type VaultItemPayload,
 } from '@nonepwd/core';
 import { useVault } from '../state/VaultContext';
+import {
+  decodeQrFromFiles,
+  extractClipboardImages,
+  extractOtpUrisFromQrResults,
+  readQrFromSystemClipboard,
+  startQrCameraScan,
+} from '../utils/qr';
 
 interface ItemModalProps {
   initialItem: VaultItemPayload | null;
@@ -132,6 +151,190 @@ export const ItemModal: React.FC<ItemModalProps> = ({
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [qrBusy, setQrBusy] = useState(false);
+  const [qrDragging, setQrDragging] = useState(false);
+  const [qrCameraActive, setQrCameraActive] = useState(false);
+  const [qrFeedback, setQrFeedback] = useState<{
+    kind: 'ok' | 'error';
+    message: string;
+  } | null>(null);
+
+  const qrFileInputRef = useRef<HTMLInputElement>(null);
+  const qrVideoRef = useRef<HTMLVideoElement>(null);
+  const stopQrCameraRef = useRef<(() => void) | null>(null);
+
+  const supportsTotpSection =
+    category !== 'card' && category !== 'identity' && category !== 'ssh_key';
+
+  const stopQrCamera = useCallback(() => {
+    stopQrCameraRef.current?.();
+    stopQrCameraRef.current = null;
+    setQrCameraActive(false);
+  }, []);
+
+  const handleClose = useCallback(() => {
+    stopQrCamera();
+    onClose();
+  }, [onClose, stopQrCamera]);
+
+  const applyOtpUris = useCallback((otpUris: string[], rawValues: string[]) => {
+    if (otpUris.length === 0) {
+      setQrFeedback({
+        kind: 'error',
+        message:
+          rawValues.length > 0
+            ? '识别到二维码，但内容不是有效的 otpauth:// 2FA 密钥。'
+            : '未在图片中检测到二维码，请确保二维码清晰完整。',
+      });
+      return false;
+    }
+
+    try {
+      const entries = parseAuthenticatorExport(otpUris[0]);
+      if (entries.length === 0) {
+        setQrFeedback({
+          kind: 'error',
+          message: '未能从二维码中解析出有效的 TOTP 密钥。',
+        });
+        return false;
+      }
+      const first = entries[0];
+      setTotp(first.otpauthUri);
+
+      const suggestedTitle = first.issuer?.trim() || first.account?.trim() || '';
+      if (suggestedTitle) {
+        setTitle((prev) => (prev.trim() ? prev : suggestedTitle));
+      }
+      const suggestedAccount = first.account?.trim() || '';
+      if (suggestedAccount) {
+        setUsername((prev) => (prev.trim() ? prev : suggestedAccount));
+      }
+
+      setQrFeedback({
+        kind: 'ok',
+        message:
+          entries.length > 1
+            ? `检测到 ${entries.length} 个 2FA 条目，已填入第 1 条（${suggestedTitle || '2FA'}）；如需批量导入请使用「导入密码 / 2FA」。`
+            : `已识别二维码并填入 2FA${suggestedTitle ? `（${suggestedTitle}）` : ''}`,
+      });
+      return true;
+    } catch (error) {
+      setQrFeedback({
+        kind: 'error',
+        message: error instanceof Error ? error.message : '解析 2FA 二维码失败',
+      });
+      return false;
+    }
+  }, []);
+
+  const handleQrFiles = useCallback(
+    async (files: FileList | File[]) => {
+      setQrBusy(true);
+      setQrFeedback(null);
+      try {
+        const { rawValues, otpUris, imageFilesCount } = await decodeQrFromFiles(files);
+        if (imageFilesCount === 0) {
+          setQrFeedback({
+            kind: 'error',
+            message: '请选择二维码图片文件（PNG / JPG / WebP 等）。',
+          });
+          return;
+        }
+        applyOtpUris(otpUris, rawValues);
+      } catch (error) {
+        setQrFeedback({
+          kind: 'error',
+          message: error instanceof Error ? error.message : '二维码识别失败',
+        });
+      } finally {
+        setQrBusy(false);
+      }
+    },
+    [applyOtpUris]
+  );
+
+  const handlePasteQrClick = async () => {
+    setQrBusy(true);
+    setQrFeedback(null);
+    try {
+      const { otpUris, rawValues } = await readQrFromSystemClipboard();
+      applyOtpUris(otpUris, rawValues);
+    } catch (error) {
+      setQrFeedback({
+        kind: 'error',
+        message: error instanceof Error ? error.message : '剪贴板二维码识别失败',
+      });
+    } finally {
+      setQrBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!supportsTotpSection) {
+      stopQrCamera();
+      return;
+    }
+    const onWindowPaste = (e: ClipboardEvent) => {
+      const images = extractClipboardImages(e.clipboardData);
+      if (images.length > 0) {
+        e.preventDefault();
+        void handleQrFiles(images);
+      }
+    };
+    window.addEventListener('paste', onWindowPaste);
+    return () => window.removeEventListener('paste', onWindowPaste);
+  }, [handleQrFiles, stopQrCamera, supportsTotpSection]);
+
+  useEffect(() => {
+    if (!qrCameraActive || !supportsTotpSection) {
+      stopQrCameraRef.current?.();
+      stopQrCameraRef.current = null;
+      return;
+    }
+    const videoEl = qrVideoRef.current;
+    if (!videoEl) return;
+
+    let cancelled = false;
+    setQrFeedback(null);
+
+    void startQrCameraScan({
+      video: videoEl,
+      onDetect: (otpUris, rawValues) => {
+        if (cancelled) return;
+        if (otpUris.length > 0) {
+          applyOtpUris(otpUris, rawValues);
+          stopQrCamera();
+        }
+      },
+      onError: (error) => {
+        if (!cancelled) {
+          setQrFeedback({ kind: 'error', message: error.message });
+        }
+      },
+    })
+      .then((stop) => {
+        if (cancelled) {
+          stop();
+          return;
+        }
+        stopQrCameraRef.current = stop;
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setQrFeedback({
+            kind: 'error',
+            message: error instanceof Error ? error.message : '无法开启摄像头扫码',
+          });
+          setQrCameraActive(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      stopQrCameraRef.current?.();
+      stopQrCameraRef.current = null;
+    };
+  }, [applyOtpUris, qrCameraActive, stopQrCamera, supportsTotpSection]);
 
   const candidateGroups = useMemo(() => {
     const seen = new Map<string, string>();
@@ -254,6 +457,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
         updatedAt: now,
       };
       const saved = await saveItem(payload, isNew);
+      stopQrCamera();
       onSaved(saved);
       onClose();
     } catch (error) {
@@ -275,7 +479,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
           </h3>
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             aria-label="关闭窗口"
             className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
           >
@@ -755,17 +959,120 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                 />
               </div>
 
-              <div>
-                <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                  2FA TOTP 密钥或 otpauth:// URI
-                </label>
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setQrDragging(true);
+                }}
+                onDragLeave={() => setQrDragging(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setQrDragging(false);
+                  if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    void handleQrFiles(e.dataTransfer.files);
+                  }
+                }}
+                className={`space-y-2 rounded-lg border p-3 transition-colors ${
+                  qrDragging
+                    ? 'border-primary bg-primary/5'
+                    : 'border-border bg-background/60'
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="text-xs font-medium text-muted-foreground">
+                    2FA TOTP 密钥或 otpauth:// URI
+                  </label>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <input
+                      ref={qrFileInputRef}
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => {
+                        if (e.target.files && e.target.files.length > 0) {
+                          void handleQrFiles(e.target.files);
+                        }
+                        e.target.value = '';
+                      }}
+                      className="hidden"
+                    />
+                    <button
+                      type="button"
+                      disabled={qrBusy}
+                      onClick={() => void handlePasteQrClick()}
+                      className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-[11px] font-medium text-foreground hover:bg-muted disabled:opacity-50"
+                    >
+                      <ClipboardPaste className="h-3 w-3 text-muted-foreground" />
+                      <span>粘贴截图</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={qrBusy}
+                      onClick={() => qrFileInputRef.current?.click()}
+                      className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-[11px] font-medium text-foreground hover:bg-muted disabled:opacity-50"
+                    >
+                      <ImagePlus className="h-3 w-3 text-muted-foreground" />
+                      <span>选择二维码</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={qrBusy}
+                      onClick={() =>
+                        qrCameraActive ? stopQrCamera() : setQrCameraActive(true)
+                      }
+                      className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-50 ${
+                        qrCameraActive
+                          ? 'border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-400'
+                          : 'border-border bg-background text-foreground hover:bg-muted'
+                      }`}
+                    >
+                      {qrCameraActive ? (
+                        <VideoOff className="h-3 w-3" />
+                      ) : (
+                        <Camera className="h-3 w-3 text-muted-foreground" />
+                      )}
+                      <span>{qrCameraActive ? '停止扫码' : '摄像头扫码'}</span>
+                    </button>
+                  </div>
+                </div>
+
                 <input
                   type="text"
                   value={totp}
                   onChange={(e) => setTotp(e.target.value)}
-                  placeholder="JBSWY3DPEHPK3PXP 或 otpauth://totp/..."
+                  onPaste={(e) => {
+                    const text = e.clipboardData.getData('text/plain');
+                    const uris = extractOtpUrisFromQrResults([text]);
+                    if (uris.length > 0) {
+                      e.preventDefault();
+                      applyOtpUris(uris, [text]);
+                    }
+                  }}
+                  placeholder="JBSWY3DPEHPK3PXP 或 otpauth://totp/...（可拖入或 ⌘V 粘贴二维码截图）"
                   className="w-full rounded-md border border-input bg-background px-3.5 py-2 font-mono text-xs text-foreground outline-none focus:border-ring"
                 />
+
+                {qrCameraActive && (
+                  <div className="overflow-hidden rounded-md border border-border bg-black/90">
+                    <video
+                      ref={qrVideoRef}
+                      muted
+                      playsInline
+                      className="aspect-video max-h-44 w-full object-cover"
+                    />
+                  </div>
+                )}
+
+                {qrFeedback && (
+                  <p
+                    className={`text-[11px] ${
+                      qrFeedback.kind === 'error'
+                        ? 'text-rose-600 dark:text-rose-400'
+                        : 'text-emerald-600 dark:text-emerald-400'
+                    }`}
+                  >
+                    {qrFeedback.message}
+                  </p>
+                )}
               </div>
 
               <div>
@@ -853,7 +1160,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
           <div className="flex justify-end gap-2 border-t border-border pt-4">
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleClose}
               className="rounded-md border border-border bg-background px-4 py-2 text-xs font-medium text-foreground hover:bg-muted"
             >
               取消

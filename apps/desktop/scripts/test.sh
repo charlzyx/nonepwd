@@ -21,8 +21,10 @@ swiftc -swift-version 5 \
   -import-objc-header "$DESKTOP_DIR/Sources/CNpCore/include/npcore.h" \
   -L "$REPO_ROOT/dist/lib" -lnonepwd_core \
   -Xlinker -rpath -Xlinker "$REPO_ROOT/dist/lib" \
+  -framework AppKit -framework Vision -framework CoreImage -framework UniformTypeIdentifiers \
   "$DESKTOP_DIR/Sources/NonePwd/Core/Models.swift" \
   "$DESKTOP_DIR/Sources/NonePwd/Core/NpCoreBridge.swift" \
+  "$DESKTOP_DIR/Sources/NonePwd/Core/QrCodeScanner.swift" \
   "$DESKTOP_DIR/Tests/NonePwdTests/NpCoreTests.swift" \
   -o "$OUT_BIN"
 

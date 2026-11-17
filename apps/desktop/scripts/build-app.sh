@@ -61,7 +61,7 @@ swiftc "$SWIFT_OPT" -swift-version 5 \
   -L "$REPO_ROOT/dist/lib" -lnonepwd_core \
   -Xlinker -rpath -Xlinker "@executable_path/../Frameworks" \
   -Xlinker -rpath -Xlinker "$REPO_ROOT/dist/lib" \
-  -framework SwiftUI -framework AppKit -framework LocalAuthentication -framework Security -framework UniformTypeIdentifiers \
+  -framework SwiftUI -framework AppKit -framework LocalAuthentication -framework Security -framework UniformTypeIdentifiers -framework Vision -framework CoreImage \
   "$DESKTOP_DIR"/Sources/NonePwd/Core/*.swift \
   "$DESKTOP_DIR"/Sources/NonePwd/Views/*.swift \
   "$DESKTOP_DIR"/Sources/NonePwd/App.swift \

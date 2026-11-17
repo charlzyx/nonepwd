@@ -17,6 +17,8 @@ import {
   type DecryptedEmailPayload,
   type EncryptedEmailRecord,
   type EncryptedItemRecord,
+  type ImapAccountPublic,
+  type ImapConfigPublic,
   type VaultItemPayload,
   type VaultMetadata,
 } from '@nonepwd/core/worker';
@@ -25,6 +27,21 @@ import { hashSecret, verifySecret } from '../src/auth.js';
 import { handleIncomingCfEmail } from '../src/email.js';
 import type { EmailMessageLike } from '../src/types.js';
 import { createMockCfEnv, loadCompiledWasmModule } from './helpers.js';
+
+const { mockConnectRef } = vi.hoisted(() => ({
+  mockConnectRef: {
+    fn: null as null | ((addr: { hostname: string; port: number }, opts?: unknown) => unknown),
+  },
+}));
+
+vi.mock('cloudflare:sockets', () => ({
+  connect(addr: { hostname: string; port: number }, opts?: unknown) {
+    if (!mockConnectRef.fn) {
+      throw new Error('Mock cloudflare:sockets connect handler not configured');
+    }
+    return mockConnectRef.fn(addr, opts);
+  },
+}));
 
 function streamFromText(text: string): ReadableStream<Uint8Array> {
   const bytes = new TextEncoder().encode(text);
@@ -525,6 +542,7 @@ describe('@nonepwd/cf-server', () => {
         status: 'disabled',
         lastError: null,
       },
+      accounts: [],
     });
 
     const putImapRes = await api('/api/imap', {
@@ -728,5 +746,410 @@ describe('@nonepwd/cf-server', () => {
     ).json()) as { emails: EncryptedEmailRecord[] };
     expect(emailsRes.emails).toHaveLength(2);
     expect(broadcasts.filter((b) => b.event.type === 'email.received')).toHaveLength(2);
+  });
+
+  it('supports multi-account IMAP CRUD, password preservation, legacy migration, and per-account sync envelopeTo', async () => {
+    const { env } = createMockCfEnv();
+    const app = createCfApp();
+
+    const api = async (path: string, init?: RequestInit) =>
+      app.fetch(new Request(`https://vault.example.com${path}`, init), env);
+
+    const secretKey = generateSecretKey();
+    const kdfSalt = toBase64Url(randomBytes(16));
+    const { masterUnlockKeyBytes, authVerifierB64 } = await deriveAccountKeys(
+      'MultiImapPass!99',
+      secretKey,
+      kdfSalt,
+      10_000
+    );
+    const rootKey = generateRawAesKey();
+    const emailKp = await generateEmailKeyPair();
+    const encryptedRootKeyset = await encryptJson(
+      masterUnlockKeyBytes,
+      {
+        rootKeyB64: toBase64Url(rootKey),
+        emailPrivateKeyPkcs8B64: emailKp.privateKeyPkcs8B64,
+      },
+      AAD.ROOT_KEYSET
+    );
+
+    const setupRes = await api('/api/auth/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'owner@example.com',
+        kdfSalt,
+        kdfIterations: 10_000,
+        authVerifier: authVerifierB64,
+        encryptedRootKeyset,
+        emailPublicKey: emailKp.publicKeyB64,
+        aliasDomain: 'mail.example.com',
+        vaults: [],
+      }),
+    });
+    expect(setupRes.status).toBe(201);
+    const { token } = (await setupRes.json()) as { token: string };
+    const authHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    };
+
+    // Mock cloudflare:sockets with an in-memory multi-mailbox IMAP server
+    mockConnectRef.fn = () => {
+      let loggedUser = '';
+      let controllerRef: ReadableStreamDefaultController<Uint8Array> | null = null;
+      const enc = new TextEncoder();
+      const dec = new TextDecoder();
+      let buf = '';
+
+      const push = (str: string) => {
+        controllerRef?.enqueue(enc.encode(str));
+      };
+
+      const readable = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controllerRef = controller;
+          push('* OK Mock IMAP Ready\r\n');
+        },
+      });
+
+      const writable = new WritableStream<Uint8Array>({
+        write(chunk) {
+          buf += dec.decode(chunk, { stream: true });
+          while (true) {
+            const idx = buf.indexOf('\r\n');
+            if (idx === -1) break;
+            const line = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            const spaceIdx = line.indexOf(' ');
+            const tag = spaceIdx > 0 ? line.slice(0, spaceIdx) : 'A0001';
+            const cmd = spaceIdx > 0 ? line.slice(spaceIdx + 1) : line;
+            const upper = cmd.toUpperCase();
+
+            if (upper.startsWith('LOGIN ')) {
+              const match = cmd.match(/^LOGIN\s+"([^"]+)"\s+"([^"]+)"/i);
+              loggedUser = match?.[1] ?? '';
+              const pw = match?.[2] ?? '';
+              if (
+                (loggedUser === 'alice.work@gmail.com' && pw === 'work-app-pw-16') ||
+                (loggedUser === 'alice.personal@gmail.com' && pw === 'personal-app-pw-16')
+              ) {
+                push(`${tag} OK LOGIN completed\r\n`);
+              } else {
+                push(`${tag} NO Invalid credentials\r\n`);
+              }
+            } else if (upper.startsWith('SELECT ')) {
+              push('* 1 EXISTS\r\n');
+              push(`${tag} OK [READ-WRITE] SELECT completed\r\n`);
+            } else if (upper.startsWith('UID SEARCH ')) {
+              push('* SEARCH 101\r\n');
+              push(`${tag} OK SEARCH completed\r\n`);
+            } else if (upper.startsWith('UID FETCH 101')) {
+              const code = loggedUser === 'alice.work@gmail.com' ? '111222' : '333444';
+              const mime = [
+                'From: Security <noreply@service.example.com>',
+                'To: undisclosed-recipients:;',
+                'Subject: Login verification code',
+                'Content-Type: text/plain; charset=utf-8',
+                '',
+                `Your verification code is ${code}.`,
+                '',
+              ].join('\r\n');
+              const byteLen = enc.encode(mime).byteLength;
+              push(`* 1 FETCH (UID 101 BODY[] {${byteLen}}\r\n${mime})\r\n`);
+              push(`${tag} OK FETCH completed\r\n`);
+            } else if (upper === 'LOGOUT') {
+              push('* BYE\r\n');
+              push(`${tag} OK LOGOUT completed\r\n`);
+            } else {
+              push(`${tag} OK\r\n`);
+            }
+          }
+        },
+      });
+
+      return {
+        readable,
+        writable,
+        async close() {
+          try {
+            controllerRef?.close();
+          } catch {
+            // ignore
+          }
+        },
+      };
+    };
+
+    try {
+      // Creating without password must fail with 400
+      const missingPwRes = await api('/api/imap/accounts', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          host: 'imap.gmail.com',
+          port: 993,
+          tls: true,
+          username: 'alice.work@gmail.com',
+        }),
+      });
+      expect(missingPwRes.status).toBe(400);
+
+      // 1. Create two Gmail accounts on the same IMAP host
+      const createWorkRes = await api('/api/imap/accounts', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          label: 'Work Gmail',
+          enabled: true,
+          host: 'imap.gmail.com',
+          port: 993,
+          tls: true,
+          username: 'alice.work@gmail.com',
+          password: 'work-app-pw-16',
+        }),
+      });
+      expect(createWorkRes.status).toBe(201);
+      const createdWork = (await createWorkRes.json()) as {
+        account: ImapAccountPublic;
+        accounts: ImapAccountPublic[];
+        imap: ImapConfigPublic;
+      };
+      expect(createdWork.account).toMatchObject({
+        label: 'Work Gmail',
+        enabled: true,
+        host: 'imap.gmail.com',
+        port: 993,
+        tls: true,
+        username: 'alice.work@gmail.com',
+        hasPassword: true,
+        status: 'listening',
+      });
+      expect(createdWork.accounts).toHaveLength(1);
+
+      const createPersonalRes = await api('/api/imap/accounts', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          enabled: true,
+          host: 'imap.gmail.com',
+          port: 993,
+          tls: true,
+          username: 'alice.personal@gmail.com',
+          password: 'personal-app-pw-16',
+        }),
+      });
+      expect(createPersonalRes.status).toBe(201);
+      const createdPersonal = (await createPersonalRes.json()) as {
+        account: ImapAccountPublic;
+        accounts: ImapAccountPublic[];
+        imap: ImapConfigPublic;
+      };
+      expect(createdPersonal.account.label).toBe('alice.personal');
+      expect(createdPersonal.accounts).toHaveLength(2);
+      expect(createdPersonal.imap.enabled).toBe(true);
+      expect(createdPersonal.imap.status).toBe('listening');
+
+      // Verify both synced emails have envelopeTo set to the receiving Gmail address despite generic To header
+      const emailsAfterCreate = (await (
+        await api('/api/emails', { headers: { Authorization: `Bearer ${token}` } })
+      ).json()) as { emails: EncryptedEmailRecord[] };
+      expect(emailsAfterCreate.emails).toHaveLength(2);
+      const envelopes = emailsAfterCreate.emails.map((e) => e.envelopeTo).sort();
+      expect(envelopes).toEqual(['alice.personal@gmail.com', 'alice.work@gmail.com']);
+
+      // 2. Test saved account by id without re-sending password
+      const testSavedRes = await api('/api/imap/test', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          id: createdWork.account.id,
+          host: 'imap.gmail.com',
+          port: 993,
+          tls: true,
+          username: 'alice.work@gmail.com',
+        }),
+      });
+      expect(testSavedRes.status).toBe(200);
+      expect(await testSavedRes.json()).toEqual({ ok: true, messages: 1 });
+
+      // 3. Update one account without re-sending password (keeps password & preserves last_uid)
+      const updateRes = await api(`/api/imap/accounts/${createdPersonal.account.id}`, {
+        method: 'PUT',
+        headers: authHeaders,
+        body: JSON.stringify({
+          label: 'Personal Gmail',
+          enabled: true,
+          host: 'imap.gmail.com',
+          port: 993,
+          tls: true,
+          username: 'alice.personal@gmail.com',
+        }),
+      });
+      expect(updateRes.status).toBe(200);
+      const updatedJson = (await updateRes.json()) as {
+        account: ImapAccountPublic;
+        accounts: ImapAccountPublic[];
+      };
+      expect(updatedJson.account).toMatchObject({
+        id: createdPersonal.account.id,
+        label: 'Personal Gmail',
+        hasPassword: true,
+        status: 'listening',
+      });
+      const uidRow = await env.DB.prepare('SELECT last_uid FROM imap_accounts WHERE id = ?')
+        .bind(createdPersonal.account.id)
+        .first<{ last_uid: number }>();
+      expect(uidRow?.last_uid).toBe(101);
+
+      // 3b. Updating username/host/port resets last_uid to 0; upserting via POST with existing id keeps password
+      const resetUidRes = await api(`/api/imap/accounts/${createdPersonal.account.id}`, {
+        method: 'PUT',
+        headers: authHeaders,
+        body: JSON.stringify({
+          enabled: false,
+          host: 'imap.qq.com',
+          port: 993,
+          tls: true,
+          username: 'alice.qq@qq.com',
+        }),
+      });
+      expect(resetUidRes.status).toBe(200);
+      const resetUidRow = await env.DB.prepare('SELECT last_uid FROM imap_accounts WHERE id = ?')
+        .bind(createdPersonal.account.id)
+        .first<{ last_uid: number }>();
+      expect(resetUidRow?.last_uid).toBe(0);
+
+      const upsertExistingRes = await api('/api/imap/accounts', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          id: createdPersonal.account.id,
+          label: 'Personal Gmail Restored',
+          enabled: true,
+          host: 'imap.gmail.com',
+          port: 993,
+          tls: true,
+          username: 'alice.personal@gmail.com',
+        }),
+      });
+      expect(upsertExistingRes.status).toBe(200);
+      const upsertedJson = (await upsertExistingRes.json()) as {
+        account: ImapAccountPublic;
+      };
+      expect(upsertedJson.account).toMatchObject({
+        id: createdPersonal.account.id,
+        label: 'Personal Gmail Restored',
+        hasPassword: true,
+        status: 'listening',
+      });
+
+      // Legacy PUT /api/imap matches by username when multiple accounts exist
+      const legacyPutMatchRes = await api('/api/imap', {
+        method: 'PUT',
+        headers: authHeaders,
+        body: JSON.stringify({
+          enabled: true,
+          host: 'imap.gmail.com',
+          port: 993,
+          tls: true,
+          username: 'alice.personal@gmail.com',
+        }),
+      });
+      expect(legacyPutMatchRes.status).toBe(200);
+      const legacyPutJson = (await legacyPutMatchRes.json()) as {
+        accounts: ImapAccountPublic[];
+      };
+      expect(legacyPutJson.accounts).toHaveLength(2);
+
+      // 4. GET /api/sync includes both imapAccounts and aggregate imapStatus
+      const syncJson = (await (
+        await api('/api/sync', { headers: { Authorization: `Bearer ${token}` } })
+      ).json()) as {
+        imapAccounts: ImapAccountPublic[];
+        imapStatus: ImapConfigPublic;
+      };
+      expect(syncJson.imapAccounts).toHaveLength(2);
+      expect(syncJson.imapAccounts.map((a) => a.username)).toEqual([
+        'alice.work@gmail.com',
+        'alice.personal@gmail.com',
+      ]);
+      expect(syncJson.imapStatus.enabled).toBe(true);
+      expect(syncJson.imapStatus.status).toBe('listening');
+
+      // 5. POST /api/imap/sync with explicit account id
+      const syncOneRes = await api('/api/imap/sync', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ id: createdWork.account.id }),
+      });
+      expect(syncOneRes.status).toBe(200);
+      const syncOneJson = (await syncOneRes.json()) as {
+        ok: boolean;
+        accounts: ImapAccountPublic[];
+        imap: ImapConfigPublic;
+      };
+      expect(syncOneJson.ok).toBe(true);
+      expect(syncOneJson.accounts).toHaveLength(2);
+
+      // 6. Delete one account; missing id returns 404
+      const delMissingRes = await api('/api/imap/accounts/nonexistent', {
+        method: 'DELETE',
+        headers: authHeaders,
+      });
+      expect(delMissingRes.status).toBe(404);
+
+      const delWorkRes = await api(`/api/imap/accounts/${createdWork.account.id}`, {
+        method: 'DELETE',
+        headers: authHeaders,
+      });
+      expect(delWorkRes.status).toBe(200);
+      const delWorkJson = (await delWorkRes.json()) as {
+        ok: boolean;
+        accounts: ImapAccountPublic[];
+        imap: ImapConfigPublic;
+      };
+      expect(delWorkJson.ok).toBe(true);
+      expect(delWorkJson.accounts).toHaveLength(1);
+      expect(delWorkJson.accounts[0].username).toBe('alice.personal@gmail.com');
+      expect(delWorkJson.imap.username).toBe('alice.personal@gmail.com');
+
+      // Delete remaining account and verify legacy imap_config is cleared (no zombie resurrection)
+      const delPersonalRes = await api(`/api/imap/accounts/${createdPersonal.account.id}`, {
+        method: 'DELETE',
+        headers: authHeaders,
+      });
+      expect(delPersonalRes.status).toBe(200);
+      const afterEmptyGet = (await (
+        await api('/api/imap', { headers: { Authorization: `Bearer ${token}` } })
+      ).json()) as { imap: ImapConfigPublic; accounts: ImapAccountPublic[] };
+      expect(afterEmptyGet.accounts).toEqual([]);
+      expect(afterEmptyGet.imap.enabled).toBe(false);
+      expect(afterEmptyGet.imap.status).toBe('disabled');
+
+      // 7. Auto-migrate legacy imap_config row into 'legacy-1' when imap_accounts is empty
+      await env.DB.prepare(
+        `UPDATE imap_config
+         SET enabled = 0, host = 'imap.163.com', port = 993, tls = 1,
+             username = 'legacy_user@163.com', password_enc = 'v1:00:00', last_uid = 77, status = 'disabled'
+         WHERE id = 1`
+      ).run();
+      const migratedGet = (await (
+        await api('/api/imap', { headers: { Authorization: `Bearer ${token}` } })
+      ).json()) as { imap: ImapConfigPublic; accounts: ImapAccountPublic[] };
+      expect(migratedGet.accounts).toHaveLength(1);
+      expect(migratedGet.accounts[0]).toMatchObject({
+        id: 'legacy-1',
+        label: 'legacy_user',
+        enabled: false,
+        host: 'imap.163.com',
+        username: 'legacy_user@163.com',
+        hasPassword: true,
+        status: 'disabled',
+      });
+    } finally {
+      mockConnectRef.fn = null;
+    }
   });
 });

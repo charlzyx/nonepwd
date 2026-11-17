@@ -38,3 +38,28 @@ jobs:
 
       - name: Run full workspace test suite
         run: pnpm test
+
+  nsh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nsh
+        run: |
+          curl -fsSL https://nsh.dev/install.sh | sh
+          if [ -x "$HOME/.nsh/bin/nsh" ]; then
+            echo "$HOME/.nsh/bin" >> "$GITHUB_PATH"
+          elif [ -x "$HOME/.local/bin/nsh" ]; then
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          elif [ -x "$HOME/.cargo/bin/nsh" ]; then
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          elif ! command -v nsh >/dev/null 2>&1; then
+            echo "ERROR: nsh binary not found after install.sh" >&2
+            exit 1
+          fi
+
+      - name: Check and test NSH app
+        working-directory: apps/nsh
+        run: |
+          nsh check
+          nsh test

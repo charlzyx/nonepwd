@@ -1,3 +1,5 @@
+import AppKit
+import CoreImage
 import Foundation
 
 enum TestAssertError: Error, CustomStringConvertible {
@@ -38,7 +40,8 @@ enum NpCoreTestsMain {
         try testSecretKeyAndDualKeyDerivation()
         try testAesGcmEncryptDecryptWithCardAndIdentity()
         try testTotpAndImportParsers()
-        print("All 3 NonePwd Swift/Rust-FFI core tests passed.")
+        try testQrCodeScannerDecodeSyntheticOtpAuth()
+        print("All 4 NonePwd Swift/Rust-FFI core tests passed.")
     }
 
     static func testSecretKeyAndDualKeyDerivation() throws {
@@ -124,5 +127,68 @@ enum NpCoreTestsMain {
         let csvEntries = try NpCoreBridge.parsePasswordCSV(csvText)
         try expectEqual(csvEntries.count, 1)
         try expectEqual(csvEntries[0].title, "GitHub")
+    }
+
+    static func testQrCodeScannerDecodeSyntheticOtpAuth() throws {
+        let expectedUri = "otpauth://totp/GitHub:alice@example.com?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else {
+            throw TestAssertError.failed("CIQRCodeGenerator unavailable")
+        }
+        filter.setValue(Data(expectedUri.utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let rawOutput = filter.outputImage else {
+            throw TestAssertError.failed("CIQRCodeGenerator produced nil outputImage")
+        }
+
+        // CIQRCodeGenerator embeds a crisp 1px/module CGImage directly; fall back to CIContext when needed.
+        let rawCG: CGImage
+        if let direct = rawOutput.cgImage {
+            rawCG = direct
+        } else if let rendered = CIContext(options: [.useSoftwareRenderer: true])
+            .createCGImage(rawOutput, from: rawOutput.extent)
+        {
+            rawCG = rendered
+        } else {
+            throw TestAssertError.failed("Failed to render raw QR CGImage")
+        }
+        let scale = 10
+        let quiet = 40
+        let width = rawCG.width * scale + quiet * 2
+        let height = rawCG.height * scale + quiet * 2
+        guard let bitmapCtx = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            throw TestAssertError.failed("Failed to create CGContext for QR image")
+        }
+        bitmapCtx.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
+        bitmapCtx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        bitmapCtx.interpolationQuality = .none
+        bitmapCtx.draw(
+            rawCG,
+            in: CGRect(x: quiet, y: quiet, width: rawCG.width * scale, height: rawCG.height * scale)
+        )
+        guard let cgImage = bitmapCtx.makeImage() else {
+            throw TestAssertError.failed("Failed to finalize synthetic QR CGImage")
+        }
+
+        let decoded = QrCodeScanner.decodePayloads(from: cgImage)
+        try expectEqual(decoded, [expectedUri], "decoded synthetic otpauth QR")
+
+        let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        let decodedNs = QrCodeScanner.decodePayloads(from: nsImage)
+        try expectEqual(decodedNs, [expectedUri], "decoded synthetic otpauth NSImage")
+
+        let normalized = QrCodeScanner.extractOtpAuthPayloads(from: [
+            "https://example.com/unrelated",
+            "  OTPAUTH://totp/GitHub:alice@example.com?secret=JBSWY3DPEHPK3PXP&issuer=GitHub  ",
+            expectedUri,
+        ])
+        try expectEqual(normalized, [expectedUri], "normalized deduplicated otpauth payloads")
     }
 }

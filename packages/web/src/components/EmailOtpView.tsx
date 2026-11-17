@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   AlertCircle,
   ExternalLink,
@@ -10,12 +10,34 @@ import {
   RefreshCw,
   Trash2,
 } from 'lucide-react';
-import { useVault } from '../state/VaultContext';
+import { useVault, type DecryptedEmailItem } from '../state/VaultContext';
 import { CopyButton } from './CopyButton';
 
 interface EmailOtpViewProps {
   onOpenImapSettings?: () => void;
   onOpenFilterSettings?: () => void;
+}
+
+function extractEmailAddresses(raw: string | null | undefined): string[] {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return [];
+  const matches = trimmed.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi);
+  if (matches && matches.length > 0) {
+    return Array.from(new Set(matches.map((m) => m.toLowerCase())));
+  }
+  return [trimmed.toLowerCase()];
+}
+
+function getEmailRecipientAddresses(em: DecryptedEmailItem): string[] {
+  const fromTo = extractEmailAddresses(em.to);
+  const fromEnv = extractEmailAddresses(em.envelopeTo);
+  if (fromTo.some((addr) => addr.includes('@'))) {
+    return fromTo;
+  }
+  if (fromEnv.length > 0) {
+    return fromEnv;
+  }
+  return fromTo;
 }
 
 export const EmailOtpView: React.FC<EmailOtpViewProps> = ({
@@ -27,6 +49,7 @@ export const EmailOtpView: React.FC<EmailOtpViewProps> = ({
     emails,
     aliases,
     imapConfig,
+    imapAccounts,
     syncImapNow,
     createAlias,
     toggleAlias,
@@ -35,11 +58,57 @@ export const EmailOtpView: React.FC<EmailOtpViewProps> = ({
   } = useVault();
   const [siteInput, setSiteInput] = useState('github.com');
   const [explicitAddr, setExplicitAddr] = useState('');
+  const [selectedMailbox, setSelectedMailbox] = useState<string>('all');
   const [syncing, setSyncing] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<{
     kind: 'ok' | 'error';
     message: string;
   } | null>(null);
+
+  const anyImapEnabled =
+    imapAccounts.some((a) => a.enabled) || Boolean(imapConfig?.enabled);
+
+  const mailboxes = useMemo(() => {
+    const map = new Map<string, { address: string; label?: string; count: number }>();
+    for (const acc of imapAccounts) {
+      for (const addr of extractEmailAddresses(acc.username)) {
+        if (!addr) continue;
+        const label = acc.label?.trim();
+        map.set(addr, {
+          address: addr,
+          label: label && label.toLowerCase() !== addr ? label : undefined,
+          count: 0,
+        });
+      }
+    }
+    for (const em of emails) {
+      for (const addr of getEmailRecipientAddresses(em)) {
+        if (!addr) continue;
+        const existing = map.get(addr);
+        if (existing) {
+          existing.count += 1;
+        } else {
+          map.set(addr, { address: addr, count: 1 });
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [emails, imapAccounts]);
+
+  const effectiveMailbox = mailboxes.some((m) => m.address === selectedMailbox)
+    ? selectedMailbox
+    : 'all';
+
+  const filteredEmails = useMemo(() => {
+    if (effectiveMailbox === 'all') return emails;
+    return emails.filter((em) => {
+      const addrs = [
+        ...extractEmailAddresses(em.to),
+        ...extractEmailAddresses(em.envelopeTo),
+      ];
+      return addrs.includes(effectiveMailbox);
+    });
+  }, [effectiveMailbox, emails]);
 
   const handleCreateAlias = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -129,7 +198,7 @@ export const EmailOtpView: React.FC<EmailOtpViewProps> = ({
         </div>
 
         {/* Unconfigured / disabled IMAP banner */}
-        {!imapConfig?.enabled && (
+        {!anyImapEnabled && (
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
             <div className="flex items-start gap-3">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
@@ -170,12 +239,56 @@ export const EmailOtpView: React.FC<EmailOtpViewProps> = ({
           {/* Live Email OTP Stream */}
           <div className="lg:col-span-2">
             <div className="rounded-xl border border-border bg-card p-5">
-              <div className="mb-4 flex items-center justify-between">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
                 <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
                   <Mail className="h-4 w-4 text-muted-foreground" />
-                  实时收件流（共 {emails.length} 封）
+                  实时收件流（共 {filteredEmails.length} 封
+                  {effectiveMailbox !== 'all' ? ` / 总 ${emails.length} 封` : ''}）
                 </h3>
               </div>
+
+              {mailboxes.length > 1 && (
+                <div className="mb-4 flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedMailbox('all')}
+                    className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                      effectiveMailbox === 'all'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'border border-border bg-background text-foreground hover:bg-muted'
+                    }`}
+                  >
+                    全部邮箱 ({emails.length})
+                  </button>
+                  {mailboxes.map((m) => {
+                    const active = effectiveMailbox === m.address;
+                    return (
+                      <button
+                        key={m.address}
+                        type="button"
+                        title={m.label ? `${m.label} · ${m.address}` : m.address}
+                        onClick={() => setSelectedMailbox(m.address)}
+                        className={`inline-flex max-w-[260px] items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                          active
+                            ? 'bg-primary text-primary-foreground'
+                            : 'border border-border bg-background text-foreground hover:bg-muted'
+                        }`}
+                      >
+                        <span className="truncate">
+                          {m.label ? `${m.label} · ${m.address}` : m.address}
+                        </span>
+                        <span
+                          className={`font-mono text-[10px] ${
+                            active ? 'text-primary-foreground/85' : 'text-muted-foreground'
+                          }`}
+                        >
+                          {m.count}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
 
               {emails.length === 0 ? (
                 <div className="space-y-3 rounded-lg border border-dashed border-border bg-background p-8 text-center text-xs text-muted-foreground">
@@ -204,67 +317,92 @@ export const EmailOtpView: React.FC<EmailOtpViewProps> = ({
                     )}
                   </div>
                 </div>
+              ) : filteredEmails.length === 0 ? (
+                <div className="space-y-3 rounded-lg border border-dashed border-border bg-background p-6 text-center text-xs text-muted-foreground">
+                  <p>当前收件邮箱（{effectiveMailbox}）暂无匹配邮件。</p>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedMailbox('all')}
+                    className="rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
+                  >
+                    查看全部邮箱
+                  </button>
+                </div>
               ) : (
                 <div className="space-y-3">
-                  {emails.map((em) => (
-                    <div
-                      key={em.id}
-                      className="rounded-lg border border-border bg-background p-4 transition-colors hover:border-ring"
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-                            <span className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono uppercase text-foreground">
-                              {em.source}
-                            </span>
-                            <span className="font-medium text-foreground">{em.from}</span>
-                            {em.to && <span>→ {em.to}</span>}
-                          </div>
-                          <div className="mt-1 text-sm font-medium text-foreground">
-                            {em.subject}
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => void deleteEmail(em.id)}
-                          className="rounded p-1 text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400"
-                          title="删除记录"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-
-                      {em.otpCode && (
-                        <div className="mt-3 flex items-center justify-between rounded-lg border border-border bg-muted/40 px-3.5 py-2.5">
-                          <div>
-                            <span className="font-mono text-[11px] text-muted-foreground">
-                              提取验证码 (置信度 {Math.round(em.confidence * 100)}%)
-                            </span>
-                            <div className="font-mono text-xl font-bold tracking-widest text-foreground">
-                              {em.otpCode}
+                  {filteredEmails.map((em) => {
+                    const recipientDisplay = em.to?.includes('@')
+                      ? em.to.trim()
+                      : em.envelopeTo?.trim() || em.to?.trim() || '';
+                    return (
+                      <div
+                        key={em.id}
+                        className="rounded-lg border border-border bg-background p-4 transition-colors hover:border-ring"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                              <span className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono uppercase text-foreground">
+                                {em.source}
+                              </span>
+                              <span className="font-medium text-foreground">{em.from}</span>
+                              {recipientDisplay && (
+                                <span
+                                  title={`收件邮箱：${recipientDisplay}`}
+                                  className="inline-flex max-w-[260px] items-center truncate rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 font-mono text-[11px] font-medium text-sky-700 dark:text-sky-300"
+                                >
+                                  → {recipientDisplay}
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-1 text-sm font-medium text-foreground">
+                              {em.subject}
                             </div>
                           </div>
-                          <CopyButton value={em.otpCode} label="复制验证码" />
-                        </div>
-                      )}
-
-                      {em.magicLink && (
-                        <div className="mt-2">
-                          <a
-                            href={em.magicLink}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 text-xs text-foreground underline underline-offset-4 hover:opacity-75"
+                          <button
+                            type="button"
+                            onClick={() => void deleteEmail(em.id)}
+                            className="rounded p-1 text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400"
+                            title="删除记录"
                           >
-                            <span>打开 Magic Link 登录链接</span>
-                            <ExternalLink className="h-3 w-3" />
-                          </a>
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
                         </div>
-                      )}
 
-                      <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">{em.snippet}</p>
-                    </div>
-                  ))}
+                        {em.otpCode && (
+                          <div className="mt-3 flex items-center justify-between rounded-lg border border-border bg-muted/40 px-3.5 py-2.5">
+                            <div>
+                              <span className="font-mono text-[11px] text-muted-foreground">
+                                提取验证码 (置信度 {Math.round(em.confidence * 100)}%)
+                              </span>
+                              <div className="font-mono text-xl font-bold tracking-widest text-foreground">
+                                {em.otpCode}
+                              </div>
+                            </div>
+                            <CopyButton value={em.otpCode} label="复制验证码" />
+                          </div>
+                        )}
+
+                        {em.magicLink && (
+                          <div className="mt-2">
+                            <a
+                              href={em.magicLink}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1 text-xs text-foreground underline underline-offset-4 hover:opacity-75"
+                            >
+                              <span>打开 Magic Link 登录链接</span>
+                              <ExternalLink className="h-3 w-3" />
+                            </a>
+                          </div>
+                        )}
+
+                        <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">
+                          {em.snippet}
+                        </p>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

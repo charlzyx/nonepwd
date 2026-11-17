@@ -1,5 +1,16 @@
-import React, { useMemo, useRef, useState } from 'react';
-import { CheckCircle2, FileSpreadsheet, KeyRound, Lock, Upload, X } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Camera,
+  CheckCircle2,
+  ClipboardPaste,
+  FileSpreadsheet,
+  ImagePlus,
+  KeyRound,
+  Lock,
+  Upload,
+  VideoOff,
+  X,
+} from 'lucide-react';
 import {
   detectImportFormat,
   parseAuthenticatorExport,
@@ -10,6 +21,15 @@ import {
   type TotpImportEntry,
 } from '@nonepwd/core';
 import { useVault } from '../state/VaultContext';
+import {
+  decodeQrFromFiles,
+  extractClipboardImages,
+  extractClipboardText,
+  extractOtpUrisFromQrResults,
+  isImageFile,
+  readQrFromSystemClipboard,
+  startQrCameraScan,
+} from '../utils/qr';
 
 interface ImportCsvModalProps {
   defaultVaultId: string;
@@ -23,6 +43,9 @@ type ImportSummary =
 export const ImportCsvModal: React.FC<ImportCsvModalProps> = ({ defaultVaultId, onClose }) => {
   const { vaults, items, importCsvItems, importTotpItems } = useVault();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const qrImageInputRef = useRef<HTMLInputElement>(null);
+  const cameraVideoRef = useRef<HTMLVideoElement>(null);
+  const stopCameraRef = useRef<(() => void) | null>(null);
 
   const initialVaultId = useMemo(() => {
     if (defaultVaultId !== 'all' && vaults.some((v) => v.id === defaultVaultId)) {
@@ -40,63 +63,253 @@ export const ImportCsvModal: React.FC<ImportCsvModalProps> = ({ defaultVaultId, 
   const [fileName, setFileName] = useState<string | null>(null);
   const [rawText, setRawText] = useState<string | null>(null);
   const [pasteText, setPasteText] = useState('');
+  const pasteTextRef = useRef(pasteText);
+  pasteTextRef.current = pasteText;
   const [csvEntries, setCsvEntries] = useState<CsvImportedEntry[]>([]);
   const [totpEntries, setTotpEntries] = useState<TotpImportEntry[]>([]);
   const [busy, setBusy] = useState(false);
+  const [qrBusy, setQrBusy] = useState(false);
+  const [cameraActive, setCameraActive] = useState(false);
+  const [qrHint, setQrHint] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [result, setResult] = useState<ImportSummary | null>(null);
 
-  const resetParsed = () => {
+  const stopCamera = useCallback(() => {
+    stopCameraRef.current?.();
+    stopCameraRef.current = null;
+    setCameraActive(false);
+  }, []);
+
+  const handleClose = useCallback(() => {
+    stopCamera();
+    onClose();
+  }, [onClose, stopCamera]);
+
+  const resetParsed = useCallback(() => {
     setRawText(null);
     setCsvEntries([]);
     setTotpEntries([]);
+    setQrHint(null);
     setErr(null);
     setResult(null);
-  };
+  }, []);
 
   const handleModeChange = (next: ImportFormat) => {
+    stopCamera();
     setMode(next);
     setFileName(null);
     setPasteText('');
     resetParsed();
   };
 
-  const parseContent = (text: string, targetMode: ImportFormat, name?: string) => {
+  const parseContent = useCallback(
+    (text: string, targetMode: ImportFormat, name?: string) => {
+      setErr(null);
+      setResult(null);
+      if (targetMode === 'csv') {
+        const entries = parsePasswordCsv(text);
+        if (entries.length === 0) {
+          setFileName(name ?? null);
+          setRawText(null);
+          setCsvEntries([]);
+          setTotpEntries([]);
+          setErr('未在 CSV 中检测到有效的账号密码条目。');
+          return;
+        }
+        setFileName(name ?? null);
+        setRawText(text);
+        setCsvEntries(entries);
+        setTotpEntries([]);
+      } else {
+        const entries = parseAuthenticatorExport(text);
+        if (entries.length === 0) {
+          setFileName(name ?? null);
+          setRawText(null);
+          setCsvEntries([]);
+          setTotpEntries([]);
+          setErr('未检测到有效的 2FA 验证器条目（支持 otpauth://、Google 迁移码或 Aegis/2FAS JSON）。');
+          return;
+        }
+        setFileName(name ?? null);
+        setRawText(text);
+        setTotpEntries(entries);
+        setCsvEntries([]);
+      }
+    },
+    []
+  );
+
+  const appendQrUris = useCallback(
+    (otpUris: string[], rawValues: string[], sourceLabel: string) => {
+      if (otpUris.length === 0) {
+        if (rawValues.length > 0) {
+          setErr('已识别到二维码，但内容不是有效的 otpauth:// 或 otpauth-migration:// 2FA 密钥链接。');
+        } else {
+          setErr('未在图片中检测到二维码，请确保二维码清晰完整。');
+        }
+        return false;
+      }
+
+      const existingLines = pasteTextRef.current
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const merged = [...existingLines];
+      let addedCount = 0;
+      for (const uri of otpUris) {
+        if (!merged.includes(uri)) {
+          merged.push(uri);
+          addedCount += 1;
+        }
+      }
+      const nextText = merged.join('\n');
+      pasteTextRef.current = nextText;
+      setMode('totp');
+      setPasteText(nextText);
+      try {
+        parseContent(nextText, 'totp', sourceLabel);
+        setQrHint(
+          addedCount > 0
+            ? `已从「${sourceLabel}」识别并追加 ${addedCount} 条 2FA 二维码`
+            : `已从「${sourceLabel}」识别二维码（当前列表中已存在相同条目）`
+        );
+      } catch (error) {
+        setRawText(null);
+        setTotpEntries([]);
+        setErr(error instanceof Error ? error.message : '2FA 内容解析失败');
+      }
+      return true;
+    },
+    [parseContent]
+  );
+
+  const handleQrImageFiles = useCallback(
+    async (files: FileList | File[], sourceLabel = '二维码图片') => {
+      setQrBusy(true);
+      setErr(null);
+      setQrHint(null);
+      try {
+        const { rawValues, otpUris, imageFilesCount } = await decodeQrFromFiles(files);
+        if (imageFilesCount === 0) {
+          setErr('请选择有效的图片文件（PNG / JPG / WebP 等）。');
+          return;
+        }
+        appendQrUris(otpUris, rawValues, sourceLabel);
+      } catch (error) {
+        setErr(error instanceof Error ? error.message : '二维码识别失败');
+      } finally {
+        setQrBusy(false);
+      }
+    },
+    [appendQrUris]
+  );
+
+  const handlePasteQrClick = async () => {
+    setQrBusy(true);
     setErr(null);
-    setResult(null);
-    if (targetMode === 'csv') {
-      const entries = parsePasswordCsv(text);
-      if (entries.length === 0) {
-        setFileName(name ?? null);
-        setRawText(null);
-        setCsvEntries([]);
-        setTotpEntries([]);
-        setErr('未在 CSV 中检测到有效的账号密码条目。');
-        return;
-      }
-      setFileName(name ?? null);
-      setRawText(text);
-      setCsvEntries(entries);
-      setTotpEntries([]);
-    } else {
-      const entries = parseAuthenticatorExport(text);
-      if (entries.length === 0) {
-        setFileName(name ?? null);
-        setRawText(null);
-        setCsvEntries([]);
-        setTotpEntries([]);
-        setErr('未检测到有效的 2FA 验证器条目（支持 otpauth://、Google 迁移码或 Aegis/2FAS JSON）。');
-        return;
-      }
-      setFileName(name ?? null);
-      setRawText(text);
-      setTotpEntries(entries);
-      setCsvEntries([]);
+    setQrHint(null);
+    try {
+      const { otpUris, rawValues } = await readQrFromSystemClipboard();
+      appendQrUris(otpUris, rawValues, '剪贴板截图');
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : '剪贴板二维码识别失败');
+    } finally {
+      setQrBusy(false);
     }
   };
 
-  const loadFile = async (file: File) => {
+  useEffect(() => {
+    if (result) return;
+    const onWindowPaste = (e: ClipboardEvent) => {
+      const images = extractClipboardImages(e.clipboardData);
+      if (images.length > 0) {
+        e.preventDefault();
+        void handleQrImageFiles(images, '粘贴截图');
+        return;
+      }
+      const target = e.target as HTMLElement | null;
+      const isInputTarget =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        Boolean(target?.isContentEditable);
+      if (!isInputTarget) {
+        const text = extractClipboardText(e.clipboardData);
+        const uris = extractOtpUrisFromQrResults([text]);
+        if (uris.length > 0) {
+          e.preventDefault();
+          appendQrUris(uris, [text], '剪贴板链接');
+        }
+      }
+    };
+    window.addEventListener('paste', onWindowPaste);
+    return () => window.removeEventListener('paste', onWindowPaste);
+  }, [appendQrUris, handleQrImageFiles, result]);
+
+  useEffect(() => {
+    if (!cameraActive) {
+      stopCameraRef.current?.();
+      stopCameraRef.current = null;
+      return;
+    }
+    const videoEl = cameraVideoRef.current;
+    if (!videoEl) return;
+
+    let cancelled = false;
     setErr(null);
+    setQrHint(null);
+
+    void startQrCameraScan({
+      video: videoEl,
+      onDetect: (otpUris, rawValues) => {
+        if (cancelled) return;
+        if (otpUris.length > 0) {
+          appendQrUris(otpUris, rawValues, '摄像头扫码');
+          stopCamera();
+        }
+      },
+      onError: (error) => {
+        if (!cancelled) {
+          setErr(error.message);
+        }
+      },
+    })
+      .then((stop) => {
+        if (cancelled) {
+          stop();
+          return;
+        }
+        stopCameraRef.current = stop;
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setErr(error instanceof Error ? error.message : '无法开启摄像头扫码');
+          setCameraActive(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      stopCameraRef.current?.();
+      stopCameraRef.current = null;
+    };
+  }, [appendQrUris, cameraActive, stopCamera]);
+
+  const loadFiles = async (files: FileList | File[]) => {
+    const list = Array.from(files);
+    if (list.length === 0) return;
+
+    const imageFiles = list.filter(isImageFile);
+    if (imageFiles.length > 0) {
+      await handleQrImageFiles(
+        imageFiles,
+        imageFiles.length === 1 ? imageFiles[0].name : `${imageFiles.length} 张二维码图片`
+      );
+      return;
+    }
+
+    const file = list[0];
+    setErr(null);
+    setQrHint(null);
     setResult(null);
     try {
       const text = await file.text();
@@ -122,9 +335,17 @@ export const ImportCsvModal: React.FC<ImportCsvModalProps> = ({ defaultVaultId, 
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      void loadFile(file);
+    if (e.target.files && e.target.files.length > 0) {
+      void loadFiles(e.target.files);
+    }
+    e.target.value = '';
+  };
+
+  const handleQrFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const count = e.target.files.length;
+      const label = count === 1 ? e.target.files[0].name : `${count} 张二维码图片`;
+      void handleQrImageFiles(e.target.files, label);
     }
     e.target.value = '';
   };
@@ -132,15 +353,15 @@ export const ImportCsvModal: React.FC<ImportCsvModalProps> = ({ defaultVaultId, 
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragging(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) {
-      void loadFile(file);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      void loadFiles(e.dataTransfer.files);
     }
   };
 
   const handlePasteChange = (next: string) => {
     setPasteText(next);
     setFileName(null);
+    setQrHint(null);
     if (!next.trim()) {
       resetParsed();
       return;
@@ -172,6 +393,7 @@ export const ImportCsvModal: React.FC<ImportCsvModalProps> = ({ defaultVaultId, 
 
   const handleImport = async () => {
     if (!vaultId || !rawText) return;
+    stopCamera();
     setBusy(true);
     setErr(null);
     try {
@@ -216,7 +438,7 @@ export const ImportCsvModal: React.FC<ImportCsvModalProps> = ({ defaultVaultId, 
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             aria-label="关闭导入窗口"
             className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
           >
@@ -248,19 +470,25 @@ export const ImportCsvModal: React.FC<ImportCsvModalProps> = ({ defaultVaultId, 
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                2FA 验证器 (.txt / .json)
+                2FA 验证器 / 二维码
               </button>
             </div>
           )}
 
           <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
             <Lock className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-            <span>本地浏览器 WASM 解析并 AES-256-GCM 加密，明文仅在内存处理。</span>
+            <span>本地浏览器 WASM 解析与 AES-256-GCM 加密，明文及二维码均仅在本地处理。</span>
           </div>
 
           {err && (
             <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
               {err}
+            </div>
+          )}
+
+          {qrHint && (
+            <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-600 dark:text-emerald-400">
+              {qrHint}
             </div>
           )}
 
@@ -290,7 +518,7 @@ export const ImportCsvModal: React.FC<ImportCsvModalProps> = ({ defaultVaultId, 
               <div className="flex justify-center pt-1">
                 <button
                   type="button"
-                  onClick={onClose}
+                  onClick={handleClose}
                   className="rounded-md bg-primary px-4 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/85"
                 >
                   完成
@@ -341,10 +569,11 @@ export const ImportCsvModal: React.FC<ImportCsvModalProps> = ({ defaultVaultId, 
                 <input
                   ref={fileInputRef}
                   type="file"
+                  multiple={mode === 'totp'}
                   accept={
                     mode === 'csv'
-                      ? '.csv,.txt,.json,text/csv,text/plain,application/json'
-                      : '.txt,.json,.csv,text/plain,application/json,text/csv'
+                      ? '.csv,.txt,.json,text/csv,text/plain,application/json,image/*'
+                      : '.txt,.json,.csv,text/plain,application/json,text/csv,image/*'
                   }
                   onChange={handleFileChange}
                   className="hidden"
@@ -355,27 +584,107 @@ export const ImportCsvModal: React.FC<ImportCsvModalProps> = ({ defaultVaultId, 
                     ? `已选择：${fileName}`
                     : mode === 'csv'
                       ? '点击选择或拖拽导出的 CSV 文件到此处'
-                      : '点击选择或拖拽 2FA 导出文件 (.txt / .json)'}
+                      : '点击选择或拖拽 2FA 导出文件 (.txt / .json) 或二维码图片'}
                 </div>
                 <p className="mt-1 text-[11px] text-muted-foreground">
                   {mode === 'csv'
-                    ? '兼容 Chrome / Brave / Edge / Arc / Safari / Bitwarden / 1Password 导出的 .csv'
-                    : '支持 otpauth:// 行文本、Google Authenticator otpauth-migration://、Aegis / 2FAS JSON'}
+                    ? '兼容 Chrome / Brave / Edge / Arc / Safari / Bitwarden / 1Password 导出的 .csv（也可直接 ⌘V/Ctrl+V 粘贴 2FA 截图）'
+                    : '支持 otpauth:// 行文本、Google Authenticator 迁移码、Aegis / 2FAS JSON 或直接拖入多张二维码图片'}
                 </p>
               </div>
 
               {mode === 'totp' && (
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                    或直接粘贴导出文本
-                  </label>
-                  <textarea
-                    rows={3}
-                    value={pasteText}
-                    onChange={(e) => handlePasteChange(e.target.value)}
-                    placeholder="otpauth://totp/... 或 otpauth-migration://offline?data=..."
-                    className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground outline-none focus:border-ring"
-                  />
+                <div className="space-y-3">
+                  <div className="space-y-2.5 rounded-lg border border-border bg-background p-3.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-medium text-foreground">
+                        识别 2FA 二维码（支持 ⌘V / Ctrl+V 直接粘贴截图）
+                      </span>
+                      {qrBusy && (
+                        <span className="font-mono text-[11px] text-muted-foreground">
+                          识别中...
+                        </span>
+                      )}
+                    </div>
+
+                    <input
+                      ref={qrImageInputRef}
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      onChange={handleQrFileChange}
+                      className="hidden"
+                    />
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={qrBusy}
+                        onClick={() => void handlePasteQrClick()}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-50"
+                      >
+                        <ClipboardPaste className="h-3.5 w-3.5 text-muted-foreground" />
+                        <span>粘贴截图识别 (⌘V/Ctrl+V)</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={qrBusy}
+                        onClick={() => qrImageInputRef.current?.click()}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-50"
+                      >
+                        <ImagePlus className="h-3.5 w-3.5 text-muted-foreground" />
+                        <span>选择二维码图片</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={qrBusy}
+                        onClick={() =>
+                          cameraActive ? stopCamera() : setCameraActive(true)
+                        }
+                        className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
+                          cameraActive
+                            ? 'border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-400'
+                            : 'border-border bg-card text-foreground hover:bg-muted'
+                        }`}
+                      >
+                        {cameraActive ? (
+                          <VideoOff className="h-3.5 w-3.5" />
+                        ) : (
+                          <Camera className="h-3.5 w-3.5 text-muted-foreground" />
+                        )}
+                        <span>{cameraActive ? '停止摄像头扫码' : '摄像头扫码'}</span>
+                      </button>
+                    </div>
+
+                    {cameraActive && (
+                      <div className="overflow-hidden rounded-lg border border-border bg-black/90">
+                        <video
+                          ref={cameraVideoRef}
+                          muted
+                          playsInline
+                          className="aspect-video max-h-56 w-full object-cover"
+                        />
+                        <div className="border-t border-border/40 bg-background px-3 py-1.5 text-[11px] text-muted-foreground">
+                          请将 2FA 二维码对准摄像头，识别成功后会自动填入并关闭摄像头。
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                      或直接粘贴导出文本（扫码结果也会自动追加到此处）
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={pasteText}
+                      onChange={(e) => handlePasteChange(e.target.value)}
+                      placeholder="otpauth://totp/... 或 otpauth-migration://offline?data=..."
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground outline-none focus:border-ring"
+                    />
+                  </div>
                 </div>
               )}
 
@@ -482,7 +791,7 @@ export const ImportCsvModal: React.FC<ImportCsvModalProps> = ({ defaultVaultId, 
               <div className="flex items-center justify-end gap-2 border-t border-border pt-4">
                 <button
                   type="button"
-                  onClick={onClose}
+                  onClick={handleClose}
                   className="rounded-md border border-border bg-background px-4 py-2 text-xs font-medium text-foreground hover:bg-muted"
                 >
                   取消

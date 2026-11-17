@@ -49,6 +49,9 @@ public struct ItemEditorSheet: View {
     @State private var showPassword = false
     @State private var busy = false
     @State private var errorMsg: String?
+    @State private var qrStatusMsg: String?
+    @State private var isCapturingQr = false
+    @State private var isQrDropTargeted = false
 
     public init(store: VaultStore, initialItem: VaultItemPayload?, initialCategory: ItemCategory) {
         self.store = store
@@ -359,6 +362,49 @@ public struct ItemEditorSheet: View {
                                 editorRow(label: "验证码") {
                                     TextField("选填 TOTP / otpauth://", text: $totp)
                                 }
+                                HStack(spacing: 6) {
+                                    Text("二维码导入")
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(.secondary)
+                                    Spacer(minLength: 4)
+                                    Button {
+                                        pasteQrFromClipboard()
+                                    } label: {
+                                        Label("粘贴二维码", systemImage: "doc.on.clipboard")
+                                            .font(.system(size: 11))
+                                    }
+                                    .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 22, cornerRadius: 6))
+                                    .disabled(isCapturingQr)
+
+                                    Button {
+                                        Task { await captureQrFromScreen() }
+                                    } label: {
+                                        Label(isCapturingQr ? "框选中..." : "框选屏幕二维码", systemImage: "viewfinder")
+                                            .font(.system(size: 11))
+                                    }
+                                    .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 22, cornerRadius: 6))
+                                    .disabled(isCapturingQr)
+
+                                    Button {
+                                        chooseQrImageFile()
+                                    } label: {
+                                        Label("选图识别", systemImage: "photo")
+                                            .font(.system(size: 11))
+                                    }
+                                    .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 22, cornerRadius: 6))
+                                    .disabled(isCapturingQr)
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.bottom, 8)
+
+                                if let qrStatusMsg {
+                                    Text(qrStatusMsg)
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(Color(red: 0.14, green: 0.62, blue: 0.30))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.horizontal, 14)
+                                        .padding(.bottom, 8)
+                                }
                             }
                         }
 
@@ -463,8 +509,21 @@ public struct ItemEditorSheet: View {
         .padding(.horizontal, 22)
         .padding(.top, 22)
         .padding(.bottom, 16)
-        .frame(width: 480)
+        .frame(width: 500)
         .background(Color(nsColor: .windowBackgroundColor))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(isQrDropTargeted && category == .login ? Color.accentColor : .clear, lineWidth: 2)
+                .padding(6)
+        )
+        .onDrop(of: [.image, .fileURL], isTargeted: $isQrDropTargeted) { providers in
+            guard category == .login else { return false }
+            Task { @MainActor in
+                let payloads = await QrCodeScanner.decodeFromItemProviders(providers)
+                applyQrPayloads(payloads)
+            }
+            return true
+        }
         .onAppear { populate() }
     }
 
@@ -716,6 +775,97 @@ public struct ItemEditorSheet: View {
             errorMsg = error.localizedDescription
         }
     }
+
+    private func pasteQrFromClipboard() {
+        let payloads = QrCodeScanner.decodeFromPasteboard()
+        applyQrPayloads(payloads)
+    }
+
+    private func captureQrFromScreen() async {
+        isCapturingQr = true
+        errorMsg = nil
+        qrStatusMsg = nil
+        defer { isCapturingQr = false }
+        let outcome = await QrCodeScanner.captureScreenRegionToPasteboard()
+        switch outcome {
+        case .cancelled:
+            break
+        case .failed(let msg):
+            errorMsg = msg
+        case .decoded(let payloads):
+            applyQrPayloads(payloads)
+        }
+    }
+
+    private func chooseQrImageFile() {
+        let urls = pickQrImageURLs(allowsMultiple: false)
+        guard !urls.isEmpty else { return }
+        let payloads = QrCodeScanner.decodeFromImageURLs(urls)
+        applyQrPayloads(payloads)
+    }
+
+    private func applyQrPayloads(_ rawPayloads: [String]) {
+        errorMsg = nil
+        qrStatusMsg = nil
+        guard !rawPayloads.isEmpty else {
+            errorMsg = "未在图片中识别到二维码"
+            return
+        }
+        let otps = QrCodeScanner.extractOtpAuthPayloads(from: rawPayloads)
+        guard let firstUri = otps.first else {
+            errorMsg = "识别到二维码，但内容不是有效的 otpauth:// 2FA 密钥"
+            return
+        }
+
+        let entries = (try? NpCoreBridge.parseAuthenticatorExport(firstUri)) ?? []
+        if firstUri.lowercased().hasPrefix("otpauth-migration://") {
+            guard let first = entries.first else {
+                errorMsg = "无法解析 Google 迁移二维码内容"
+                return
+            }
+            totp = first.otpauthUri
+            if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                title = first.issuer?.nilIfBlank ?? first.account?.nilIfBlank ?? ""
+            }
+            if username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                username = first.account?.nilIfBlank ?? ""
+            }
+            qrStatusMsg = entries.count > 1
+                ? "识别到含 \(entries.count) 个账号的迁移码，已填入第 1 个；批量导入全部请用「导入密码 / 2FA」"
+                : "已识别 Google 迁移码并填入 2FA"
+            return
+        }
+
+        totp = firstUri
+        if let first = entries.first {
+            if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                title = first.issuer?.nilIfBlank ?? first.account?.nilIfBlank ?? ""
+            }
+            if username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                username = first.account?.nilIfBlank ?? ""
+            }
+        }
+        qrStatusMsg = otps.count > 1
+            ? "识别到 \(otps.count) 个二维码，已填入第 1 个；批量导入全部请用「导入密码 / 2FA」"
+            : "已识别 2FA 二维码并填入"
+    }
+}
+
+private func pickQrImageURLs(allowsMultiple: Bool) -> [URL] {
+    let panel = NSOpenPanel()
+    panel.allowedContentTypes = [
+        .png,
+        .jpeg,
+        .tiff,
+        .heic,
+        .bmp,
+        .gif,
+        UTType(filenameExtension: "webp"),
+    ].compactMap { $0 }
+    panel.canChooseFiles = true
+    panel.canChooseDirectories = false
+    panel.allowsMultipleSelection = allowsMultiple
+    return panel.runModal() == .OK ? panel.urls : []
 }
 
 // MARK: - Import CSV / 2FA Sheet
@@ -730,6 +880,9 @@ public struct ImportSheet: View {
     @State private var skipDuplicates = true
     @State private var busy = false
     @State private var errorMsg: String?
+    @State private var qrStatusMsg: String?
+    @State private var isCapturingQr = false
+    @State private var isDropTargeted = false
     @State private var previewLines: [String] = []
     @State private var detectedType: String?
     @State private var result: VaultStore.ImportSummary?
@@ -749,12 +902,16 @@ public struct ImportSheet: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 14) {
-                Text("支持 Brave / Chrome CSV，以及 otpauth://、Google otpauth-migration://、2FAS / Aegis 文件；全部在本地 Rust 核心解析与加密。")
+                Text("支持 Brave / Chrome CSV，以及 otpauth://、Google otpauth-migration://、2FAS / Aegis 文件与 2FA 二维码图片；全部在本地 Rust 核心解析与加密。")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
 
                 if let errorMsg {
                     Text(errorMsg).font(.system(size: 12)).foregroundStyle(.red)
+                } else if let qrStatusMsg {
+                    Text(qrStatusMsg)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color(red: 0.14, green: 0.62, blue: 0.30))
                 }
 
                 if let result {
@@ -785,22 +942,64 @@ public struct ImportSheet: View {
                         .buttonStyle(.borderedProminent)
                     }
 
+                    HStack(spacing: 8) {
+                        Button {
+                            pasteQrImages()
+                        } label: {
+                            Label("粘贴二维码图片 (⌘V)", systemImage: "doc.on.clipboard")
+                                .font(.system(size: 11.5))
+                        }
+                        .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 28, cornerRadius: 7))
+                        .disabled(isCapturingQr)
+
+                        Button {
+                            Task { await captureScreenQr() }
+                        } label: {
+                            Label(isCapturingQr ? "框选屏幕上二维码..." : "框选屏幕二维码", systemImage: "viewfinder")
+                                .font(.system(size: 11.5))
+                        }
+                        .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 28, cornerRadius: 7))
+                        .disabled(isCapturingQr)
+
+                        Button {
+                            chooseQrImages()
+                        } label: {
+                            Label("选择二维码图片…", systemImage: "photo.on.rectangle.angled")
+                                .font(.system(size: 11.5))
+                        }
+                        .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 28, cornerRadius: 7))
+                        .disabled(isCapturingQr)
+                    }
+
                     if let fileName {
                         Text("已读取：\(fileName) · 识别类型：\(detectedType == "totp" ? "2FA 验证器导出" : "浏览器密码 CSV")")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.green)
                     }
 
-                    TextEditor(text: $rawText)
-                        .font(.system(size: 11.5, design: .monospaced))
-                        .frame(height: 110)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.75)
-                        )
-                        .onChange(of: rawText) { _, newValue in
-                            parsePreview(newValue)
+                    ZStack(alignment: .topLeading) {
+                        TextEditor(text: $rawText)
+                            .font(.system(size: 11.5, design: .monospaced))
+                        if rawText.isEmpty {
+                            Text("粘贴 CSV / otpauth:// 内容，或直接拖入 / ⌘V 粘贴 2FA 二维码截图…")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.tertiary)
+                                .padding(.top, 4)
+                                .padding(.leading, 6)
+                                .allowsHitTesting(false)
                         }
+                    }
+                    .frame(height: 115)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(
+                                isDropTargeted ? Color.accentColor : Color(nsColor: .separatorColor),
+                                lineWidth: isDropTargeted ? 1.5 : 0.75
+                            )
+                    )
+                    .onChange(of: rawText) { _, newValue in
+                        parsePreview(newValue)
+                    }
 
                     if !previewLines.isEmpty {
                         InsetGroupCard(header: "预览（共 \(previewLines.count) 条，敏感内容已遮罩）") {
@@ -832,7 +1031,24 @@ public struct ImportSheet: View {
             }
             .padding(20)
         }
-        .frame(width: 520)
+        .frame(width: 560)
+        .onPasteCommand(of: [.image, .fileURL, .png, .tiff]) { providers in
+            Task { @MainActor in
+                let payloads = await QrCodeScanner.decodeFromItemProviders(providers)
+                if payloads.isEmpty {
+                    appendQrPayloads(QrCodeScanner.decodeFromPasteboard())
+                } else {
+                    appendQrPayloads(payloads)
+                }
+            }
+        }
+        .onDrop(of: [.image, .fileURL], isTargeted: $isDropTargeted) { providers in
+            Task { @MainActor in
+                let payloads = await QrCodeScanner.decodeFromItemProviders(providers)
+                appendQrPayloads(payloads)
+            }
+            return true
+        }
         .onAppear {
             if case .vault(let vid) = store.destination {
                 vaultId = vid
@@ -852,9 +1068,69 @@ public struct ImportSheet: View {
            let content = try? String(contentsOf: url, encoding: .utf8)
         {
             fileName = url.lastPathComponent
+            qrStatusMsg = nil
             rawText = content
             parsePreview(content)
         }
+    }
+
+    private func pasteQrImages() {
+        let payloads = QrCodeScanner.decodeFromPasteboard()
+        appendQrPayloads(payloads)
+    }
+
+    private func captureScreenQr() async {
+        isCapturingQr = true
+        errorMsg = nil
+        qrStatusMsg = nil
+        defer { isCapturingQr = false }
+        let outcome = await QrCodeScanner.captureScreenRegionToPasteboard()
+        switch outcome {
+        case .cancelled:
+            break
+        case .failed(let msg):
+            errorMsg = msg
+        case .decoded(let payloads):
+            appendQrPayloads(payloads)
+        }
+    }
+
+    private func chooseQrImages() {
+        let urls = pickQrImageURLs(allowsMultiple: true)
+        guard !urls.isEmpty else { return }
+        let payloads = QrCodeScanner.decodeFromImageURLs(urls)
+        appendQrPayloads(payloads)
+    }
+
+    private func appendQrPayloads(_ rawPayloads: [String]) {
+        errorMsg = nil
+        qrStatusMsg = nil
+        guard !rawPayloads.isEmpty else {
+            errorMsg = "未在图片中识别到二维码"
+            return
+        }
+        let otps = QrCodeScanner.extractOtpAuthPayloads(from: rawPayloads)
+        guard !otps.isEmpty else {
+            errorMsg = "识别到二维码，但未包含 otpauth:// 或 otpauth-migration:// 2FA 内容"
+            return
+        }
+
+        var existingLines = rawText
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        var seen = Set(existingLines)
+        var added = 0
+        for uri in otps where !seen.contains(uri) {
+            seen.insert(uri)
+            existingLines.append(uri)
+            added += 1
+        }
+        rawText = existingLines.joined(separator: "\n")
+        parsePreview(rawText)
+        qrStatusMsg = added > 0
+            ? "已从二维码识别并添加 \(added) 条 2FA 记录"
+            : "二维码中的 \(otps.count) 条 2FA 已在导入列表中"
     }
 
     private func parsePreview(_ text: String) {
@@ -1334,14 +1610,25 @@ public struct ImapSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject public var store: VaultStore
 
-    @State private var enabled = false
+    @State private var isEditorExpanded = false
+    @State private var editingAccountId: String? = nil
+    @State private var editingHasPassword = false
+
+    @State private var label = ""
+    @State private var enabled = true
     @State private var host = ""
     @State private var portText = "993"
     @State private var tls = true
     @State private var username = ""
     @State private var password = ""
+
     @State private var testing = false
     @State private var saving = false
+    @State private var syncingAccountId: String? = nil
+    @State private var togglingAccountId: String? = nil
+    @State private var deletingAccountId: String? = nil
+    @State private var pendingDeleteAccount: ImapAccountPublic? = nil
+
     @State private var testMsg: String?
     @State private var testSuccess = false
     @State private var errorMsg: String?
@@ -1355,17 +1642,27 @@ public struct ImapSettingsSheet: View {
         ("Outlook", "outlook.office365.com", "993"),
     ]
 
-    private var statusBadge: (text: String, color: Color) {
-        switch store.imapConfig.status {
-        case "listening":
-            return ("监听/同步中", Color(red: 0.14, green: 0.62, blue: 0.30))
-        case "connecting":
-            return ("连接中", .orange)
-        case "error":
-            return ("连接异常", .red)
-        default:
-            return ("未启用", .secondary)
+    private var aggregateStatusBadge: (text: String, color: Color) {
+        let listeningCount = store.imapAccounts.filter { $0.enabled && $0.status == "listening" }.count
+        if listeningCount > 0 || (store.imapAccounts.isEmpty && store.imapConfig.status == "listening") {
+            let label = listeningCount > 1 ? "监听中 · \(listeningCount) 个邮箱" : "监听/同步中"
+            return (label, Color(red: 0.14, green: 0.62, blue: 0.30))
         }
+        if store.imapAccounts.contains(where: { $0.enabled && $0.status == "connecting" })
+            || (store.imapAccounts.isEmpty && store.imapConfig.status == "connecting")
+        {
+            return ("连接中", .orange)
+        }
+        if store.imapAccounts.contains(where: { $0.status == "error" })
+            || (store.imapAccounts.isEmpty && store.imapConfig.status == "error")
+        {
+            return ("连接异常", .red)
+        }
+        return ("未启用", .secondary)
+    }
+
+    private var showEditorCard: Bool {
+        store.imapAccounts.isEmpty || isEditorExpanded || editingAccountId != nil
     }
 
     public var body: some View {
@@ -1380,21 +1677,21 @@ public struct ImapSettingsSheet: View {
                         .foregroundStyle(Color.accentColor)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("邮箱收信配置 (IMAP & 域名路由)")
+                    Text("多邮箱 IMAP 收信配置")
                         .font(.system(size: 17, weight: .medium))
-                    Text("拉取主力邮箱验证码（需填邮箱授权码，非登录密码）")
+                    Text("支持同时添加多个 QQ / 163 / Gmail / iCloud / Outlook 或企业自定义 IMAP 邮箱拉取验证码")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text(statusBadge.text)
+                Text(aggregateStatusBadge.text)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(statusBadge.color)
+                    .foregroundStyle(aggregateStatusBadge.color)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
                     .background(
                         Capsule()
-                            .fill(statusBadge.color.opacity(0.12))
+                            .fill(aggregateStatusBadge.color.opacity(0.12))
                     )
             }
 
@@ -1417,100 +1714,221 @@ public struct ImapSettingsSheet: View {
                         RoundedRectangle(cornerRadius: 10)
                             .fill((testSuccess ? Color.green : Color.red).opacity(0.08))
                     )
-            } else if let lastErr = store.imapConfig.lastError?.nilIfBlank {
-                Text("最近错误：\(lastErr)")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.red)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.red.opacity(0.08)))
             }
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    InsetGroupCard(header: "IMAP 自动收信设置") {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Toggle("启用 IMAP 自动收信", isOn: $enabled)
-                                .font(.system(size: 13))
+                    // Section 1: Configured Accounts
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .center) {
+                            Text("已配置邮箱账号 (\(store.imapAccounts.count))")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 4)
 
-                            HStack(spacing: 6) {
-                                Text("常用预设:")
-                                    .font(.system(size: 11.5))
-                                    .foregroundStyle(.secondary)
-                                ForEach(presets, id: \.label) { preset in
-                                    Button {
-                                        enabled = true
-                                        host = preset.host
-                                        portText = preset.port
-                                        tls = true
-                                    } label: {
-                                        Text(preset.label)
-                                            .font(.system(size: 11.5))
-                                            .foregroundStyle(host == preset.host ? Color.accentColor : .primary)
-                                            .padding(.horizontal, 8)
-                                            .padding(.vertical, 4)
-                                            .background(
-                                                Capsule()
-                                                    .fill(host == preset.host ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.06))
-                                            )
-                                    }
-                                    .buttonStyle(.plain)
-                                }
+                            Spacer()
+
+                            Button {
+                                startAddingAccount()
+                            } label: {
+                                Text("+ 添加邮箱账号")
+                                    .font(.system(size: 12, weight: .medium))
                             }
-
-                            HStack(spacing: 10) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("IMAP 服务器")
-                                        .font(.system(size: 11.5))
-                                        .foregroundStyle(.secondary)
-                                    BorderlessInputField("imap.qq.com / imap.gmail.com", text: $host, isMonospaced: true)
-                                }
-
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("端口")
-                                        .font(.system(size: 11.5))
-                                        .foregroundStyle(.secondary)
-                                    BorderlessInputField("993", text: $portText, isMonospaced: true)
-                                        .frame(width: 84)
-                                }
-                            }
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("邮箱账号")
-                                    .font(.system(size: 11.5))
-                                    .foregroundStyle(.secondary)
-                                BorderlessInputField("you@qq.com / you@gmail.com", text: $username, isMonospaced: true)
-                            }
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text("授权码 / 应用专用密码")
-                                        .font(.system(size: 11.5))
-                                        .foregroundStyle(.secondary)
-                                    if store.imapConfig.hasPassword {
-                                        Text("· 已加密保存")
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(Color(red: 0.14, green: 0.62, blue: 0.30))
-                                    }
-                                }
-                                BorderlessInputField(
-                                    store.imapConfig.hasPassword ? "已加密保存（留空保持原密码不变）" : "填写邮箱 16 位授权码或 App Password",
-                                    text: $password,
-                                    isSecure: true,
-                                    isMonospaced: true
-                                )
-                            }
-
-                            Toggle("启用 SSL/TLS 加密连接 (端口 993 推荐)", isOn: $tls)
-                                .font(.system(size: 12.5))
+                            .buttonStyle(ApplePillButtonStyle(isProminent: true, height: 26, cornerRadius: 7))
                         }
-                        .padding(14)
+
+                        InsetGroupCard {
+                            if store.imapAccounts.isEmpty {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "envelope.badge.plus")
+                                        .font(.system(size: 16))
+                                        .foregroundStyle(.secondary)
+                                    Text("暂未配置收信邮箱，请在下方添加 QQ、163、Gmail 或自定义 IMAP 邮箱账号（同服务商支持多账号）。")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(14)
+                            } else {
+                                VStack(spacing: 0) {
+                                    ForEach(Array(store.imapAccounts.enumerated()), id: \.element.id) { idx, account in
+                                        if idx > 0 {
+                                            Divider().padding(.leading, 14)
+                                        }
+                                        accountRow(account)
+                                    }
+                                }
+                            }
+                        }
                     }
 
-                    InsetGroupCard(header: "Cloudflare 域名邮箱路由（别名自动收信）") {
+                    // Section 2: Add / Edit Account Form
+                    if showEditorCard {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("• 主力邮箱（QQ / Gmail / 163 / iCloud）通过上方 IMAP 授权码拉取或实时监听收信。")
+                            HStack {
+                                Text(editingAccountId == nil ? "添加邮箱账号" : "编辑邮箱账号")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 4)
+
+                                Spacer()
+
+                                if !store.imapAccounts.isEmpty {
+                                    Button("收起表单") {
+                                        cancelEditing()
+                                    }
+                                    .buttonStyle(.plain)
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 4)
+                                }
+                            }
+
+                            InsetGroupCard {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    Toggle("启用该邮箱自动收信", isOn: $enabled)
+                                        .font(.system(size: 13))
+
+                                    HStack(spacing: 6) {
+                                        Text("常用预设:")
+                                            .font(.system(size: 11.5))
+                                            .foregroundStyle(.secondary)
+                                        ForEach(presets, id: \.label) { preset in
+                                            Button {
+                                                enabled = true
+                                                host = preset.host
+                                                portText = preset.port
+                                                tls = true
+                                            } label: {
+                                                Text(preset.label)
+                                                    .font(.system(size: 11.5))
+                                                    .foregroundStyle(host == preset.host ? Color.accentColor : .primary)
+                                                    .padding(.horizontal, 8)
+                                                    .padding(.vertical, 4)
+                                                    .background(
+                                                        Capsule()
+                                                            .fill(host == preset.host ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.06))
+                                                    )
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                    }
+
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("别名备注")
+                                            .font(.system(size: 11.5))
+                                            .foregroundStyle(.secondary)
+                                        BorderlessInputField("别名备注 (如 主力 QQ / 工作 Gmail / 企业邮箱)", text: $label)
+                                    }
+
+                                    HStack(spacing: 10) {
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text("IMAP 服务器（支持自定义主机）")
+                                                .font(.system(size: 11.5))
+                                                .foregroundStyle(.secondary)
+                                            BorderlessInputField("imap.qq.com / imap.gmail.com / 自定义域名", text: $host, isMonospaced: true)
+                                        }
+
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text("端口")
+                                                .font(.system(size: 11.5))
+                                                .foregroundStyle(.secondary)
+                                            BorderlessInputField("993", text: $portText, isMonospaced: true)
+                                                .frame(width: 84)
+                                        }
+                                    }
+
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("邮箱地址")
+                                            .font(.system(size: 11.5))
+                                            .foregroundStyle(.secondary)
+                                        BorderlessInputField("you@qq.com / alice@gmail.com / user@company.com", text: $username, isMonospaced: true)
+                                    }
+
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack {
+                                            Text("邮箱授权码 / 应用专用密码")
+                                                .font(.system(size: 11.5))
+                                                .foregroundStyle(.secondary)
+                                            if editingHasPassword {
+                                                Text("· 已加密保存")
+                                                    .font(.system(size: 11))
+                                                    .foregroundStyle(Color(red: 0.14, green: 0.62, blue: 0.30))
+                                            }
+                                        }
+                                        BorderlessInputField(
+                                            editingHasPassword
+                                                ? "已加密保存（留空保持原密码不变）"
+                                                : "填写 16 位邮箱授权码或应用专用密码",
+                                            text: $password,
+                                            isSecure: true,
+                                            isMonospaced: true
+                                        )
+                                        Text("QQ / 163 邮箱请填写 IMAP 授权码；Gmail / iCloud 请使用两步验证应用专用密码；支持同服务商多账号与自定义 IMAP。")
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(.tertiary)
+                                    }
+
+                                    Toggle("启用 SSL/TLS 加密连接 (端口 993 推荐)", isOn: $tls)
+                                        .font(.system(size: 12.5))
+
+                                    Divider()
+
+                                    HStack(spacing: 10) {
+                                        Button {
+                                            Task { await runTest() }
+                                        } label: {
+                                            HStack(spacing: 6) {
+                                                if testing {
+                                                    ProgressView().controlSize(.small)
+                                                }
+                                                Text(testing ? "测试中..." : "测试连接")
+                                            }
+                                        }
+                                        .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 30, cornerRadius: 8))
+                                        .disabled(
+                                            testing
+                                                || saving
+                                                || host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                                || username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                        )
+
+                                        Spacer()
+
+                                        if !store.imapAccounts.isEmpty {
+                                            Button {
+                                                cancelEditing()
+                                            } label: {
+                                                Text("取消")
+                                            }
+                                            .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 30, cornerRadius: 8))
+                                            .disabled(testing || saving)
+                                        }
+
+                                        Button {
+                                            Task { await save() }
+                                        } label: {
+                                            HStack(spacing: 6) {
+                                                if saving {
+                                                    ProgressView().controlSize(.small)
+                                                }
+                                                Text(saving ? "保存并同步中..." : (editingAccountId == nil ? "添加并同步" : "保存更改"))
+                                            }
+                                        }
+                                        .buttonStyle(ApplePillButtonStyle(isProminent: true, height: 30, cornerRadius: 8))
+                                        .disabled(testing || saving)
+                                    }
+                                }
+                                .padding(14)
+                            }
+                        }
+                    }
+
+                    // Section 3: Multi-Account & Cloudflare Worker Info
+                    InsetGroupCard(header: "Cloudflare 域名路由与多账号说明") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("• Cloudflare Worker 使用 PUT/POST /api/imap/accounts 管理多账号，支持同一服务商多账号（如多个 QQ / 163 / Gmail）及企业自定义 IMAP 邮箱同时收信。")
+                            Text("• 每个账号的授权码在服务端独立加密保存；更新或测试已保存账号时留空密码即可沿用原密码。")
                             Text("• 自有域名（当前：\(store.aliasDomain.nilIfBlank ?? "未配置别名域名")）无限随机别名由 Cloudflare Email Routing Catch-All 在边缘直接密封推送。")
                         }
                         .font(.system(size: 12))
@@ -1522,88 +1940,335 @@ public struct ImapSettingsSheet: View {
             }
 
             HStack(spacing: 10) {
-                Button {
-                    Task { await runTest() }
-                } label: {
-                    HStack(spacing: 6) {
-                        if testing {
-                            ProgressView().controlSize(.small)
-                        }
-                        Text(testing ? "测试中..." : "测试连接")
-                    }
-                }
-                .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 30, cornerRadius: 8))
-                .disabled(testing || saving || host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
                 Spacer()
-
                 Button {
                     dismiss()
                 } label: {
-                    Text("取消")
-                        .frame(minWidth: 46)
+                    Text("完成")
+                        .frame(minWidth: 52)
                 }
                 .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 30, cornerRadius: 8))
                 .keyboardShortcut(.cancelAction)
-
-                Button {
-                    Task { await save() }
-                } label: {
-                    HStack(spacing: 6) {
-                        if saving {
-                            ProgressView().controlSize(.small)
-                        }
-                        Text(saving ? "保存并同步中..." : "保存并同步")
-                    }
-                }
-                .buttonStyle(ApplePillButtonStyle(isProminent: true, height: 30, cornerRadius: 8))
-                .disabled(testing || saving)
             }
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 20)
-        .frame(width: 540, height: 560)
+        .frame(width: 590, height: 650)
         .background(Color(nsColor: .windowBackgroundColor))
+        .confirmationDialog(
+            "确定删除邮箱账号「\(pendingDeleteAccount?.username ?? "")」？",
+            isPresented: Binding(
+                get: { pendingDeleteAccount != nil },
+                set: { if !$0 { pendingDeleteAccount = nil } }
+            )
+        ) {
+            Button("删除账号", role: .destructive) {
+                if let target = pendingDeleteAccount {
+                    pendingDeleteAccount = nil
+                    Task { await deleteAccount(target) }
+                }
+            }
+            Button("取消", role: .cancel) {
+                pendingDeleteAccount = nil
+            }
+        }
         .onAppear {
             if !loadedInitial {
-                syncDraftFromStore()
                 loadedInitial = true
+                if store.imapAccounts.isEmpty {
+                    isEditorExpanded = true
+                    enabled = true
+                }
             }
             Task {
-                let prevHost = store.imapConfig.host
-                let prevUser = store.imapConfig.username
-                try? await store.loadImapConfig()
-                if host == prevHost && username == prevUser {
-                    syncDraftFromStore()
+                try? await store.loadImapAccounts()
+                if store.imapAccounts.isEmpty {
+                    isEditorExpanded = true
+                    enabled = true
+                } else if editingAccountId == nil && host.isEmpty && username.isEmpty && password.isEmpty {
+                    isEditorExpanded = false
                 }
             }
         }
     }
 
-    private func syncDraftFromStore() {
-        let cfg = store.imapConfig
-        if !cfg.enabled && cfg.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            enabled = true
-        } else {
-            enabled = cfg.enabled
+    @ViewBuilder
+    private func accountRow(_ account: ImapAccountPublic) -> some View {
+        let badge = accountStatusBadge(account)
+        let isEditingThis = editingAccountId == account.id
+        let isBusyRow = syncingAccountId == account.id
+            || togglingAccountId == account.id
+            || deletingAccountId == account.id
+
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(account.label.nilIfBlank ?? account.username)
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+
+                        Text(badge.text)
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(badge.color)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule()
+                                    .fill(badge.color.opacity(0.12))
+                            )
+                    }
+
+                    HStack(spacing: 6) {
+                        if account.label.nilIfBlank != nil && account.label != account.username {
+                            Text(account.username)
+                                .font(.system(size: 11.5, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                            Text("·")
+                                .foregroundStyle(.tertiary)
+                        }
+                        Text("\(account.host):\(account.port)")
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        if account.tls {
+                            Text("TLS")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                HStack(spacing: 6) {
+                    if isBusyRow {
+                        ProgressView()
+                            .controlSize(.small)
+                            .padding(.horizontal, 4)
+                    }
+
+                    Button {
+                        Task { await syncAccount(account) }
+                    } label: {
+                        Label("同步", systemImage: "arrow.clockwise")
+                            .font(.system(size: 11.5, weight: .medium))
+                    }
+                    .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 26, cornerRadius: 7))
+                    .disabled(isBusyRow || !account.enabled)
+                    .help("立即同步该邮箱")
+
+                    Button {
+                        beginEditing(account)
+                    } label: {
+                        Text(isEditingThis ? "编辑中" : "编辑")
+                            .font(.system(size: 11.5, weight: .medium))
+                    }
+                    .buttonStyle(ApplePillButtonStyle(isProminent: isEditingThis, height: 26, cornerRadius: 7))
+                    .disabled(isBusyRow)
+
+                    Toggle(
+                        "",
+                        isOn: Binding(
+                            get: { account.enabled },
+                            set: { newVal in
+                                Task { await toggleAccountEnabled(account, enabled: newVal) }
+                            }
+                        )
+                    )
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .labelsHidden()
+                    .disabled(isBusyRow)
+                    .help(account.enabled ? "停用该邮箱" : "启用该邮箱")
+
+                    Button(role: .destructive) {
+                        pendingDeleteAccount = account
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.red)
+                            .frame(width: 26, height: 26)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(Color.red.opacity(0.08))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isBusyRow)
+                    .help("删除该邮箱账号")
+                }
+            }
+
+            if let err = account.lastError?.nilIfBlank {
+                Text("错误：\(err)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            } else if let lastSync = account.lastSyncAt?.nilIfBlank {
+                Text("上次同步：\(formatSyncTime(lastSync))")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
         }
-        host = cfg.host
-        portText = String(cfg.port > 0 ? cfg.port : 993)
-        tls = cfg.tls
-        username = cfg.username
-        password = ""
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .background(isEditingThis ? Color.accentColor.opacity(0.05) : Color.clear)
     }
 
-    private func buildPayload() -> ImapSavePayload {
+    private func accountStatusBadge(_ account: ImapAccountPublic) -> (text: String, color: Color) {
+        if !account.enabled || account.status == "disabled" {
+            return ("已禁用", .secondary)
+        }
+        switch account.status {
+        case "listening":
+            return ("监听中", Color(red: 0.14, green: 0.62, blue: 0.30))
+        case "connecting":
+            return ("连接中", .orange)
+        case "error":
+            return ("连接异常", .red)
+        default:
+            return ("已禁用", .secondary)
+        }
+    }
+
+    private func formatSyncTime(_ raw: String) -> String {
+        let isoFrac = ISO8601DateFormatter()
+        isoFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoPlain = ISO8601DateFormatter()
+        isoPlain.formatOptions = [.withInternetDateTime]
+        guard let date = isoFrac.date(from: raw) ?? isoPlain.date(from: raw) else {
+            return raw
+        }
+        let fmt = DateFormatter()
+        fmt.dateFormat = "MM-dd HH:mm:ss"
+        return fmt.string(from: date)
+    }
+
+    private func startAddingAccount() {
+        editingAccountId = nil
+        editingHasPassword = false
+        label = ""
+        enabled = true
+        host = ""
+        portText = "993"
+        tls = true
+        username = ""
+        password = ""
+        errorMsg = nil
+        testMsg = nil
+        isEditorExpanded = true
+    }
+
+    private func beginEditing(_ account: ImapAccountPublic) {
+        editingAccountId = account.id
+        editingHasPassword = account.hasPassword
+        label = account.label
+        enabled = account.enabled
+        host = account.host
+        portText = String(account.port > 0 ? account.port : 993)
+        tls = account.tls
+        username = account.username
+        password = ""
+        errorMsg = nil
+        testMsg = nil
+        isEditorExpanded = true
+    }
+
+    private func cancelEditing() {
+        editingAccountId = nil
+        editingHasPassword = false
+        label = ""
+        enabled = true
+        host = ""
+        portText = "993"
+        tls = true
+        username = ""
+        password = ""
+        isEditorExpanded = false
+    }
+
+    private func buildPayload() -> ImapAccountSavePayload {
         let parsedPort = Int(portText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 993
-        return ImapSavePayload(
+        let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ImapAccountSavePayload(
+            id: editingAccountId,
+            label: cleanLabel.isEmpty ? cleanUser : cleanLabel,
             enabled: enabled,
             host: host.trimmingCharacters(in: .whitespacesAndNewlines),
             port: min(65535, max(1, parsedPort)),
             tls: tls,
-            username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+            username: cleanUser,
             password: password.nilIfBlank
         )
+    }
+
+    private func syncAccount(_ account: ImapAccountPublic) async {
+        syncingAccountId = account.id
+        errorMsg = nil
+        testMsg = nil
+        defer { syncingAccountId = nil }
+        let res = await store.triggerImapSync(accountId: account.id)
+        try? await store.syncAll()
+        if res.ok {
+            testSuccess = true
+            let name = account.label.nilIfBlank ?? account.username
+            testMsg = "已同步「\(name)」，本次新增 \(res.synced) 封邮件"
+        } else {
+            testSuccess = false
+            errorMsg = res.error ?? "同步邮箱「\(account.username)」失败"
+        }
+    }
+
+    private func toggleAccountEnabled(_ account: ImapAccountPublic, enabled newValue: Bool) async {
+        togglingAccountId = account.id
+        errorMsg = nil
+        testMsg = nil
+        defer { togglingAccountId = nil }
+        do {
+            let payload = ImapAccountSavePayload(
+                id: account.id,
+                label: account.label,
+                enabled: newValue,
+                host: account.host,
+                port: account.port,
+                tls: account.tls,
+                username: account.username,
+                password: nil
+            )
+            let updated = try await store.saveImapAccount(payload)
+            if editingAccountId == account.id {
+                enabled = updated.enabled
+            }
+            testSuccess = true
+            testMsg = updated.enabled
+                ? "已启用「\(updated.label.nilIfBlank ?? updated.username)」"
+                : "已停用「\(updated.label.nilIfBlank ?? updated.username)」"
+        } catch {
+            errorMsg = error.localizedDescription
+        }
+    }
+
+    private func deleteAccount(_ account: ImapAccountPublic) async {
+        deletingAccountId = account.id
+        errorMsg = nil
+        testMsg = nil
+        defer { deletingAccountId = nil }
+        do {
+            try await store.deleteImapAccount(id: account.id)
+            if editingAccountId == account.id {
+                cancelEditing()
+            }
+            if store.imapAccounts.isEmpty {
+                isEditorExpanded = true
+                enabled = true
+            }
+            testSuccess = true
+            testMsg = "已删除邮箱账号「\(account.username)」"
+        } catch {
+            errorMsg = error.localizedDescription
+        }
     }
 
     private func runTest() async {
@@ -1612,7 +2277,13 @@ public struct ImapSettingsSheet: View {
         testMsg = nil
         defer { testing = false }
         do {
-            let res = try await store.testImapConfig(buildPayload())
+            let payload = buildPayload()
+            if editingAccountId == nil && payload.password == nil {
+                testSuccess = false
+                errorMsg = "新建邮箱账号测试连接前请填写应用专用密码 / 授权码"
+                return
+            }
+            let res = try await store.testImapAccount(payload)
             if res.ok {
                 testSuccess = true
                 testMsg = "连接成功 · 收件箱共 \(res.messages ?? 0) 封邮件"
@@ -1632,18 +2303,26 @@ public struct ImapSettingsSheet: View {
         testMsg = nil
         defer { saving = false }
         do {
-            let cleanHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
-            let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
-            if enabled && (cleanHost.isEmpty || cleanUser.isEmpty || (!store.imapConfig.hasPassword && password.nilIfBlank == nil)) {
-                errorMsg = "启用 IMAP 收信前请填写完整的服务器、邮箱账号和授权码"
+            let payload = buildPayload()
+            if payload.host.isEmpty || payload.username.isEmpty {
+                errorMsg = "请填写完整的 IMAP 服务器和邮箱地址"
                 return
             }
-            let updated = try await store.saveImapConfig(buildPayload())
+            if (editingAccountId == nil || !editingHasPassword) && payload.password == nil {
+                errorMsg = "请填写邮箱授权码 / 应用专用密码"
+                return
+            }
+            let updated = try await store.saveImapAccount(payload)
             if updated.status == "error", let lastErr = updated.lastError?.nilIfBlank {
-                errorMsg = "已保存配置，但同步连接失败：\(lastErr)"
+                editingAccountId = updated.id
+                editingHasPassword = updated.hasPassword
+                errorMsg = "已保存账号，但同步连接失败：\(lastErr)"
                 return
             }
-            dismiss()
+            let display = updated.label.nilIfBlank ?? updated.username
+            cancelEditing()
+            testSuccess = true
+            testMsg = "已保存邮箱账号「\(display)」"
         } catch {
             errorMsg = error.localizedDescription
         }

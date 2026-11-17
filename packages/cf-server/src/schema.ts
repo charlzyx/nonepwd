@@ -88,7 +88,89 @@ const SCHEMA_STATEMENTS = [
     last_sync_at TEXT,
     updated_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS imap_accounts (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL DEFAULT 993,
+    tls INTEGER NOT NULL DEFAULT 1,
+    username TEXT NOT NULL,
+    password_enc TEXT NOT NULL,
+    last_uid INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'listening',
+    last_error TEXT,
+    last_sync_at TEXT,
+    updated_at TEXT NOT NULL
+  )`,
 ];
+
+export function deriveImapLabel(username: string): string {
+  const trimmed = username.trim();
+  if (!trimmed) return '';
+  const at = trimmed.indexOf('@');
+  return at > 0 ? trimmed.slice(0, at) : trimmed;
+}
+
+export async function ensureLegacyImapMigrated(db: D1Database): Promise<void> {
+  const countRow = await db
+    .prepare('SELECT COUNT(*) AS cnt FROM imap_accounts')
+    .first<{ cnt: number }>();
+  if (Number(countRow?.cnt ?? 0) > 0) return;
+
+  const legacy = await db
+    .prepare(
+      `SELECT enabled, host, port, tls, username, password_enc, last_uid, status, last_error, last_sync_at, updated_at
+       FROM imap_config WHERE id = 1`
+    )
+    .first<{
+      enabled: number;
+      host: string;
+      port: number;
+      tls: number;
+      username: string;
+      password_enc: string;
+      last_uid: number;
+      status: string;
+      last_error: string | null;
+      last_sync_at: string | null;
+      updated_at: string;
+    }>();
+
+  if (!legacy || !legacy.host.trim() || !legacy.username.trim()) return;
+
+  const enabled = legacy.enabled === 1 ? 1 : 0;
+  const status =
+    enabled === 1
+      ? legacy.status === 'connecting' || legacy.status === 'listening' || legacy.status === 'error'
+        ? legacy.status
+        : 'listening'
+      : 'disabled';
+  const label = deriveImapLabel(legacy.username);
+  const updatedAt = legacy.updated_at || new Date().toISOString();
+
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO imap_accounts
+       (id, label, enabled, host, port, tls, username, password_enc, last_uid, status, last_error, last_sync_at, updated_at)
+       VALUES ('legacy-1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .bind(
+      label,
+      enabled,
+      legacy.host.trim(),
+      legacy.port || 993,
+      legacy.tls === 1 ? 1 : 0,
+      legacy.username.trim(),
+      legacy.password_enc ?? '',
+      legacy.last_uid ?? 0,
+      status,
+      legacy.last_error ?? null,
+      legacy.last_sync_at ?? null,
+      updatedAt
+    )
+    .run();
+}
 
 export async function ensureSchema(db: D1Database): Promise<void> {
   if (initializedDbs.has(db)) return;
@@ -121,6 +203,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
         .bind(now)
     );
     await db.batch(stmts);
+    await ensureLegacyImapMigrated(db);
     initializedDbs.add(db);
   })();
 

@@ -26,6 +26,11 @@ use crate::auth::{
 };
 use crate::db::{EmailFilterConfig, NonePwdDb};
 use crate::email_ingest::{ingest_pre_sealed_email, ingest_raw_email, ingest_simulated_email};
+use crate::imap::{
+    compute_aggregate_imap_config, delete_imap_account_in_db, get_imap_account_by_id,
+    resolve_imap_test_params_in_db, save_imap_account_in_db, ImapTestInput, SaveImapAccountInput,
+    SaveImapError, SaveImapMode,
+};
 use crate::imap::ImapWorker;
 use crate::ws::{BroadcastOptions, WsHub};
 
@@ -176,6 +181,11 @@ pub fn build_router(state: AppState) -> Router {
             get(handle_get_settings).patch(handle_patch_settings),
         )
         .route("/api/imap", get(handle_get_imap).put(handle_put_imap))
+        .route("/api/imap/accounts", post(handle_create_imap_account))
+        .route(
+            "/api/imap/accounts/{id}",
+            put(handle_put_imap_account).delete(handle_delete_imap_account),
+        )
         .route("/api/imap/test", post(handle_test_imap))
         .route("/api/imap/sync", post(handle_sync_imap))
         .route("/api/webhooks/email/cf", post(handle_cf_webhook))
@@ -667,7 +677,8 @@ async fn handle_sync(State(state): State<AppState>, headers: HeaderMap) -> Respo
     }
 
     let email_filter = state.db.get_email_filter();
-    let imap_status = state.imap_worker.get_public_config();
+    let imap_accounts = state.imap_worker.list_accounts();
+    let imap_status = compute_aggregate_imap_config(&imap_accounts);
 
     let (account, vaults, items, aliases, emails) = {
         let conn = state.db.lock_conn();
@@ -723,6 +734,7 @@ async fn handle_sync(State(state): State<AppState>, headers: HeaderMap) -> Respo
         "aliases": aliases,
         "emails": emails,
         "imapStatus": imap_status,
+        "imapAccounts": imap_accounts,
         "emailFilter": email_filter,
     }))
     .into_response()
@@ -1891,18 +1903,45 @@ async fn handle_get_imap(State(state): State<AppState>, headers: HeaderMap) -> R
     if let Err(res) = require_owner(&state.db, &headers) {
         return res;
     }
-    Json(json!({ "imap": state.imap_worker.get_public_config() })).into_response()
+    let accounts = state.imap_worker.list_accounts();
+    let imap = compute_aggregate_imap_config(&accounts);
+    Json(json!({ "imap": imap, "accounts": accounts })).into_response()
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PutImapBody {
+struct SaveImapAccountBody {
+    id: Option<String>,
+    label: Option<String>,
     enabled: Option<bool>,
     host: Option<String>,
-    port: Option<u16>,
+    port: Option<i64>,
     tls: Option<bool>,
     username: Option<String>,
     password: Option<String>,
+}
+
+impl SaveImapAccountBody {
+    fn into_input(self, override_id: Option<String>) -> SaveImapAccountInput {
+        SaveImapAccountInput {
+            id: override_id.or(self.id),
+            label: self.label,
+            enabled: self.enabled,
+            host: self.host,
+            port: self.port,
+            tls: self.tls,
+            username: self.username,
+            password: self.password,
+        }
+    }
+}
+
+fn save_imap_err_response(err: SaveImapError) -> Response {
+    match err {
+        SaveImapError::BadRequest(msg) => json_err(StatusCode::BAD_REQUEST, msg),
+        SaveImapError::NotFound(msg) => json_err(StatusCode::NOT_FOUND, msg),
+        SaveImapError::Internal(msg) => json_err(StatusCode::INTERNAL_SERVER_ERROR, msg),
+    }
 }
 
 async fn handle_put_imap(
@@ -1913,64 +1952,124 @@ async fn handle_put_imap(
     if let Err(res) = require_owner(&state.db, &headers) {
         return res;
     }
-    let body: PutImapBody = match parse_json_body(&body_bytes) {
+    let body: SaveImapAccountBody = match parse_json_body(&body_bytes) {
         Ok(b) => b,
         Err(res) => return res,
     };
 
+    if let Err(err) =
+        save_imap_account_in_db(&state.db, body.into_input(None), SaveImapMode::LegacyPut)
     {
-        let conn = state.db.lock_conn();
-        let existing = conn
-            .query_row(
-                "SELECT enabled, host, port, tls, username, password_enc FROM imap_config WHERE id = 1",
-                [],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, i64>(3)?,
-                        r.get::<_, String>(4)?,
-                        r.get::<_, String>(5)?,
-                    ))
-                },
-            )
-            .unwrap_or((0, String::new(), 993, 1, String::new(), String::new()));
-
-        let enabled = body.enabled.map(i64::from).unwrap_or(existing.0);
-        let host = body
-            .host
-            .map(|h| h.trim().to_string())
-            .unwrap_or(existing.1);
-        let port = body.port.map(i64::from).unwrap_or(existing.2);
-        let tls = body.tls.map(i64::from).unwrap_or(existing.3);
-        let username = body
-            .username
-            .map(|u| u.trim().to_string())
-            .unwrap_or(existing.4);
-        let password_enc = match body.password.filter(|p| !p.is_empty()) {
-            Some(pw) => state.db.encrypt_local_secret(&pw),
-            None => existing.5,
-        };
-
-        let _ = conn.execute(
-            "UPDATE imap_config
-             SET enabled = ?1, host = ?2, port = ?3, tls = ?4, username = ?5, password_enc = ?6, updated_at = ?7
-             WHERE id = 1",
-            params![
-                enabled,
-                host,
-                port,
-                tls,
-                username,
-                password_enc,
-                now_iso_millis()
-            ],
-        );
+        return save_imap_err_response(err);
     }
 
     state.imap_worker.reload();
-    Json(json!({ "imap": state.imap_worker.get_public_config() })).into_response()
+    let accounts = state.imap_worker.list_accounts();
+    let imap = compute_aggregate_imap_config(&accounts);
+    Json(json!({ "imap": imap, "accounts": accounts })).into_response()
+}
+
+async fn handle_create_imap_account(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body_bytes: Bytes,
+) -> Response {
+    if let Err(res) = require_owner(&state.db, &headers) {
+        return res;
+    }
+    let body: SaveImapAccountBody = match parse_json_body(&body_bytes) {
+        Ok(b) => b,
+        Err(res) => return res,
+    };
+
+    let saved = match save_imap_account_in_db(
+        &state.db,
+        body.into_input(None),
+        SaveImapMode::CreateOrUpsert,
+    ) {
+        Ok(s) => s,
+        Err(err) => return save_imap_err_response(err),
+    };
+
+    state.imap_worker.reload();
+
+    let accounts = state.imap_worker.list_accounts();
+    let account = saved
+        .id
+        .as_deref()
+        .and_then(|id| accounts.iter().find(|a| a.id == id))
+        .cloned();
+    let imap = compute_aggregate_imap_config(&accounts);
+    let status = if saved.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    (
+        status,
+        Json(json!({
+            "account": account,
+            "accounts": accounts,
+            "imap": imap,
+        })),
+    )
+        .into_response()
+}
+
+async fn handle_put_imap_account(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    body_bytes: Bytes,
+) -> Response {
+    if let Err(res) = require_owner(&state.db, &headers) {
+        return res;
+    }
+    let body: SaveImapAccountBody = match parse_json_body(&body_bytes) {
+        Ok(b) => b,
+        Err(res) => return res,
+    };
+
+    if let Err(err) = save_imap_account_in_db(
+        &state.db,
+        body.into_input(Some(id.clone())),
+        SaveImapMode::UpdateStrict,
+    ) {
+        return save_imap_err_response(err);
+    }
+
+    state.imap_worker.reload();
+    let accounts = state.imap_worker.list_accounts();
+    let account = accounts.iter().find(|a| a.id == id).cloned();
+    let imap = compute_aggregate_imap_config(&accounts);
+    Json(json!({
+        "account": account,
+        "accounts": accounts,
+        "imap": imap,
+    }))
+    .into_response()
+}
+
+async fn handle_delete_imap_account(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(res) = require_owner(&state.db, &headers) {
+        return res;
+    }
+    if !delete_imap_account_in_db(&state.db, &id) {
+        return json_err(StatusCode::NOT_FOUND, "IMAP account not found");
+    }
+    state.imap_worker.reload();
+    let accounts = state.imap_worker.list_accounts();
+    let imap = compute_aggregate_imap_config(&accounts);
+    Json(json!({
+        "ok": true,
+        "accounts": accounts,
+        "imap": imap,
+    }))
+    .into_response()
 }
 
 async fn handle_test_imap(
@@ -1981,49 +2080,42 @@ async fn handle_test_imap(
     if let Err(res) = require_owner(&state.db, &headers) {
         return res;
     }
-    let body: PutImapBody = match parse_json_body(&body_bytes) {
-        Ok(b) => b,
-        Err(res) => return res,
+    let body: SaveImapAccountBody = if body_bytes.iter().all(|b| b.is_ascii_whitespace()) {
+        SaveImapAccountBody {
+            id: None,
+            label: None,
+            enabled: None,
+            host: None,
+            port: None,
+            tls: None,
+            username: None,
+            password: None,
+        }
+    } else {
+        match parse_json_body(&body_bytes) {
+            Ok(b) => b,
+            Err(res) => return res,
+        }
     };
 
-    let existing = {
-        let conn = state.db.lock_conn();
-        conn.query_row(
-            "SELECT host, port, tls, username, password_enc FROM imap_config WHERE id = 1",
-            [],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            },
-        )
-        .unwrap_or((String::new(), 993, 1, String::new(), String::new()))
-    };
-
-    let host = body.host.unwrap_or(existing.0).trim().to_string();
-    let port = body
-        .port
-        .unwrap_or_else(|| existing.1.clamp(1, 65535) as u16);
-    let tls = body.tls.unwrap_or(existing.2 != 0);
-    let username = body.username.unwrap_or(existing.3).trim().to_string();
-    let password = match body.password.filter(|p| !p.is_empty()) {
-        Some(pw) => pw,
-        None => state.db.decrypt_local_secret(&existing.4),
-    };
+    let (host, port, tls, username, password) = resolve_imap_test_params_in_db(
+        &state.db,
+        ImapTestInput {
+            id: body.id,
+            host: body.host,
+            port: body.port,
+            tls: body.tls,
+            username: body.username,
+            password: body.password,
+        },
+    );
 
     if host.is_empty() || username.is_empty() || password.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "ok": false,
-                "error": "Missing host, username, or password",
-            })),
-        )
-            .into_response();
+        return Json(json!({
+            "ok": false,
+            "error": "请填写完整的 IMAP 服务器、邮箱账号与授权码",
+        }))
+        .into_response();
     }
 
     let result = state
@@ -2033,14 +2125,63 @@ async fn handle_test_imap(
     Json(result).into_response()
 }
 
-async fn handle_sync_imap(State(state): State<AppState>, headers: HeaderMap) -> Response {
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncImapBody {
+    id: Option<String>,
+}
+
+async fn handle_sync_imap(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body_bytes: Bytes,
+) -> Response {
     if let Err(res) = require_owner(&state.db, &headers) {
         return res;
     }
-    state.imap_worker.trigger_sync();
+    let body: SyncImapBody = if body_bytes.iter().all(|b| b.is_ascii_whitespace()) {
+        SyncImapBody { id: None }
+    } else {
+        match parse_json_body(&body_bytes) {
+            Ok(b) => b,
+            Err(res) => return res,
+        }
+    };
+
+    let target_id = body
+        .id
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    if let Some(ref id) = target_id {
+        let Some(acc) = get_imap_account_by_id(&state.db, id) else {
+            return json_err(StatusCode::NOT_FOUND, "IMAP account not found");
+        };
+        if !acc.enabled {
+            let accounts = state.imap_worker.list_accounts();
+            let imap = compute_aggregate_imap_config(&accounts);
+            return Json(json!({
+                "ok": false,
+                "synced": 0,
+                "error": "IMAP account is disabled",
+                "accounts": accounts,
+                "imap": imap,
+            }))
+            .into_response();
+        }
+        state.imap_worker.trigger_sync(Some(id));
+    } else {
+        state.imap_worker.trigger_sync(None);
+    }
+
+    let accounts = state.imap_worker.list_accounts();
+    let imap = compute_aggregate_imap_config(&accounts);
     Json(json!({
         "ok": true,
-        "imap": state.imap_worker.get_public_config(),
+        "synced": 0,
+        "error": Value::Null,
+        "accounts": accounts,
+        "imap": imap,
     }))
     .into_response()
 }
@@ -2408,4 +2549,396 @@ async fn handle_fallback(
 
     let mime = mime_for_path(&target_file);
     (StatusCode::OK, [(header::CONTENT_TYPE, mime)], content).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use nonepwd_core::crypto::{
+        derive_account_keys_raw, encrypt_json, generate_email_key_pair, generate_raw_aes_key,
+    };
+    use nonepwd_core::encoding::{generate_secret_key, to_base64_url};
+    use nonepwd_core::random::random_bytes;
+    use nonepwd_core::types::{aad, RootKeysetPayload};
+
+    use crate::imap::{list_imap_accounts, resolve_imap_test_params_in_db, ImapAccountPublic};
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "{prefix}-{}",
+            random_id().expect("random id")
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    async fn resp_json(res: Response) -> (StatusCode, Value) {
+        let status = res.status();
+        let bytes = to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let val = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, val)
+    }
+
+    fn owner_headers(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        h
+    }
+
+    #[tokio::test]
+    async fn multi_account_imap_crud_sync_and_legacy_migration() {
+        let dir = temp_dir("np-multi-imap-routes");
+        let db = Arc::new(NonePwdDb::open(&dir).expect("open db"));
+        let ws_hub = Arc::new(WsHub::new());
+        let imap_worker = ImapWorker::new(db.clone(), ws_hub.clone());
+        let state = AppState {
+            db: db.clone(),
+            ws_hub,
+            imap_worker: imap_worker.clone(),
+            web_dist_dir: dir.join("web"),
+            bin_dist_dirs: vec![],
+        };
+
+        // Setup owner account
+        let sk = generate_secret_key().unwrap();
+        let salt = to_base64_url(&random_bytes(16).unwrap());
+        let (muk, verifier) = derive_account_keys_raw("Pass!123", &sk, &salt, 1000).unwrap();
+        let root_key = generate_raw_aes_key().unwrap();
+        let email_kp = generate_email_key_pair().unwrap();
+        let enc_root = encrypt_json(
+            &muk,
+            &RootKeysetPayload {
+                root_key_b64: to_base64_url(&root_key),
+                email_private_key_pkcs8_b64: email_kp.private_key_pkcs8_b64,
+            },
+            Some(aad::ROOT_KEYSET),
+        )
+        .unwrap();
+
+        let setup_body = serde_json::to_vec(&json!({
+            "email": "owner@example.com",
+            "kdfSalt": salt,
+            "kdfIterations": 1000,
+            "authVerifier": verifier,
+            "encryptedRootKeyset": enc_root,
+            "emailPublicKey": email_kp.public_key_b64,
+        }))
+        .unwrap();
+        let (st_setup, setup_val) = resp_json(
+            handle_auth_setup(State(state.clone()), Bytes::from(setup_body)).await,
+        )
+        .await;
+        assert_eq!(st_setup, StatusCode::CREATED);
+        let token = setup_val["token"].as_str().unwrap().to_string();
+        let hdrs = owner_headers(&token);
+
+        // Creating new account without password -> 400
+        let (st_no_pw, _) = resp_json(
+            handle_create_imap_account(
+                State(state.clone()),
+                hdrs.clone(),
+                Bytes::from(
+                    serde_json::to_vec(&json!({
+                        "host": "imap.gmail.com",
+                        "username": "alice.work@gmail.com"
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(st_no_pw, StatusCode::BAD_REQUEST);
+
+        // Create two Gmail accounts on same host (disabled in test so no outbound TCP)
+        let (st_c1, c1) = resp_json(
+            handle_create_imap_account(
+                State(state.clone()),
+                hdrs.clone(),
+                Bytes::from(
+                    serde_json::to_vec(&json!({
+                        "label": "Work Gmail",
+                        "enabled": false,
+                        "host": "imap.gmail.com",
+                        "port": 993,
+                        "tls": true,
+                        "username": "alice.work@gmail.com",
+                        "password": "work-pw-16"
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(st_c1, StatusCode::CREATED);
+        assert_eq!(c1["account"]["label"], "Work Gmail");
+        assert_eq!(c1["account"]["hasPassword"], true);
+        let id_work = c1["account"]["id"].as_str().unwrap().to_string();
+
+        let (st_c2, c2) = resp_json(
+            handle_create_imap_account(
+                State(state.clone()),
+                hdrs.clone(),
+                Bytes::from(
+                    serde_json::to_vec(&json!({
+                        "enabled": false,
+                        "host": "imap.gmail.com",
+                        "port": 993,
+                        "tls": true,
+                        "username": "alice.personal@gmail.com",
+                        "password": "personal-pw-16"
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(st_c2, StatusCode::CREATED);
+        assert_eq!(c2["account"]["label"], "alice.personal");
+        assert_eq!(c2["accounts"].as_array().unwrap().len(), 2);
+        let id_personal = c2["account"]["id"].as_str().unwrap().to_string();
+
+        // Seed last_uid=88 to verify preservation when host/port/username unchanged, and reset when changed
+        {
+            let conn = db.lock_conn();
+            conn.execute(
+                "UPDATE imap_accounts SET last_uid = 88 WHERE id = ?1",
+                params![id_personal],
+            )
+            .unwrap();
+        }
+
+        // Update personal label without re-sending password -> preserves password and last_uid
+        let (st_u1, u1) = resp_json(
+            handle_put_imap_account(
+                State(state.clone()),
+                hdrs.clone(),
+                AxumPath(id_personal.clone()),
+                Bytes::from(
+                    serde_json::to_vec(&json!({
+                        "label": "Personal Gmail",
+                        "enabled": false,
+                        "host": "imap.gmail.com",
+                        "port": 993,
+                        "tls": true,
+                        "username": "alice.personal@gmail.com"
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(st_u1, StatusCode::OK);
+        assert_eq!(u1["account"]["label"], "Personal Gmail");
+        assert_eq!(u1["account"]["hasPassword"], true);
+        {
+            let conn = db.lock_conn();
+            let uid: i64 = conn
+                .query_row(
+                    "SELECT last_uid FROM imap_accounts WHERE id = ?1",
+                    params![id_personal],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(uid, 88);
+        }
+
+        // Resolving test params by id decrypts stored password; unrelated username does not leak password
+        let (_, _, _, _, resolved_pw) = resolve_imap_test_params_in_db(
+            &db,
+            ImapTestInput {
+                id: Some(id_work.clone()),
+                host: Some("imap.gmail.com".into()),
+                port: Some(993),
+                tls: Some(true),
+                username: Some("alice.work@gmail.com".into()),
+                password: None,
+            },
+        );
+        assert_eq!(resolved_pw, "work-pw-16");
+
+        let (_, _, _, _, empty_pw) = resolve_imap_test_params_in_db(
+            &db,
+            ImapTestInput {
+                id: None,
+                host: Some("imap.qq.com".into()),
+                port: Some(993),
+                tls: Some(true),
+                username: Some("new@qq.com".into()),
+                password: None,
+            },
+        );
+        assert_eq!(empty_pw, "");
+
+        // Update host/username -> resets last_uid to 0
+        let (st_u2, _) = resp_json(
+            handle_put_imap_account(
+                State(state.clone()),
+                hdrs.clone(),
+                AxumPath(id_personal.clone()),
+                Bytes::from(
+                    serde_json::to_vec(&json!({
+                        "host": "imap.qq.com",
+                        "port": 993,
+                        "tls": true,
+                        "username": "alice.qq@qq.com"
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(st_u2, StatusCode::OK);
+        {
+            let conn = db.lock_conn();
+            let uid: i64 = conn
+                .query_row(
+                    "SELECT last_uid FROM imap_accounts WHERE id = ?1",
+                    params![id_personal],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(uid, 0);
+        }
+
+        // GET /api/sync returns imapAccounts + aggregate imapStatus
+        let (st_sync, sync_val) =
+            resp_json(handle_sync(State(state.clone()), hdrs.clone()).await).await;
+        assert_eq!(st_sync, StatusCode::OK);
+        assert_eq!(sync_val["imapAccounts"].as_array().unwrap().len(), 2);
+        assert_eq!(sync_val["imapStatus"]["enabled"], false);
+        assert_eq!(sync_val["imapStatus"]["status"], "disabled");
+
+        // GET /api/imap returns { imap, accounts }
+        let (st_get, get_val) =
+            resp_json(handle_get_imap(State(state.clone()), hdrs.clone()).await).await;
+        assert_eq!(st_get, StatusCode::OK);
+        assert_eq!(get_val["accounts"].as_array().unwrap().len(), 2);
+
+        // POST /api/imap/sync with empty body works; with disabled id returns ok=false; missing id returns 404
+        let (st_sync_all, sync_all_val) = resp_json(
+            handle_sync_imap(State(state.clone()), hdrs.clone(), Bytes::new()).await,
+        )
+        .await;
+        assert_eq!(st_sync_all, StatusCode::OK);
+        assert_eq!(sync_all_val["ok"], true);
+        assert_eq!(sync_all_val["accounts"].as_array().unwrap().len(), 2);
+
+        let (st_sync_dis, sync_dis_val) = resp_json(
+            handle_sync_imap(
+                State(state.clone()),
+                hdrs.clone(),
+                Bytes::from(serde_json::to_vec(&json!({ "id": id_work })).unwrap()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(st_sync_dis, StatusCode::OK);
+        assert_eq!(sync_dis_val["ok"], false);
+
+        let (st_sync_missing, _) = resp_json(
+            handle_sync_imap(
+                State(state.clone()),
+                hdrs.clone(),
+                Bytes::from(serde_json::to_vec(&json!({ "id": "missing" })).unwrap()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(st_sync_missing, StatusCode::NOT_FOUND);
+
+        // Aggregate status calculation precedence check
+        let agg = compute_aggregate_imap_config(&[
+            ImapAccountPublic {
+                id: "1".into(),
+                label: "a".into(),
+                enabled: true,
+                host: "imap.gmail.com".into(),
+                port: 993,
+                tls: true,
+                username: "a@gmail.com".into(),
+                has_password: true,
+                status: "error".into(),
+                last_error: Some("bad auth".into()),
+                last_sync_at: None,
+            },
+            ImapAccountPublic {
+                id: "2".into(),
+                label: "b".into(),
+                enabled: true,
+                host: "imap.qq.com".into(),
+                port: 993,
+                tls: true,
+                username: "b@qq.com".into(),
+                has_password: true,
+                status: "listening".into(),
+                last_error: None,
+                last_sync_at: None,
+            },
+        ]);
+        assert!(agg.enabled);
+        assert_eq!(agg.status, "listening");
+        assert_eq!(agg.last_error, None);
+
+        // Delete both accounts; missing returns 404; deleting all clears legacy imap_config
+        let (st_del_missing, _) = resp_json(
+            handle_delete_imap_account(
+                State(state.clone()),
+                hdrs.clone(),
+                AxumPath("nope".into()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(st_del_missing, StatusCode::NOT_FOUND);
+
+        let (st_del1, d1) = resp_json(
+            handle_delete_imap_account(State(state.clone()), hdrs.clone(), AxumPath(id_work)).await,
+        )
+        .await;
+        assert_eq!(st_del1, StatusCode::OK);
+        assert_eq!(d1["accounts"].as_array().unwrap().len(), 1);
+
+        let (st_del2, d2) = resp_json(
+            handle_delete_imap_account(State(state.clone()), hdrs.clone(), AxumPath(id_personal))
+                .await,
+        )
+        .await;
+        assert_eq!(st_del2, StatusCode::OK);
+        assert_eq!(d2["accounts"].as_array().unwrap().len(), 0);
+        assert_eq!(list_imap_accounts(&db).len(), 0);
+
+        // Legacy imap_config auto-migration
+        {
+            let conn = db.lock_conn();
+            let enc = db.encrypt_local_secret("legacy-pw");
+            conn.execute(
+                "UPDATE imap_config
+                 SET enabled = 0, host = 'imap.163.com', port = 993, tls = 1,
+                     username = 'old@163.com', password_enc = ?1, last_uid = 55, status = 'disabled'
+                 WHERE id = 1",
+                params![enc],
+            )
+            .unwrap();
+        }
+        let migrated = list_imap_accounts(&db);
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(migrated[0].id, "legacy-1");
+        assert_eq!(migrated[0].label, "old");
+        assert_eq!(migrated[0].username, "old@163.com");
+        assert!(migrated[0].has_password);
+
+        imap_worker.stop();
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

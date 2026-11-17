@@ -193,6 +193,106 @@ pub fn decrypt_local_secret_with_key(server_key: &[u8; 32], blob: &str) -> Strin
     String::from_utf8(plain).unwrap_or_default()
 }
 
+pub fn derive_imap_label(username: &str) -> String {
+    let trimmed = username.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    match trimmed.find('@') {
+        Some(at) if at > 0 => trimmed[..at].to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
+pub fn ensure_legacy_imap_migrated_conn(conn: &Connection) -> Result<(), String> {
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM imap_accounts", [], |r| r.get(0))
+        .unwrap_or(0);
+    if count > 0 {
+        return Ok(());
+    }
+
+    let legacy = conn
+        .query_row(
+            "SELECT enabled, host, port, tls, username, password_enc, last_uid, status, last_error, updated_at
+             FROM imap_config WHERE id = 1",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, String>(9)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("Failed reading legacy imap_config: {e}"))?;
+
+    let Some((
+        enabled_i,
+        host,
+        port,
+        tls,
+        username,
+        password_enc,
+        last_uid,
+        status_raw,
+        last_error,
+        updated_at,
+    )) = legacy
+    else {
+        return Ok(());
+    };
+
+    if host.trim().is_empty() || username.trim().is_empty() {
+        return Ok(());
+    }
+
+    let enabled = if enabled_i != 0 { 1i64 } else { 0i64 };
+    let status = if enabled == 0 {
+        "disabled"
+    } else if status_raw == "connecting" || status_raw == "listening" || status_raw == "error" {
+        status_raw.as_str()
+    } else {
+        "listening"
+    };
+    let label = derive_imap_label(&username);
+    let updated = if updated_at.trim().is_empty() {
+        now_iso_millis()
+    } else {
+        updated_at
+    };
+
+    conn.execute(
+        "INSERT OR IGNORE INTO imap_accounts
+         (id, label, enabled, host, port, tls, username, password_enc, last_uid, status, last_error, last_sync_at, updated_at)
+         VALUES ('legacy-1', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11)",
+        params![
+            label,
+            enabled,
+            host.trim(),
+            port.clamp(1, 65535),
+            if tls != 0 { 1i64 } else { 0i64 },
+            username.trim(),
+            password_enc,
+            last_uid.max(0),
+            status,
+            last_error,
+            updated,
+        ],
+    )
+    .map_err(|e| format!("Failed migrating legacy imap_config: {e}"))?;
+
+    Ok(())
+}
+
 pub struct NonePwdDb {
     conn: Mutex<Connection>,
     pub data_dir: PathBuf,
@@ -307,6 +407,22 @@ impl NonePwdDb {
               updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS imap_accounts (
+              id TEXT PRIMARY KEY,
+              label TEXT NOT NULL DEFAULT '',
+              enabled INTEGER NOT NULL DEFAULT 1,
+              host TEXT NOT NULL,
+              port INTEGER NOT NULL DEFAULT 993,
+              tls INTEGER NOT NULL DEFAULT 1,
+              username TEXT NOT NULL,
+              password_enc TEXT NOT NULL,
+              last_uid INTEGER NOT NULL DEFAULT 0,
+              status TEXT NOT NULL DEFAULT 'listening',
+              last_error TEXT,
+              last_sync_at TEXT,
+              updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS email_filter (
               id INTEGER PRIMARY KEY CHECK (id = 1),
               config_json TEXT NOT NULL,
@@ -324,6 +440,8 @@ impl NonePwdDb {
             params![now],
         )
         .map_err(|e| format!("Failed seeding imap_config: {e}"))?;
+
+        ensure_legacy_imap_migrated_conn(&conn)?;
 
         let default_filter_json = serde_json::to_string(&EmailFilterConfig::default())
             .unwrap_or_else(|_| "{\"enabled\":false,\"otpOnly\":false,\"mode\":\"allow\",\"rules\":[]}".to_string());

@@ -1,13 +1,21 @@
-import type { ImapConfigPublic } from '@nonepwd/core/worker';
+import {
+  randomId,
+  type ImapAccountPublic,
+  type ImapAccountStatus,
+  type ImapConfigPublic,
+} from '@nonepwd/core/worker';
 import type { CfSocket } from 'cloudflare:sockets';
 import { ingestRawEmail } from './email.js';
+import { deriveImapLabel, ensureLegacyImapMigrated } from './schema.js';
 import type { CfServerEnv } from './types.js';
 
 const MAX_IMAP_LITERAL_BYTES = 8 * 1024 * 1024;
 const IMAP_SYNC_MIN_INTERVAL_MS = 15_000;
 const IMAP_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-interface ImapRow {
+export interface ImapAccountRow {
+  id: string;
+  label: string;
   enabled: number;
   host: string;
   port: number;
@@ -15,15 +23,36 @@ interface ImapRow {
   username: string;
   password_enc: string;
   last_uid: number;
-  status: 'disabled' | 'connecting' | 'listening' | 'error';
+  status: string;
   last_error: string | null;
   last_sync_at: string | null;
+  updated_at: string;
 }
 
 export interface ImapTestResult {
   ok: boolean;
   messages?: number;
   error?: string;
+}
+
+export interface SaveImapAccountInput {
+  id?: string;
+  label?: string;
+  enabled?: boolean;
+  host?: string;
+  port?: number;
+  tls?: boolean;
+  username?: string;
+  password?: string;
+}
+
+export class ImapAccountValidationError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode: 400 | 404 = 400
+  ) {
+    super(message);
+  }
 }
 
 const textEncoder = new TextEncoder();
@@ -100,15 +129,42 @@ export async function decryptImapPassword(secretKeySource: string, encoded: stri
   return textDecoder.decode(plainBuf);
 }
 
-export async function getImapPublicConfig(db: D1Database): Promise<ImapConfigPublic> {
-  const row = await db
-    .prepare(
-      `SELECT enabled, host, port, tls, username, password_enc, status, last_error
-       FROM imap_config WHERE id = 1`
-    )
-    .first<Omit<ImapRow, 'last_uid' | 'last_sync_at'>>();
+export function clampImapPort(port: unknown, fallback: number = 993): number {
+  if (port === undefined || port === null) return fallback;
+  const parsed = Number(port);
+  if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 65535) {
+    return Math.floor(parsed);
+  }
+  return 993;
+}
 
-  if (!row) {
+function normalizeStatus(raw: string, enabled: boolean): ImapAccountStatus {
+  if (!enabled) return 'disabled';
+  if (raw === 'connecting' || raw === 'listening' || raw === 'error') {
+    return raw;
+  }
+  return 'listening';
+}
+
+export function rowToImapAccountPublic(row: ImapAccountRow): ImapAccountPublic {
+  const enabled = row.enabled === 1;
+  return {
+    id: row.id,
+    label: row.label || deriveImapLabel(row.username),
+    enabled,
+    host: row.host,
+    port: clampImapPort(row.port),
+    tls: row.tls === 1,
+    username: row.username,
+    hasPassword: Boolean(row.password_enc),
+    status: normalizeStatus(row.status, enabled),
+    lastError: row.last_error ?? null,
+    lastSyncAt: row.last_sync_at ?? null,
+  };
+}
+
+export function computeAggregateImapConfig(accounts: ImapAccountPublic[]): ImapConfigPublic {
+  if (accounts.length === 0) {
     return {
       enabled: false,
       host: '',
@@ -121,27 +177,400 @@ export async function getImapPublicConfig(db: D1Database): Promise<ImapConfigPub
     };
   }
 
+  const enabledAccounts = accounts.filter((a) => a.enabled);
+  const primary = enabledAccounts[0] ?? accounts[0];
+  let status: ImapAccountStatus = 'disabled';
+  let lastError: string | null = null;
+
+  if (enabledAccounts.length > 0) {
+    const listening = enabledAccounts.find((a) => a.status === 'listening');
+    const connecting = enabledAccounts.find((a) => a.status === 'connecting');
+    const errored = enabledAccounts.find((a) => a.status === 'error');
+    if (listening) {
+      status = 'listening';
+      lastError = null;
+    } else if (connecting) {
+      status = 'connecting';
+      lastError = null;
+    } else if (errored) {
+      status = 'error';
+      lastError = errored.lastError;
+    } else {
+      status = primary.status;
+      lastError = primary.lastError;
+    }
+  }
+
   return {
-    enabled: row.enabled === 1,
-    host: row.host,
-    port: row.port,
-    tls: row.tls === 1,
-    username: row.username,
-    hasPassword: Boolean(row.password_enc),
-    status: row.status,
-    lastError: row.last_error,
+    enabled: enabledAccounts.length > 0,
+    host: primary.host,
+    port: primary.port,
+    tls: primary.tls,
+    username: primary.username,
+    hasPassword: primary.hasPassword,
+    status,
+    lastError,
   };
 }
 
-export async function getStoredImapPassword(
+async function listImapAccountRows(db: D1Database): Promise<ImapAccountRow[]> {
+  let res = await db
+    .prepare(
+      `SELECT id, label, enabled, host, port, tls, username, password_enc,
+              last_uid, status, last_error, last_sync_at, updated_at
+       FROM imap_accounts ORDER BY rowid ASC`
+    )
+    .all<ImapAccountRow>();
+  let rows = res.results ?? [];
+  if (rows.length === 0) {
+    await ensureLegacyImapMigrated(db);
+    res = await db
+      .prepare(
+        `SELECT id, label, enabled, host, port, tls, username, password_enc,
+                last_uid, status, last_error, last_sync_at, updated_at
+         FROM imap_accounts ORDER BY rowid ASC`
+      )
+      .all<ImapAccountRow>();
+    rows = res.results ?? [];
+  }
+  return rows;
+}
+
+export async function listImapAccounts(db: D1Database): Promise<ImapAccountPublic[]> {
+  const rows = await listImapAccountRows(db);
+  return rows.map(rowToImapAccountPublic);
+}
+
+export async function getImapAccountById(
   db: D1Database,
-  webhookSecret: string
-): Promise<string> {
+  id: string
+): Promise<ImapAccountPublic | null> {
+  await ensureLegacyImapMigrated(db);
   const row = await db
-    .prepare('SELECT password_enc FROM imap_config WHERE id = 1')
-    .first<{ password_enc: string }>();
-  if (!row?.password_enc) return '';
-  return decryptImapPassword(webhookSecret, row.password_enc);
+    .prepare(
+      `SELECT id, label, enabled, host, port, tls, username, password_enc,
+              last_uid, status, last_error, last_sync_at, updated_at
+       FROM imap_accounts WHERE id = ?`
+    )
+    .bind(id)
+    .first<ImapAccountRow>();
+  return row ? rowToImapAccountPublic(row) : null;
+}
+
+export async function getImapPublicConfig(db: D1Database): Promise<ImapConfigPublic> {
+  const accounts = await listImapAccounts(db);
+  return computeAggregateImapConfig(accounts);
+}
+
+export async function syncLegacyImapConfigFromAccounts(db: D1Database): Promise<void> {
+  const rows = await db
+    .prepare(
+      `SELECT id, label, enabled, host, port, tls, username, password_enc,
+              last_uid, status, last_error, last_sync_at, updated_at
+       FROM imap_accounts ORDER BY rowid ASC`
+    )
+    .all<ImapAccountRow>();
+  const all = rows.results ?? [];
+  const now = new Date().toISOString();
+
+  if (all.length === 0) {
+    await db
+      .prepare(
+        `UPDATE imap_config
+         SET enabled = 0, host = '', port = 993, tls = 1, username = '', password_enc = '',
+             last_uid = 0, status = 'disabled', last_error = NULL, last_sync_at = NULL, updated_at = ?
+         WHERE id = 1`
+      )
+      .bind(now)
+      .run();
+    return;
+  }
+
+  const publicAccounts = all.map(rowToImapAccountPublic);
+  const agg = computeAggregateImapConfig(publicAccounts);
+  const primaryRow = all.find((r) => r.enabled === 1) ?? all[0];
+
+  await db
+    .prepare(
+      `UPDATE imap_config
+       SET enabled = ?, host = ?, port = ?, tls = ?, username = ?, password_enc = ?,
+           last_uid = ?, status = ?, last_error = ?, last_sync_at = ?, updated_at = ?
+       WHERE id = 1`
+    )
+    .bind(
+      agg.enabled ? 1 : 0,
+      primaryRow.host,
+      clampImapPort(primaryRow.port),
+      primaryRow.tls === 1 ? 1 : 0,
+      primaryRow.username,
+      primaryRow.password_enc,
+      primaryRow.last_uid ?? 0,
+      agg.status,
+      agg.lastError,
+      primaryRow.last_sync_at ?? null,
+      now
+    )
+    .run();
+}
+
+async function getWebhookSecret(db: D1Database): Promise<string> {
+  const account = await db
+    .prepare('SELECT cf_webhook_secret FROM account WHERE id = 1')
+    .first<{ cf_webhook_secret: string }>();
+  if (!account?.cf_webhook_secret) {
+    throw new ImapAccountValidationError('Account not initialized', 400);
+  }
+  return account.cf_webhook_secret;
+}
+
+export async function saveImapAccount(
+  db: D1Database,
+  input: SaveImapAccountInput,
+  mode: 'create_or_upsert' | 'update_strict' | 'legacy_put'
+): Promise<{
+  id: string | null;
+  created: boolean;
+  enabled: boolean;
+  hasPassword: boolean;
+}> {
+  await ensureLegacyImapMigrated(db);
+  const webhookSecret = await getWebhookSecret(db);
+  const rows = await listImapAccountRows(db);
+
+  let existing: ImapAccountRow | undefined;
+  let targetId = input.id?.trim() || '';
+
+  if (mode === 'update_strict') {
+    existing = rows.find((r) => r.id === targetId);
+    if (!existing) {
+      throw new ImapAccountValidationError('IMAP account not found', 404);
+    }
+  } else if (mode === 'create_or_upsert') {
+    if (targetId) {
+      existing = rows.find((r) => r.id === targetId);
+    } else {
+      targetId = randomId();
+    }
+  } else {
+    // legacy_put: match by username, else first account, else 'legacy-1'
+    const reqUsername = input.username?.trim().toLowerCase() ?? '';
+    if (reqUsername) {
+      existing = rows.find((r) => r.username.trim().toLowerCase() === reqUsername);
+    }
+    if (!existing && rows.length > 0) {
+      existing = rows[0];
+    }
+    targetId = existing?.id ?? 'legacy-1';
+  }
+
+  const nextEnabled =
+    input.enabled !== undefined
+      ? Boolean(input.enabled)
+      : existing
+        ? existing.enabled === 1
+        : mode !== 'legacy_put';
+  const nextHost =
+    input.host !== undefined ? input.host.trim() : existing?.host ?? '';
+  const nextPort = clampImapPort(input.port, existing?.port ?? 993);
+  const nextTls =
+    input.tls !== undefined ? Boolean(input.tls) : existing ? existing.tls === 1 : true;
+  const nextUsername =
+    input.username !== undefined ? input.username.trim() : existing?.username ?? '';
+
+  let nextPasswordEnc = existing?.password_enc ?? '';
+  if (input.password && input.password.trim().length > 0) {
+    nextPasswordEnc = await encryptImapPassword(webhookSecret, input.password);
+  }
+
+  const now = new Date().toISOString();
+
+  // Preserve legacy PUT /api/imap behavior when clearing/saving empty config on fresh DB
+  if (mode === 'legacy_put' && !existing && (!nextHost || !nextUsername)) {
+    await db
+      .prepare(
+        `UPDATE imap_config
+         SET enabled = ?, host = ?, port = ?, tls = ?, username = ?, password_enc = ?,
+             last_uid = 0, status = ?, last_error = NULL, updated_at = ?
+         WHERE id = 1`
+      )
+      .bind(
+        nextEnabled ? 1 : 0,
+        nextHost,
+        nextPort,
+        nextTls ? 1 : 0,
+        nextUsername,
+        nextPasswordEnc,
+        nextEnabled ? 'listening' : 'disabled',
+        now
+      )
+      .run();
+    return { id: null, created: false, enabled: nextEnabled, hasPassword: Boolean(nextPasswordEnc) };
+  }
+
+  if (!nextHost || !nextUsername) {
+    throw new ImapAccountValidationError('Missing host or username', 400);
+  }
+
+  if (mode === 'create_or_upsert' && !existing && !nextPasswordEnc) {
+    throw new ImapAccountValidationError('Password is required for new IMAP account', 400);
+  }
+
+  let nextLabel: string;
+  if (input.label !== undefined) {
+    nextLabel = input.label.trim() || deriveImapLabel(nextUsername);
+  } else if (existing?.label?.trim()) {
+    nextLabel = existing.label.trim();
+  } else {
+    nextLabel = deriveImapLabel(nextUsername);
+  }
+
+  const endpointChanged =
+    !existing ||
+    nextHost !== existing.host ||
+    nextPort !== clampImapPort(existing.port) ||
+    nextUsername !== existing.username;
+  const nextLastUid = endpointChanged ? 0 : existing?.last_uid ?? 0;
+  const nextStatus: ImapAccountStatus = nextEnabled ? 'listening' : 'disabled';
+
+  if (existing) {
+    await db
+      .prepare(
+        `UPDATE imap_accounts
+         SET label = ?, enabled = ?, host = ?, port = ?, tls = ?, username = ?, password_enc = ?,
+             last_uid = ?, status = ?, last_error = NULL, updated_at = ?
+         WHERE id = ?`
+      )
+      .bind(
+        nextLabel,
+        nextEnabled ? 1 : 0,
+        nextHost,
+        nextPort,
+        nextTls ? 1 : 0,
+        nextUsername,
+        nextPasswordEnc,
+        nextLastUid,
+        nextStatus,
+        now,
+        targetId
+      )
+      .run();
+  } else {
+    await db
+      .prepare(
+        `INSERT INTO imap_accounts
+         (id, label, enabled, host, port, tls, username, password_enc, last_uid, status, last_error, last_sync_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`
+      )
+      .bind(
+        targetId,
+        nextLabel,
+        nextEnabled ? 1 : 0,
+        nextHost,
+        nextPort,
+        nextTls ? 1 : 0,
+        nextUsername,
+        nextPasswordEnc,
+        nextLastUid,
+        nextStatus,
+        now
+      )
+      .run();
+  }
+
+  await syncLegacyImapConfigFromAccounts(db);
+
+  return {
+    id: targetId,
+    created: !existing,
+    enabled: nextEnabled,
+    hasPassword: Boolean(nextPasswordEnc),
+  };
+}
+
+export async function deleteImapAccount(db: D1Database, id: string): Promise<boolean> {
+  await ensureLegacyImapMigrated(db);
+  const res = await db.prepare('DELETE FROM imap_accounts WHERE id = ?').bind(id).run();
+  const changes = Number(res.meta?.changes ?? 0);
+  if (changes === 0) return false;
+  await syncLegacyImapConfigFromAccounts(db);
+  return true;
+}
+
+export async function resolveImapTestParams(
+  db: D1Database,
+  webhookSecret: string | undefined,
+  body: {
+    id?: string;
+    host?: string;
+    port?: number;
+    tls?: boolean;
+    username?: string;
+    password?: string;
+  }
+): Promise<{ host: string; port: number; tls: boolean; username: string; password: string }> {
+  await ensureLegacyImapMigrated(db);
+
+  const requestedId = body.id?.trim();
+  const requestedUser = body.username?.trim();
+  let stored: {
+    host: string;
+    port: number;
+    tls: number;
+    username: string;
+    password_enc: string;
+  } | null = null;
+
+  if (requestedId) {
+    stored = await db
+      .prepare(
+        'SELECT host, port, tls, username, password_enc FROM imap_accounts WHERE id = ?'
+      )
+      .bind(requestedId)
+      .first();
+  } else if (requestedUser) {
+    stored = await db
+      .prepare(
+        'SELECT host, port, tls, username, password_enc FROM imap_accounts WHERE LOWER(username) = LOWER(?)'
+      )
+      .bind(requestedUser)
+      .first();
+  } else {
+    stored = await db
+      .prepare(
+        'SELECT host, port, tls, username, password_enc FROM imap_accounts ORDER BY rowid ASC LIMIT 1'
+      )
+      .first();
+  }
+
+  if (!stored) {
+    const legacy = await db
+      .prepare('SELECT host, port, tls, username, password_enc FROM imap_config WHERE id = 1')
+      .first<{
+        host: string;
+        port: number;
+        tls: number;
+        username: string;
+        password_enc: string;
+      }>();
+    if (
+      legacy &&
+      (!requestedUser || legacy.username.trim().toLowerCase() === requestedUser.toLowerCase())
+    ) {
+      stored = legacy;
+    }
+  }
+
+  const host = (body.host ?? stored?.host ?? '').trim();
+  const port = clampImapPort(body.port, stored?.port ?? 993);
+  const tls = body.tls !== undefined ? Boolean(body.tls) : (stored?.tls ?? 1) === 1;
+  const username = (body.username ?? stored?.username ?? '').trim();
+
+  let password = body.password && body.password.trim().length > 0 ? body.password : '';
+  if (!password && stored?.password_enc && webhookSecret) {
+    password = await decryptImapPassword(webhookSecret, stored.password_enc);
+  }
+
+  return { host, port, tls, username, password };
 }
 
 function imapQuoteString(val: string): string {
@@ -423,16 +852,31 @@ export async function testImapConnection(params: {
   }
 }
 
-export async function syncImapInbox(
+export async function syncImapAccount(
   env: CfServerEnv,
-  options?: { force?: boolean }
+  accountId: string,
+  options?: { force?: boolean; rejectDisabled?: boolean }
 ): Promise<{ synced: number; error?: string }> {
+  await ensureLegacyImapMigrated(env.DB);
   const row = await env.DB.prepare(
-    `SELECT enabled, host, port, tls, username, password_enc, last_uid, status, last_error, last_sync_at
-     FROM imap_config WHERE id = 1`
-  ).first<ImapRow>();
+    `SELECT id, label, enabled, host, port, tls, username, password_enc,
+            last_uid, status, last_error, last_sync_at, updated_at
+     FROM imap_accounts WHERE id = ?`
+  )
+    .bind(accountId)
+    .first<ImapAccountRow>();
 
-  if (!row || row.enabled !== 1 || !row.host || !row.username || !row.password_enc) {
+  if (!row) {
+    return { synced: 0, error: 'IMAP account not found' };
+  }
+
+  if (row.enabled !== 1) {
+    return options?.rejectDisabled
+      ? { synced: 0, error: 'IMAP account is disabled' }
+      : { synced: 0 };
+  }
+
+  if (!row.host || !row.username || !row.password_enc) {
     return { synced: 0 };
   }
 
@@ -455,11 +899,13 @@ export async function syncImapInbox(
     password = await decryptImapPassword(account.cf_webhook_secret, row.password_enc);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    const now = new Date().toISOString();
     await env.DB.prepare(
-      'UPDATE imap_config SET status = ?, last_error = ?, last_sync_at = ?, updated_at = ? WHERE id = 1'
+      'UPDATE imap_accounts SET status = ?, last_error = ?, last_sync_at = ?, updated_at = ? WHERE id = ?'
     )
-      .bind('error', msg, new Date().toISOString(), new Date().toISOString())
+      .bind('error', msg, now, now, row.id)
       .run();
+    await syncLegacyImapConfigFromAccounts(env.DB);
     return { synced: 0, error: msg };
   }
 
@@ -468,7 +914,7 @@ export async function syncImapInbox(
 
   try {
     return await withTimeout(15_000, async () => {
-      client = await WorkersImapClient.connect(row.host, row.port, row.tls === 1);
+      client = await WorkersImapClient.connect(row.host, clampImapPort(row.port), row.tls === 1);
       await client.login(row.host, row.username, password);
       await client.selectInbox();
 
@@ -504,8 +950,10 @@ export async function syncImapInbox(
           targetUids = uniqueSorted.filter((u) => u > row.last_uid).slice(-15);
           if (options?.force) {
             const countRow = await env.DB.prepare(
-              'SELECT COUNT(*) AS cnt FROM encrypted_emails'
-            ).first<{ cnt: number }>();
+              'SELECT COUNT(*) AS cnt FROM encrypted_emails WHERE LOWER(envelope_to) = LOWER(?)'
+            )
+              .bind(row.username.trim())
+              .first<{ cnt: number }>();
             if (Number(countRow?.cnt ?? 0) === 0) {
               targetUids = uniqueSorted.slice(-10);
             }
@@ -516,6 +964,7 @@ export async function syncImapInbox(
         }
       }
 
+      const envelopeTo = row.username.trim() || undefined;
       for (const uid of targetUids) {
         const fetched = await client.runCommand(`UID FETCH ${uid} (UID BODY.PEEK[])`);
         for (const item of fetched) {
@@ -524,6 +973,7 @@ export async function syncImapInbox(
               env,
               rawMime: item.literal,
               source: 'imap',
+              envelopeTo,
             });
             if (res.accepted) {
               synced += 1;
@@ -539,12 +989,13 @@ export async function syncImapInbox(
 
       const now = new Date().toISOString();
       await env.DB.prepare(
-        `UPDATE imap_config
+        `UPDATE imap_accounts
          SET last_uid = ?, status = 'listening', last_error = NULL, last_sync_at = ?, updated_at = ?
-         WHERE id = 1`
+         WHERE id = ?`
       )
-        .bind(highestUid, now, now)
+        .bind(highestUid, now, now, row.id)
         .run();
+      await syncLegacyImapConfigFromAccounts(env.DB);
 
       return { synced };
     });
@@ -552,16 +1003,57 @@ export async function syncImapInbox(
     const msg = err instanceof Error ? err.message : String(err);
     const now = new Date().toISOString();
     await env.DB.prepare(
-      `UPDATE imap_config
+      `UPDATE imap_accounts
        SET status = 'error', last_error = ?, last_sync_at = ?, updated_at = ?
-       WHERE id = 1`
+       WHERE id = ?`
     )
-      .bind(msg, now, now)
+      .bind(msg, now, now, row.id)
       .run();
+    await syncLegacyImapConfigFromAccounts(env.DB);
     return { synced, error: msg };
   } finally {
     if (client) {
       await (client as WorkersImapClient).close();
     }
   }
+}
+
+export async function syncImapInbox(
+  env: CfServerEnv,
+  options?: { force?: boolean; accountId?: string }
+): Promise<{ synced: number; error?: string }> {
+  await ensureLegacyImapMigrated(env.DB);
+  if (options?.accountId) {
+    return syncImapAccount(env, options.accountId, {
+      force: options.force,
+      rejectDisabled: true,
+    });
+  }
+
+  const enabledRows = await env.DB.prepare(
+    `SELECT id, username FROM imap_accounts WHERE enabled = 1 ORDER BY rowid ASC`
+  ).all<{ id: string; username: string }>();
+
+  const targets = enabledRows.results ?? [];
+  if (targets.length === 0) {
+    return { synced: 0 };
+  }
+
+  const results = await Promise.all(
+    targets.map(async (target) => ({
+      username: target.username,
+      res: await syncImapAccount(env, target.id, { force: options?.force }),
+    }))
+  );
+
+  let synced = 0;
+  const errors: string[] = [];
+  for (const item of results) {
+    synced += item.res.synced;
+    if (item.res.error) {
+      errors.push(targets.length > 1 ? `${item.username}: ${item.res.error}` : item.res.error);
+    }
+  }
+
+  return errors.length > 0 ? { synced, error: errors.join('; ') } : { synced };
 }

@@ -104,3 +104,19 @@ CREATE TABLE IF NOT EXISTS imap_config (
 INSERT OR IGNORE INTO imap_config (
   id, enabled, host, port, tls, username, password_enc, last_uid, status, updated_at
 ) VALUES (1, 0, '', 993, 1, '', '', 0, 'disabled', '1970-01-01T00:00:00.000Z');
+
+CREATE TABLE IF NOT EXISTS imap_accounts (
+  id TEXT PRIMARY KEY,
+  label TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  host TEXT NOT NULL,
+  port INTEGER NOT NULL DEFAULT 993,
+  tls INTEGER NOT NULL DEFAULT 1,
+  username TEXT NOT NULL,
+  password_enc TEXT NOT NULL,
+  last_uid INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'listening',
+  last_error TEXT,
+  last_sync_at TEXT,
+  updated_at TEXT NOT NULL
+);

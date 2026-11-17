@@ -1,0 +1,20 @@
+{
+  "name": "NonePwd",
+  "id": "dev.nonepwd.app",
+  "version": "0.1.0",
+  "build": 1,
+  "capabilities": {
+    "network": {
+      "hosts": ["*"]
+    },
+    "clipboard": true,
+    "picker": true,
+    "webview": {
+      "hosts": ["*"]
+    },
+    "statusBar": true,
+    "openUrl": {
+      "schemes": ["https", "http"]
+    }
+  }
+}

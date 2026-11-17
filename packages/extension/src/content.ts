@@ -25,6 +25,7 @@ import {
   saveInlineBadgeHidden,
   THEME_STORAGE_KEY,
 } from './theme.js';
+import { cropAndDecodeQrDataUrl, type QrCropRect } from './qr.js';
 import type { ExtendedVaultItem } from './types.js';
 
 export { INLINE_BADGE_HIDDEN_KEY as HIDE_BADGE_STORAGE_KEY };
@@ -469,7 +470,148 @@ export const POPOVER_CSS = `
     opacity: 0.5;
     cursor: default;
   }
+  .np-qr-toast {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 2147483647;
+    width: 332px;
+    max-width: calc(100vw - 24px);
+    background: var(--np-bg);
+    color: var(--np-fg);
+    border-radius: 14px;
+    box-shadow: var(--np-shadow);
+    border: 1px solid var(--np-border);
+    padding: 12px 14px;
+    display: none;
+    animation: np-fade 0.14s ease-out;
+  }
+  .np-qr-toast-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .np-qr-toast-left {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    min-width: 0;
+    flex: 1;
+  }
+  .np-qr-toast-msg {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--np-fg);
+    line-height: 1.4;
+    word-break: break-word;
+  }
+  .np-qr-toast-msg.ok {
+    color: var(--np-fg);
+  }
+  .np-qr-toast-msg.err {
+    color: #e5484d;
+  }
+  .np-qr-toast-sub {
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--np-muted);
+    line-height: 1.4;
+    word-break: break-word;
+  }
+  .np-qr-toast-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-top: 10px;
+  }
 `;
+
+const QR_SNIP_CSS = `
+  :host {
+    all: initial;
+    position: fixed;
+    inset: 0;
+    z-index: 2147483647;
+    cursor: crosshair;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  * {
+    box-sizing: border-box;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  }
+  .np-snip-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.42);
+    cursor: crosshair;
+    user-select: none;
+  }
+  .np-snip-backdrop.dragging {
+    background: transparent;
+  }
+  .np-snip-box {
+    position: fixed;
+    display: none;
+    border: 2px solid #3555f5;
+    border-radius: 6px;
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.42);
+    pointer-events: none;
+    z-index: 1;
+  }
+  .np-snip-pill {
+    position: fixed;
+    top: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 8px 7px 14px;
+    border-radius: 999px;
+    background: rgba(28, 28, 30, 0.92);
+    color: #f5f5f7;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(12px);
+    font-size: 12.5px;
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: default;
+  }
+  .np-snip-pill-cancel {
+    border: none;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.14);
+    color: #ffffff;
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: background 0.12s ease;
+  }
+  .np-snip-pill-cancel:hover {
+    background: rgba(255, 255, 255, 0.24);
+  }
+`;
+
+interface QrImportResultMessage {
+  type: 'NONEPWD_QR_IMPORT_RESULT';
+  ok: boolean;
+  locked?: boolean;
+  previewTitle?: string;
+  importedCount?: number;
+  createdCount?: number;
+  attachedCount?: number;
+  skippedCount?: number;
+  title?: string;
+  code?: string;
+  remainingSeconds?: number;
+  error?: string;
+}
 
 let hostEl: HTMLDivElement | null = null;
 let shadowRoot: ShadowRoot | null = null;
@@ -478,6 +620,9 @@ let badgeBtn: HTMLButtonElement | null = null;
 let badgeHideBtn: HTMLButtonElement | null = null;
 let popoverEl: HTMLDivElement | null = null;
 let saveBannerEl: HTMLDivElement | null = null;
+let qrToastEl: HTMLDivElement | null = null;
+let qrToastTimer: ReturnType<typeof setTimeout> | null = null;
+let qrSnipCleanup: (() => void) | null = null;
 
 let currentTarget: DetectedTarget | null = null;
 let lastQueryData: TabQueryResponse | null = null;
@@ -638,8 +783,316 @@ function ensureShadowUi(): ShadowRoot {
   saveBannerEl.style.display = 'none';
   shadowRoot.appendChild(saveBannerEl);
 
+  qrToastEl = document.createElement('div');
+  qrToastEl.className = 'np-qr-toast';
+  qrToastEl.style.display = 'none';
+  shadowRoot.appendChild(qrToastEl);
+
   document.documentElement.appendChild(hostEl);
   return shadowRoot;
+}
+
+function hideQrToast() {
+  if (qrToastTimer !== null) {
+    clearTimeout(qrToastTimer);
+    qrToastTimer = null;
+  }
+  if (qrToastEl) {
+    qrToastEl.style.display = 'none';
+    qrToastEl.innerHTML = '';
+  }
+}
+
+async function showQrImportToast(msg: QrImportResultMessage) {
+  currentThemePref = await loadThemePreference();
+  ensureShadowUi();
+  syncHostTheme();
+  if (!qrToastEl) return;
+
+  if (qrToastTimer !== null) {
+    clearTimeout(qrToastTimer);
+    qrToastTimer = null;
+  }
+  qrToastEl.innerHTML = '';
+
+  const row = document.createElement('div');
+  row.className = 'np-qr-toast-row';
+
+  const left = document.createElement('div');
+  left.className = 'np-qr-toast-left';
+
+  const emblem = document.createElement('div');
+  emblem.className = 'np-save-emblem';
+  emblem.innerHTML = THREE_KEYS_SVG.replace('width="16" height="16"', 'width="20" height="20"');
+
+  const body = document.createElement('div');
+  body.style.minWidth = '0';
+  body.style.flex = '1';
+
+  const msgEl = document.createElement('div');
+  msgEl.className = `np-qr-toast-msg ${msg.ok ? 'ok' : 'err'}`;
+
+  const subEl = document.createElement('div');
+  subEl.className = 'np-qr-toast-sub';
+
+  const actionsEl = document.createElement('div');
+  actionsEl.className = 'np-qr-toast-actions';
+
+  if (msg.ok && !msg.locked) {
+    if (msg.code && typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(msg.code).catch(() => {});
+    }
+    const title = msg.title || '2FA';
+    const code = msg.code || '';
+    if ((msg.importedCount ?? 0) > 1) {
+      msgEl.textContent = `✓ 已导入 ${msg.importedCount} 个 2FA · ${title} · 验证码 ${code} 已复制`;
+    } else if (msg.importedCount === 0 && (msg.skippedCount ?? 0) > 0) {
+      msgEl.textContent = `✓ 该 2FA 已存在：${title} · 验证码 ${code} 已复制`;
+    } else {
+      msgEl.textContent = `✓ 已导入 2FA：${title} · 验证码 ${code} 已复制`;
+    }
+    if (typeof msg.remainingSeconds === 'number') {
+      subEl.textContent = `当前周期剩余 ${msg.remainingSeconds}s`;
+    }
+
+    const otpAnchor =
+      (currentTarget && (currentTarget.kind === 'otp-single' || currentTarget.kind === 'otp-split')
+        ? currentTarget.anchor
+        : null) ??
+      findFallbackField((t) => Boolean(t && (t.kind === 'otp-single' || t.kind === 'otp-split')));
+    if (otpAnchor && code) {
+      const fillBtn = document.createElement('button');
+      fillBtn.type = 'button';
+      fillBtn.className = 'np-save-btn primary';
+      fillBtn.textContent = '填入';
+      fillBtn.addEventListener('click', () => {
+        const target = detectInputTarget(otpAnchor) ?? {
+          kind: 'otp-single',
+          anchor: otpAnchor as HTMLInputElement,
+        };
+        fillOtpTarget(target, code);
+        hideQrToast();
+      });
+      actionsEl.appendChild(fillBtn);
+    }
+  } else if (msg.ok && msg.locked) {
+    msgEl.textContent = '已识别 2FA 二维码，请在弹出的 NonePwd 窗口解锁后自动保存';
+    if (msg.previewTitle) {
+      subEl.textContent = msg.previewTitle;
+    }
+  } else {
+    msgEl.textContent = msg.error || '所选区域未识别到有效的 2FA 二维码';
+    const retryBtn = document.createElement('button');
+    retryBtn.type = 'button';
+    retryBtn.className = 'np-save-btn primary';
+    retryBtn.textContent = '重新框选';
+    retryBtn.addEventListener('click', () => {
+      hideQrToast();
+      void startQrSnipOverlay();
+    });
+    actionsEl.appendChild(retryBtn);
+  }
+
+  body.appendChild(msgEl);
+  if (subEl.textContent) {
+    body.appendChild(subEl);
+  }
+  left.appendChild(emblem);
+  left.appendChild(body);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'np-save-close';
+  closeBtn.setAttribute('aria-label', '关闭');
+  closeBtn.textContent = '×';
+  closeBtn.addEventListener('click', hideQrToast);
+
+  row.appendChild(left);
+  row.appendChild(closeBtn);
+  qrToastEl.appendChild(row);
+  if (actionsEl.childElementCount > 0) {
+    qrToastEl.appendChild(actionsEl);
+  }
+  qrToastEl.style.display = 'block';
+
+  qrToastTimer = setTimeout(() => {
+    hideQrToast();
+  }, 4500);
+}
+
+function cleanupQrSnipOverlay() {
+  if (qrSnipCleanup) {
+    const fn = qrSnipCleanup;
+    qrSnipCleanup = null;
+    fn();
+  }
+  const stale = document.querySelectorAll('[data-nonepwd-qr-snip="true"]');
+  for (const node of Array.from(stale)) {
+    node.remove();
+  }
+}
+
+async function startQrSnipOverlay() {
+  if (typeof window === 'undefined' || window !== window.top) return;
+  cleanupQrSnipOverlay();
+  hidePopover();
+  hideQrToast();
+
+  const snipHost = document.createElement('div');
+  snipHost.setAttribute('data-nonepwd-qr-snip', 'true');
+  const snipShadow = snipHost.attachShadow({ mode: 'closed' });
+
+  const style = document.createElement('style');
+  style.textContent = QR_SNIP_CSS;
+  snipShadow.appendChild(style);
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'np-snip-backdrop';
+
+  const box = document.createElement('div');
+  box.className = 'np-snip-box';
+
+  const pill = document.createElement('div');
+  pill.className = 'np-snip-pill';
+  const pillText = document.createElement('span');
+  pillText.textContent = '拖拽框选网页上的 2FA 二维码 · 按 Esc 取消';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'np-snip-pill-cancel';
+  cancelBtn.textContent = '取消';
+  pill.appendChild(pillText);
+  pill.appendChild(cancelBtn);
+
+  backdrop.appendChild(box);
+  backdrop.appendChild(pill);
+  snipShadow.appendChild(backdrop);
+
+  let dragging = false;
+  let startX = 0;
+  let startY = 0;
+  let currentRect = { x: 0, y: 0, width: 0, height: 0 };
+
+  const updateBox = (clientX: number, clientY: number) => {
+    const clampedX = Math.max(0, Math.min(window.innerWidth, clientX));
+    const clampedY = Math.max(0, Math.min(window.innerHeight, clientY));
+    const x = Math.min(startX, clampedX);
+    const y = Math.min(startY, clampedY);
+    const width = Math.abs(clampedX - startX);
+    const height = Math.abs(clampedY - startY);
+    currentRect = { x, y, width, height };
+    box.style.left = `${x}px`;
+    box.style.top = `${y}px`;
+    box.style.width = `${width}px`;
+    box.style.height = `${height}px`;
+    if (width > 0 || height > 0) {
+      backdrop.classList.add('dragging');
+      box.style.display = 'block';
+    }
+  };
+
+  const onMouseDown = (e: MouseEvent) => {
+    if (e.button === 2) {
+      e.preventDefault();
+      e.stopPropagation();
+      cleanupQrSnipOverlay();
+      return;
+    }
+    if (e.button !== 0) return;
+    if (e.composedPath().includes(pill)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragging = true;
+    startX = Math.max(0, Math.min(window.innerWidth, e.clientX));
+    startY = Math.max(0, Math.min(window.innerHeight, e.clientY));
+    currentRect = { x: startX, y: startY, width: 0, height: 0 };
+    box.style.display = 'none';
+    backdrop.classList.remove('dragging');
+  };
+
+  const onMouseMove = (e: MouseEvent) => {
+    if (!dragging) return;
+    e.preventDefault();
+    updateBox(e.clientX, e.clientY);
+  };
+
+  const onMouseUp = (e: MouseEvent) => {
+    if (!dragging) return;
+    dragging = false;
+    e.preventDefault();
+    e.stopPropagation();
+    updateBox(e.clientX, e.clientY);
+
+    const { x, y, width, height } = currentRect;
+    if (width < 14 || height < 14) {
+      box.style.display = 'none';
+      backdrop.classList.remove('dragging');
+      return;
+    }
+
+    cleanupQrSnipOverlay();
+    void (async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      try {
+        await chrome.runtime.sendMessage({
+          type: 'NONEPWD_CAPTURE_QR_RECT',
+          rect: {
+            x,
+            y,
+            width,
+            height,
+            dpr: window.devicePixelRatio || 1,
+            pageUrl: window.location.href,
+            pageTitle: document.title,
+          },
+        });
+      } catch {
+        // ignore send errors if tab navigated or extension reloaded
+      }
+    })();
+  };
+
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      cleanupQrSnipOverlay();
+    }
+  };
+
+  const onContextMenu = (e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    cleanupQrSnipOverlay();
+  };
+
+  cancelBtn.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  cancelBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    cleanupQrSnipOverlay();
+  });
+
+  backdrop.addEventListener('mousedown', onMouseDown);
+  window.addEventListener('mousemove', onMouseMove, true);
+  window.addEventListener('mouseup', onMouseUp, true);
+  window.addEventListener('keydown', onKeyDown, true);
+  window.addEventListener('contextmenu', onContextMenu, true);
+
+  qrSnipCleanup = () => {
+    backdrop.removeEventListener('mousedown', onMouseDown);
+    window.removeEventListener('mousemove', onMouseMove, true);
+    window.removeEventListener('mouseup', onMouseUp, true);
+    window.removeEventListener('keydown', onKeyDown, true);
+    window.removeEventListener('contextmenu', onContextMenu, true);
+    snipHost.remove();
+  };
+
+  document.documentElement.appendChild(snipHost);
 }
 
 function hideSaveBanner() {
@@ -1392,7 +1845,41 @@ if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
 }
 
 if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
-  chrome.runtime.onMessage.addListener((msg) => {
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg?.type === 'NONEPWD_BEGIN_QR_SNIP') {
+      if (typeof window !== 'undefined' && window === window.top) {
+        void startQrSnipOverlay();
+        sendResponse({ ok: true });
+      }
+      return;
+    }
+
+    if (msg?.type === 'NONEPWD_DECODE_QR_DATAURL') {
+      if (typeof window !== 'undefined' && window === window.top) {
+        void cropAndDecodeQrDataUrl(
+          String(msg.dataUrl || ''),
+          msg.rect as QrCropRect | undefined
+        )
+          .then((res) => sendResponse({ ok: true, ...res }))
+          .catch((err) =>
+            sendResponse({
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          );
+        return true;
+      }
+      return;
+    }
+
+    if (msg?.type === 'NONEPWD_QR_IMPORT_RESULT') {
+      if (typeof window !== 'undefined' && window === window.top) {
+        void showQrImportToast(msg as QrImportResultMessage);
+        sendResponse({ ok: true });
+      }
+      return;
+    }
+
     if (msg?.type === 'NONEPWD_PROMPT_SAVE' && msg.capture) {
       void ensureThemeAndShowBanner(msg.capture as PendingCredentialCapture, Boolean(msg.unlocked));
     } else if (msg?.type === 'NONEPWD_LIVE_OTP' && msg.email) {

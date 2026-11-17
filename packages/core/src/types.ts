@@ -146,6 +146,8 @@ export interface ServiceAccountRecord {
   lastUsedAt: string | null;
 }
 
+export type ImapAccountStatus = 'disabled' | 'connecting' | 'listening' | 'error';
+
 export interface ImapConfigPublic {
   enabled: boolean;
   host: string;
@@ -153,6 +155,20 @@ export interface ImapConfigPublic {
   tls: boolean;
   username: string;
   hasPassword: boolean;
-  status: 'disabled' | 'connecting' | 'listening' | 'error';
+  status: ImapAccountStatus;
   lastError: string | null;
+}
+
+export interface ImapAccountPublic {
+  id: string;
+  label: string;
+  enabled: boolean;
+  host: string;
+  port: number;
+  tls: boolean;
+  username: string;
+  hasPassword: boolean;
+  status: ImapAccountStatus;
+  lastError: string | null;
+  lastSyncAt: string | null;
 }

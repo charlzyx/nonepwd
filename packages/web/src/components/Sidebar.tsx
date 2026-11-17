@@ -67,6 +67,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     emails,
     wsConnected,
     imapConfig,
+    imapAccounts,
     allGroups,
     securityIssues,
     lock,
@@ -258,14 +259,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
   ];
 
-  const imapDotClass =
-    imapConfig?.status === 'listening'
-      ? 'bg-emerald-500'
-      : imapConfig?.status === 'connecting'
+  const anyImapListening =
+    imapAccounts.some((a) => a.status === 'listening') || imapConfig?.status === 'listening';
+  const anyImapError =
+    imapAccounts.some((a) => a.status === 'error') || imapConfig?.status === 'error';
+  const anyImapConnecting =
+    imapAccounts.some((a) => a.status === 'connecting') || imapConfig?.status === 'connecting';
+
+  const imapDotClass = anyImapListening
+    ? 'bg-emerald-500'
+    : anyImapError
+      ? 'bg-rose-500'
+      : anyImapConnecting
         ? 'bg-amber-500'
-        : imapConfig?.status === 'error'
-          ? 'bg-rose-500'
-          : 'bg-muted-foreground/40';
+        : 'bg-muted-foreground/40';
+
+  const imapStatusLabel = anyImapListening
+    ? 'listening'
+    : anyImapError
+      ? 'error'
+      : anyImapConnecting
+        ? 'connecting'
+        : imapConfig?.status ?? 'disabled';
 
   return (
     <aside className="flex h-full w-[264px] shrink-0 flex-col border-r border-border bg-card text-foreground">
@@ -601,7 +616,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <span>邮箱 IMAP 收信</span>
               </span>
               <span
-                title={`IMAP 状态：${imapConfig?.status ?? 'disabled'}`}
+                title={
+                  imapAccounts.length > 0
+                    ? `IMAP 状态：${imapStatusLabel}（已启用 ${imapAccounts.filter((a) => a.enabled).length}/${imapAccounts.length} 个邮箱）`
+                    : `IMAP 状态：${imapStatusLabel}`
+                }
                 className={`h-2 w-2 rounded-full ${imapDotClass}`}
               />
             </button>
