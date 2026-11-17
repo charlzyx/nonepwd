@@ -215,6 +215,52 @@ describe('@nonepwd/cli & Connect API', () => {
       expect(resolveRes.status).toBe(200);
       const resolveJson = (await resolveRes.json()) as { value: string };
       expect(resolveJson.value).toBe('sk-live-secret-999');
+
+      // 8. CSV batch import + duplicate skipping (`np import`)
+      const csvPath = path.join(workDir, 'brave-passwords.csv');
+      fs.writeFileSync(
+        csvPath,
+        [
+          '\uFEFFname,url,username,password,note',
+          'Notion,https://www.notion.so/login,alice@example.com,"notion,pass#1",workspace',
+          ',https://dash.cloudflare.com,cf@example.com,cf-pass-2,dns',
+        ].join('\r\n'),
+        'utf8'
+      );
+
+      const importRes1 = await execCli(
+        ['import', csvPath, '--vault', 'Personal', '--json'],
+        configDir
+      );
+      expect(importRes1.code).toBe(0);
+      const summary1 = JSON.parse(importRes1.stdout) as {
+        vaultName: string;
+        total: number;
+        imported: number;
+        skipped: number;
+      };
+      expect(summary1).toMatchObject({
+        vaultName: 'Personal',
+        total: 2,
+        imported: 2,
+        skipped: 0,
+      });
+
+      const readImported = await execCli(['read', 'np://Personal/Notion/password'], configDir);
+      expect(readImported.code).toBe(0);
+      expect(readImported.stdout.trim()).toBe('notion,pass#1');
+
+      const importRes2 = await execCli(
+        ['import', csvPath, '--vault', 'Personal', '--json'],
+        configDir
+      );
+      expect(importRes2.code).toBe(0);
+      const summary2 = JSON.parse(importRes2.stdout) as {
+        total: number;
+        imported: number;
+        skipped: number;
+      };
+      expect(summary2).toMatchObject({ total: 2, imported: 0, skipped: 2 });
     } finally {
       await connectSrv.close();
     }

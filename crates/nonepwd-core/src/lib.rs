@@ -1,4 +1,5 @@
 pub mod crypto;
+pub mod csv_import;
 pub mod encoding;
 pub mod generator;
 pub mod otp_extractor;
@@ -17,6 +18,7 @@ mod tests {
         encode_service_account_token, encrypt_json, generate_email_key_pair,
         generate_raw_aes_key, open_sealed_json, seal_json_for_public_key,
     };
+    use super::csv_import::{item_import_fingerprint, parse_password_csv};
     use super::encoding::{generate_secret_key, normalize_secret_key, to_base32, to_base64_url};
     use super::generator::{
         generate_email_alias, generate_passphrase, generate_password, PassphraseOptions,
@@ -214,5 +216,39 @@ mod tests {
         );
         let alias = generate_email_alias("https://app.cursor.com", "mail.home.dev").unwrap();
         assert!(alias.starts_with("cursor.") && alias.ends_with("@mail.home.dev"));
+    }
+
+    #[test]
+    fn brave_and_localized_csv_password_import() {
+        let brave_csv = "\u{FEFF}name,url,username,password,note\r\n\
+GitHub,https://github.com/login,octocat,\"p@ss,with\"\"quote\"\"\",\"line 1\nline 2\"\r\n\
+,https://accounts.google.com/v3/signin,user@gmail.com, my pass ,中文备注\r\n\
+,,,,\r\n";
+
+        let entries = parse_password_csv(brave_csv).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].title, "GitHub");
+        assert_eq!(entries[0].urls, vec!["https://github.com/login"]);
+        assert_eq!(entries[0].username.as_deref(), Some("octocat"));
+        assert_eq!(entries[0].password.as_deref(), Some("p@ss,with\"quote\""));
+        assert_eq!(entries[0].notes.as_deref(), Some("line 1\nline 2"));
+
+        // Blank name falls back to registrable domain; password preserves exact spaces
+        assert_eq!(entries[1].title, "google.com");
+        assert_eq!(entries[1].password.as_deref(), Some(" my pass "));
+        assert_eq!(entries[1].notes.as_deref(), Some("中文备注"));
+
+        assert_eq!(
+            item_import_fingerprint(Some("HTTPS://GitHub.com/login/"), Some(" octocat "), Some("abc")),
+            item_import_fingerprint(Some("https://github.com/login"), Some("octocat"), Some("abc"))
+        );
+
+        let zh_csv = "名称,网址,用户名,密码,备注\nCloudflare,https://dash.cloudflare.com,admin@test.dev,cf-secret,主账号\n";
+        let zh_entries = parse_password_csv(zh_csv).unwrap();
+        assert_eq!(zh_entries.len(), 1);
+        assert_eq!(zh_entries[0].title, "Cloudflare");
+        assert_eq!(zh_entries[0].password.as_deref(), Some("cf-secret"));
+
+        assert!(parse_password_csv("foo,bar,baz\n1,2,3\n").is_err());
     }
 }

@@ -18,9 +18,11 @@ import {
   generateSecretKey,
   generateTotp,
   injectSecretRefs,
+  itemImportFingerprint,
   normalizeSecretKey,
   openSealedJson,
   parseDotEnv,
+  parsePasswordCsv,
   parseSecretRef,
   randomBytes,
   resolveItemField,
@@ -239,5 +241,57 @@ describe('@nonepwd/core Secret References & Generators', () => {
 
     const alias = generateEmailAlias('https://app.cursor.com/signin', 'mail.myhome.dev');
     expect(alias).toMatch(/^cursor\.[a-z0-9]{5}@mail\.myhome\.dev$/);
+  });
+
+  it('parses Brave and localized RFC 4180 password CSV exports via Rust WASM', () => {
+    const braveCsv = [
+      '\uFEFFname,url,username,password,note',
+      'GitHub,https://github.com/login,octocat,"p@ss,with""quote""","line 1',
+      'line 2"',
+      ',https://accounts.google.com/v3/signin,user@gmail.com, my pass ,中文备注',
+      ',,,,',
+    ].join('\r\n');
+
+    const entries = parsePasswordCsv(braveCsv);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({
+      category: 'login',
+      title: 'GitHub',
+      urls: ['https://github.com/login'],
+      username: 'octocat',
+      password: 'p@ss,with"quote"',
+      notes: 'line 1\r\nline 2',
+    });
+    expect(entries[1]).toMatchObject({
+      category: 'login',
+      title: 'google.com',
+      urls: ['https://accounts.google.com/v3/signin'],
+      username: 'user@gmail.com',
+      password: ' my pass ',
+      notes: '中文备注',
+    });
+
+    expect(
+      itemImportFingerprint({
+        urls: ['HTTPS://GitHub.com/login/'],
+        username: ' octocat ',
+        password: 'secret',
+      })
+    ).toBe(
+      itemImportFingerprint({
+        urls: ['https://github.com/login'],
+        username: 'octocat',
+        password: 'secret',
+      })
+    );
+
+    const zhEntries = parsePasswordCsv(
+      '名称,网址,用户名,密码,备注\nCloudflare,https://dash.cloudflare.com,admin@test.dev,cf-secret,主账号\n'
+    );
+    expect(zhEntries).toHaveLength(1);
+    expect(zhEntries[0].title).toBe('Cloudflare');
+    expect(zhEntries[0].password).toBe('cf-secret');
+
+    expect(() => parsePasswordCsv('colA,colB,colC\n1,2,3\n')).toThrow();
   });
 });

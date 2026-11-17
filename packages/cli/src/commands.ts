@@ -25,6 +25,16 @@ interface ParsedArgs {
   restAfterDashDash: string[];
 }
 
+const BOOLEAN_FLAGS = new Set([
+  'json',
+  'no-dedupe',
+  'generate',
+  'auto-alias',
+  'help',
+  'version',
+  'connect',
+]);
+
 function parseCliArgs(argv: string[]): ParsedArgs {
   const dashIdx = argv.indexOf('--');
   const mainArgs = dashIdx >= 0 ? argv.slice(0, dashIdx) : argv;
@@ -45,7 +55,7 @@ function parseCliArgs(argv: string[]): ParsedArgs {
       } else {
         const key = arg.slice(2);
         const next = mainArgs[i + 1];
-        if (next !== undefined && !next.startsWith('-')) {
+        if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith('-')) {
           (flags[key] ??= []).push(next);
           i++;
         } else {
@@ -75,6 +85,29 @@ function hasFlag(parsed: ParsedArgs, name: string): boolean {
   return parsed.booleans.has(name) || (parsed.flags[name]?.length ?? 0) > 0;
 }
 
+async function runImportCommand(
+  client: NonePwdCliClient,
+  parsed: ParsedArgs,
+  csvPositional: string | undefined,
+  asJson: boolean,
+  io: CliIo
+): Promise<number> {
+  const csvPath = csvPositional ?? firstFlag(parsed, 'file') ?? firstFlag(parsed, 'in');
+  if (!csvPath) throw new Error('import requires <csvFile>');
+  const csvText = fs.readFileSync(csvPath, 'utf8');
+  const summary = await client.importCsv({
+    csvText,
+    vaultNameOrId: firstFlag(parsed, 'vault'),
+    skipDuplicates: !hasFlag(parsed, 'no-dedupe'),
+  });
+  io.stdout(
+    asJson
+      ? JSON.stringify(summary, null, 2)
+      : `Imported ${summary.imported} items into [${summary.vaultName}] (parsed: ${summary.total}, skipped duplicates: ${summary.skipped})`
+  );
+  return 0;
+}
+
 const HELP_TEXT = `nonepwd CLI (np) - Self-hosted zero-trust secrets, TOTP & Email OTP (0 > 1)
 
 Usage:
@@ -87,6 +120,7 @@ Usage:
   np item create --vault <v> --title <t> [--category <c>] [--url <u>] [--username <u>]
                  [--password <p> | --generate] [--totp <secret>] [--auto-alias]
                  [--field key=value ...] [--json]
+  np import <csvFile> [--vault Personal] [--no-dedupe] [--json]
   np item delete <item> [--vault <v>]
   np read <np://vault/item/field>
   np otp <item> [--vault <v>] [--json]
@@ -275,7 +309,14 @@ export async function runCli(argv: string[], ioOverride?: Partial<CliIo>): Promi
           io.stdout(`Deleted item "${itemArg}"`);
           return 0;
         }
+        if (sub === 'import') {
+          return runImportCommand(client, parsed, rest[0], asJson, io);
+        }
         throw new Error(`Unknown item subcommand: ${sub}`);
+      }
+
+      case 'import': {
+        return runImportCommand(client, parsed, sub, asJson, io);
       }
 
       case 'read': {

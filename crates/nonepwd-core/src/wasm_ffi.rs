@@ -11,6 +11,7 @@ use crate::crypto::{
     encode_service_account_token, encrypt_bytes, generate_email_key_pair, open_sealed_envelope,
     seal_for_public_key,
 };
+use crate::csv_import::parse_password_csv;
 use crate::encoding::{
     constant_time_eq, from_base32, from_base64_url, generate_secret_key, normalize_secret_key,
     to_base32, to_base64_url,
@@ -220,6 +221,11 @@ fn dispatch(req: InvokeRequest) -> Result<Value, String> {
             req.args["siteOrDomain"].as_str().unwrap_or(""),
             req.args["aliasDomain"].as_str().unwrap_or(""),
         )?)),
+        "parse_password_csv" => {
+            let csv_text = req.args["csvText"].as_str().unwrap_or("");
+            let entries = parse_password_csv(csv_text)?;
+            serde_json::to_value(entries).map_err(|e| e.to_string())
+        }
         other => Err(format!("Unknown wasm op: {other}")),
     }
 }

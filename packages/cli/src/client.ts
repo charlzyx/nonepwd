@@ -16,7 +16,9 @@ import {
   generateRawAesKey,
   generateSecretKey,
   generateTotp,
+  itemImportFingerprint,
   openSealedJson,
+  parsePasswordCsv,
   parseSecretRef,
   randomBytes,
   randomId,
@@ -555,6 +557,97 @@ export class NonePwdCliClient {
     };
     this.items.unshift(created);
     return created;
+  }
+
+  async importCsv(params: {
+    csvText: string;
+    vaultNameOrId?: string;
+    skipDuplicates?: boolean;
+  }): Promise<{
+    vaultId: string;
+    vaultName: string;
+    total: number;
+    imported: number;
+    skipped: number;
+  }> {
+    await this.sync();
+    if (this.activeMode !== 'owner') {
+      throw new Error('Only owner session can import CSV items');
+    }
+
+    const vault = params.vaultNameOrId
+      ? this.findVault(params.vaultNameOrId)
+      : this.vaults.find((v) => v.metadata.name.toLowerCase() === 'personal') ?? this.vaults[0];
+    if (!vault) {
+      throw new Error('No vault found on account');
+    }
+
+    const skipDuplicates = params.skipDuplicates !== false;
+    const entries = parsePasswordCsv(params.csvText);
+    const seen = new Set<string>();
+    if (skipDuplicates) {
+      for (const existing of this.items) {
+        if (existing.vaultId === vault.id) {
+          seen.add(itemImportFingerprint(existing.payload));
+        }
+      }
+    }
+
+    const now = new Date().toISOString();
+    const batchReq: Array<{ id: string; encryptedData: string }> = [];
+    const createdItems: DecryptedItem[] = [];
+    let skipped = 0;
+
+    for (const entry of entries) {
+      const fp = itemImportFingerprint(entry);
+      if (skipDuplicates && seen.has(fp)) {
+        skipped++;
+        continue;
+      }
+      seen.add(fp);
+
+      const id = randomId();
+      const payload: VaultItemPayload = {
+        id,
+        vaultId: vault.id,
+        category: entry.category,
+        title: entry.title,
+        favorite: false,
+        tags: [],
+        urls: entry.urls,
+        username: entry.username,
+        password: entry.password,
+        totp: entry.totp,
+        notes: entry.notes,
+        customFields: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+      const encryptedData = await encryptJson(vault.keyBytes, payload, AAD.vaultItem(vault.id, id));
+      batchReq.push({ id, encryptedData });
+      createdItems.push({
+        id,
+        vaultId: vault.id,
+        vaultName: vault.metadata.name,
+        payload,
+      });
+    }
+
+    if (batchReq.length > 0) {
+      await this.requestJson(`/api/vaults/${vault.id}/items/batch`, {
+        method: 'POST',
+        body: JSON.stringify({ items: batchReq }),
+      });
+      this.items.unshift(...createdItems);
+    }
+
+    return {
+      vaultId: vault.id,
+      vaultName: vault.metadata.name,
+      total: entries.length,
+      imported: batchReq.length,
+      skipped,
+    };
   }
 
   async deleteItem(itemNameOrId: string, vaultNameOrId?: string): Promise<void> {

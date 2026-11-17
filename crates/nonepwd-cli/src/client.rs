@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nonepwd_core::crypto::{
@@ -6,6 +6,7 @@ use nonepwd_core::crypto::{
     encode_service_account_token, encrypt_bytes, encrypt_json, generate_email_key_pair,
     generate_raw_aes_key, open_sealed_json,
 };
+use nonepwd_core::csv_import::{item_import_fingerprint, parse_password_csv};
 use nonepwd_core::encoding::{from_base64_url, generate_secret_key, to_base64_url};
 use nonepwd_core::generator::{generate_password, PasswordOptions};
 use nonepwd_core::otp_extractor::domains_match;
@@ -86,6 +87,16 @@ pub struct DecryptedItem {
     pub vault_id: String,
     pub vault_name: String,
     pub payload: VaultItemPayload,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CsvImportSummary {
+    pub vault_id: String,
+    pub vault_name: String,
+    pub total: usize,
+    pub imported: usize,
+    pub skipped: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -720,6 +731,115 @@ impl NonePwdClient {
         };
         self.items.insert(0, created.clone());
         Ok(created)
+    }
+
+    pub fn import_csv(
+        &mut self,
+        csv_text: &str,
+        vault_name_or_id: Option<&str>,
+        skip_duplicates: bool,
+    ) -> Result<CsvImportSummary, String> {
+        self.sync()?;
+        if self.active_mode != "owner" {
+            return Err("Only owner session can import CSV items".into());
+        }
+
+        let vault = match vault_name_or_id {
+            Some(v) => self.find_vault(v)?.clone(),
+            None => self
+                .vaults
+                .iter()
+                .find(|v| v.metadata.name.eq_ignore_ascii_case("Personal"))
+                .or_else(|| self.vaults.first())
+                .cloned()
+                .ok_or_else(|| "No vault found on account".to_string())?,
+        };
+
+        let entries = parse_password_csv(csv_text)?;
+        let total = entries.len();
+
+        let mut seen: HashSet<String> = HashSet::new();
+        if skip_duplicates {
+            for existing in self.items.iter().filter(|it| it.vault_id == vault.id) {
+                seen.insert(item_import_fingerprint(
+                    existing.payload.urls.first().map(String::as_str),
+                    existing.payload.username.as_deref(),
+                    existing.payload.password.as_deref(),
+                ));
+            }
+        }
+
+        let now = now_iso_utc();
+        let mut batch_req = Vec::new();
+        let mut created_items = Vec::new();
+        let mut skipped = 0usize;
+
+        for entry in entries {
+            let fp = item_import_fingerprint(
+                entry.urls.first().map(String::as_str),
+                entry.username.as_deref(),
+                entry.password.as_deref(),
+            );
+            if skip_duplicates && !seen.insert(fp) {
+                skipped += 1;
+                continue;
+            }
+
+            let id = random_id()?;
+            let payload = VaultItemPayload {
+                id: id.clone(),
+                vault_id: vault.id.clone(),
+                category: entry.category,
+                title: entry.title,
+                favorite: false,
+                tags: Vec::new(),
+                urls: entry.urls,
+                username: entry.username,
+                password: entry.password,
+                totp: entry.totp,
+                email_alias: None,
+                notes: entry.notes,
+                custom_fields: Vec::new(),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                last_used_at: None,
+            };
+
+            let encrypted_data =
+                encrypt_json(&vault.key_bytes, &payload, Some(&aad::vault_item(&vault.id, &id)))?;
+            batch_req.push(serde_json::json!({
+                "id": id,
+                "encryptedData": encrypted_data,
+            }));
+            created_items.push(DecryptedItem {
+                id,
+                vault_id: vault.id.clone(),
+                vault_name: vault.metadata.name.clone(),
+                payload,
+            });
+        }
+
+        let imported = batch_req.len();
+        if !batch_req.is_empty() {
+            let path = format!("/api/vaults/{}/items/batch", vault.id);
+            let _: serde_json::Value = self.request_json(
+                "POST",
+                &path,
+                Some(&serde_json::json!({ "items": batch_req })),
+                false,
+            )?;
+            for item in created_items.into_iter().rev() {
+                self.items.insert(0, item);
+            }
+        }
+
+        Ok(CsvImportSummary {
+            vault_id: vault.id,
+            vault_name: vault.metadata.name,
+            total,
+            imported,
+            skipped,
+        })
     }
 
     pub fn delete_item(&mut self, item_ref: &str, vault_ref: Option<&str>) -> Result<(), String> {

@@ -20,7 +20,9 @@ import {
   generateEmailKeyPair,
   generateRawAesKey,
   generateSecretKey,
+  itemImportFingerprint,
   openSealedJson,
+  parsePasswordCsv,
   randomBytes,
   randomId,
   toBase64Url,
@@ -115,6 +117,11 @@ interface VaultContextValue {
   refreshAll(): Promise<void>;
   createVault(name: string, description?: string): Promise<DecryptedVault>;
   saveItem(item: VaultItemPayload, isNew?: boolean): Promise<VaultItemPayload>;
+  importCsvItems(params: {
+    vaultId: string;
+    csvText: string;
+    skipDuplicates?: boolean;
+  }): Promise<{ total: number; imported: number; skipped: number }>;
   deleteItem(vaultId: string, itemId: string): Promise<void>;
   createAlias(params: {
     siteDomain: string;
@@ -587,6 +594,73 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [apiFetch]
   );
 
+  const importCsvItems = useCallback<VaultContextValue['importCsvItems']>(
+    async ({ vaultId, csvText, skipDuplicates = true }) => {
+      const vk = vaultKeysRef.current.get(vaultId);
+      if (!vk) throw new Error('密码库已锁定或未找到密钥');
+
+      const entries = parsePasswordCsv(csvText);
+      const seen = new Set<string>();
+      if (skipDuplicates) {
+        for (const existing of items) {
+          if (existing.vaultId === vaultId) {
+            seen.add(itemImportFingerprint(existing));
+          }
+        }
+      }
+
+      const now = new Date().toISOString();
+      const batch: Array<{ id: string; encryptedData: string }> = [];
+      const createdPayloads: VaultItemPayload[] = [];
+      let skipped = 0;
+
+      for (const entry of entries) {
+        const fp = itemImportFingerprint(entry);
+        if (skipDuplicates && seen.has(fp)) {
+          skipped++;
+          continue;
+        }
+        seen.add(fp);
+
+        const id = randomId();
+        const payload: VaultItemPayload = {
+          id,
+          vaultId,
+          category: entry.category,
+          title: entry.title,
+          favorite: false,
+          tags: [],
+          urls: entry.urls,
+          username: entry.username,
+          password: entry.password,
+          totp: entry.totp,
+          notes: entry.notes,
+          customFields: [],
+          createdAt: now,
+          updatedAt: now,
+        };
+        const encryptedData = await encryptJson(vk, payload, AAD.vaultItem(vaultId, id));
+        batch.push({ id, encryptedData });
+        createdPayloads.push(payload);
+      }
+
+      if (batch.length > 0) {
+        await apiFetch(`/api/vaults/${vaultId}/items/batch`, {
+          method: 'POST',
+          body: JSON.stringify({ items: batch }),
+        });
+        setItems((prev) => [...createdPayloads, ...prev]);
+      }
+
+      return {
+        total: entries.length,
+        imported: batch.length,
+        skipped,
+      };
+    },
+    [apiFetch, items]
+  );
+
   const deleteItem = useCallback<VaultContextValue['deleteItem']>(
     async (vaultId, itemId) => {
       await apiFetch(`/api/vaults/${vaultId}/items/${itemId}`, { method: 'DELETE' });
@@ -733,6 +807,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       refreshAll,
       createVault,
       saveItem,
+      importCsvItems,
       deleteItem,
       createAlias,
       toggleAlias,
@@ -765,6 +840,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       refreshAll,
       createVault,
       saveItem,
+      importCsvItems,
       deleteItem,
       createAlias,
       toggleAlias,

@@ -287,6 +287,49 @@ describe('Native Rust `np` CLI (macOS/Linux) + WASM Core Interoperability', () =
       expect(resolveHttp.status).toBe(200);
       const resolveJson = (await resolveHttp.json()) as { value: string };
       expect(resolveJson.value).toBe('sk-rust-999');
+
+      // 9. Native Rust `np import` + deduplication check
+      const csvPath = path.join(workDir, 'Brave 密码.csv');
+      fs.writeFileSync(
+        csvPath,
+        [
+          '\uFEFFname,url,username,password,note',
+          'Linear,https://linear.app/login,dev@example.com,lin-secret-1,issue tracker',
+          ',https://vercel.com/login,dev@example.com,vc-secret-2,deploy',
+        ].join('\n'),
+        'utf8'
+      );
+
+      const imp1 = await runNativeCli(
+        ['import', csvPath, '--vault', 'Personal', '--json'],
+        configDir
+      );
+      const sum1 = JSON.parse(imp1.stdout) as {
+        vaultName: string;
+        total: number;
+        imported: number;
+        skipped: number;
+      };
+      expect(sum1).toMatchObject({
+        vaultName: 'Personal',
+        total: 2,
+        imported: 2,
+        skipped: 0,
+      });
+
+      const readLin = await runNativeCli(['read', 'np://Personal/Linear/password'], configDir);
+      expect(readLin.stdout.trim()).toBe('lin-secret-1');
+
+      const imp2 = await runNativeCli(
+        ['import', '--json', csvPath, '--vault', 'Personal'],
+        configDir
+      );
+      const sum2 = JSON.parse(imp2.stdout) as {
+        total: number;
+        imported: number;
+        skipped: number;
+      };
+      expect(sum2).toMatchObject({ total: 2, imported: 0, skipped: 2 });
     } finally {
       connectChild.kill('SIGTERM');
     }

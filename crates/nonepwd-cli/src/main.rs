@@ -25,6 +25,13 @@ struct ParsedArgs {
     rest_after_dash_dash: Vec<String>,
 }
 
+fn is_boolean_flag(name: &str) -> bool {
+    matches!(
+        name,
+        "json" | "no-dedupe" | "generate" | "auto-alias" | "help" | "h" | "version" | "connect"
+    )
+}
+
 fn parse_args(argv: &[String]) -> ParsedArgs {
     let dash_pos = argv.iter().position(|a| a == "--");
     let main_args = match dash_pos {
@@ -46,7 +53,10 @@ fn parse_args(argv: &[String]) -> ParsedArgs {
         if let Some(body) = arg.strip_prefix("--") {
             if let Some((k, v)) = body.split_once('=') {
                 flags.entry(k.to_string()).or_default().push(v.to_string());
-            } else if i + 1 < main_args.len() && !main_args[i + 1].starts_with('-') {
+            } else if !is_boolean_flag(body)
+                && i + 1 < main_args.len()
+                && !main_args[i + 1].starts_with('-')
+            {
                 flags
                     .entry(body.to_string())
                     .or_default()
@@ -107,6 +117,37 @@ fn inject_template(client: &mut NonePwdClient, template: &str) -> Result<String,
     Ok(replace_secret_refs(template, &map))
 }
 
+fn run_import_command(
+    client: &mut NonePwdClient,
+    parsed: &ParsedArgs,
+    positional_idx: usize,
+    as_json: bool,
+) -> Result<i32, String> {
+    let csv_path = parsed
+        .positionals
+        .get(positional_idx)
+        .map(String::as_str)
+        .or_else(|| first_flag(parsed, "file"))
+        .or_else(|| first_flag(parsed, "in"))
+        .ok_or("import requires <csvFile>")?;
+    let csv_text = fs::read_to_string(csv_path)
+        .map_err(|e| format!("Failed reading CSV file {csv_path}: {e}"))?;
+    let summary = client.import_csv(
+        &csv_text,
+        first_flag(parsed, "vault"),
+        !has_flag(parsed, "no-dedupe"),
+    )?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+    } else {
+        println!(
+            "Imported {} items into [{}] (parsed: {}, skipped duplicates: {})",
+            summary.imported, summary.vault_name, summary.total, summary.skipped
+        );
+    }
+    Ok(0)
+}
+
 const HELP_TEXT: &str = "nonepwd Native CLI (np) - Cross-platform (macOS/Linux) zero-trust secrets, TOTP & Email OTP (0 > 1)
 
 Usage:
@@ -119,6 +160,7 @@ Usage:
   np item create --vault <v> --title <t> [--category <c>] [--url <u>] [--username <u>]
                  [--password <p> | --generate] [--totp <secret>] [--auto-alias]
                  [--field key=value ...] [--json]
+  np import <csvFile> [--vault Personal] [--no-dedupe] [--json]
   np item delete <item> [--vault <v>]
   np read <np://vault/item/field>
   np otp <item> [--vault <v>] [--json]
@@ -388,9 +430,12 @@ fn run() -> Result<i32, String> {
                     println!("Deleted item \"{item_arg}\"");
                     Ok(0)
                 }
+                "import" => run_import_command(&mut client, &parsed, 2, as_json),
                 other => Err(format!("Unknown item subcommand: {other}")),
             }
         }
+
+        "import" => run_import_command(&mut client, &parsed, 1, as_json),
 
         "read" => {
             let uri = parsed

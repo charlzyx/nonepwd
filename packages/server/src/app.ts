@@ -598,6 +598,67 @@ export function createNonePwdServer(
     return c.json({ item }, 201);
   });
 
+  app.post('/api/vaults/:vaultId/items/batch', async (c) => {
+    const ownerOrRes = requireOwner(c);
+    if (ownerOrRes instanceof Response) return ownerOrRes;
+
+    const vaultId = c.req.param('vaultId');
+    const vault = db.sqlite.prepare('SELECT id FROM vaults WHERE id = ?').get(vaultId);
+    if (!vault) return c.json({ error: 'Vault not found' }, 404);
+
+    const body = (await c.req.json()) as {
+      items?: Array<{ id?: string; encryptedData?: string }>;
+    };
+    if (!Array.isArray(body.items) || body.items.length === 0) {
+      return c.json({ error: 'Missing non-empty items array' }, 400);
+    }
+
+    for (const entry of body.items) {
+      if (!entry.encryptedData) {
+        return c.json({ error: 'Each item requires encryptedData' }, 400);
+      }
+    }
+
+    const now = new Date().toISOString();
+    const stmt = db.sqlite.prepare(
+      `INSERT OR REPLACE INTO items (id, vault_id, encrypted_data, created_at, updated_at, version)
+       VALUES (?, ?, ?, ?, ?, 1)`
+    );
+
+    const inserted: Array<{
+      id: string;
+      vaultId: string;
+      encryptedData: string;
+      createdAt: string;
+      updatedAt: string;
+      version: number;
+    }> = [];
+
+    db.sqlite.exec('BEGIN IMMEDIATE');
+    try {
+      for (const entry of body.items) {
+        const id = entry.id ?? randomId();
+        const encryptedData = entry.encryptedData!;
+        stmt.run(id, vaultId, encryptedData, now, now);
+        inserted.push({
+          id,
+          vaultId,
+          encryptedData,
+          createdAt: now,
+          updatedAt: now,
+          version: 1,
+        });
+      }
+      db.sqlite.exec('COMMIT');
+    } catch (err) {
+      db.sqlite.exec('ROLLBACK');
+      throw err;
+    }
+
+    wsHub.broadcast({ type: 'item.upserted', count: inserted.length }, { vaultId });
+    return c.json({ imported: inserted.length, items: inserted }, 201);
+  });
+
   app.put('/api/vaults/:vaultId/items/:itemId', async (c) => {
     const ownerOrRes = requireOwner(c);
     if (ownerOrRes instanceof Response) return ownerOrRes;

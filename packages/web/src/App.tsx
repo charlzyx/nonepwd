@@ -4,6 +4,7 @@ import { Download, ExternalLink, Moon, Sun } from 'lucide-react';
 import { CopyButton } from './components/CopyButton';
 import { DeveloperView } from './components/DeveloperView';
 import { EmailOtpView } from './components/EmailOtpView';
+import { ImportCsvModal } from './components/ImportCsvModal';
 import { ItemDetail } from './components/ItemDetail';
 import { ItemList } from './components/ItemList';
 import { ItemModal } from './components/ItemModal';
@@ -122,6 +123,7 @@ const WorkspaceApp: React.FC<{ onNavigateHome: () => void }> = ({ onNavigateHome
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [modalItem, setModalItem] = useState<VaultItemPayload | null | undefined>(undefined);
+  const [importModalOpen, setImportModalOpen] = useState(false);
 
   const filteredItems = useMemo(() => {
     let list = items;
@@ -182,6 +184,7 @@ const WorkspaceApp: React.FC<{ onNavigateHome: () => void }> = ({ onNavigateHome
         onSelectVault={setSelectedVaultId}
         section={section}
         onSelectSection={setSection}
+        onOpenImportCsv={() => setImportModalOpen(true)}
         onBackHome={onNavigateHome}
       />
 
@@ -194,6 +197,7 @@ const WorkspaceApp: React.FC<{ onNavigateHome: () => void }> = ({ onNavigateHome
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
             onCreateNew={() => setModalItem(null)}
+            onOpenImportCsv={() => setImportModalOpen(true)}
           />
           <ItemDetail item={activeItem} onEdit={(it) => setModalItem(it)} />
         </>
@@ -209,6 +213,13 @@ const WorkspaceApp: React.FC<{ onNavigateHome: () => void }> = ({ onNavigateHome
           defaultVaultId={selectedVaultId}
           onClose={() => setModalItem(undefined)}
           onSaved={(saved) => setSelectedItemId(saved.id)}
+        />
+      )}
+
+      {importModalOpen && (
+        <ImportCsvModal
+          defaultVaultId={selectedVaultId}
+          onClose={() => setImportModalOpen(false)}
         />
       )}
     </div>

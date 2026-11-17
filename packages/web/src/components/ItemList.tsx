@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Code2, Globe, Key, Plus, Search, Star, StickyNote } from 'lucide-react';
+import { Code2, Globe, Key, Plus, Search, Star, StickyNote, Upload } from 'lucide-react';
 import { extractRegistrableDomain, type VaultItemPayload } from '@nonepwd/core';
 
 interface ItemListProps {
@@ -9,6 +9,7 @@ interface ItemListProps {
   searchQuery: string;
   onSearchChange: (q: string) => void;
   onCreateNew: () => void;
+  onOpenImportCsv?: () => void;
 }
 
 function categoryIcon(cat: VaultItemPayload['category']) {
@@ -31,6 +32,7 @@ export const ItemList: React.FC<ItemListProps> = ({
   searchQuery,
   onSearchChange,
   onCreateNew,
+  onOpenImportCsv,
 }) => {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -59,6 +61,16 @@ export const ItemList: React.FC<ItemListProps> = ({
             className="w-full rounded-md border border-input bg-background py-2 pl-8 pr-3 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-ring"
           />
         </div>
+        {onOpenImportCsv && (
+          <button
+            type="button"
+            onClick={onOpenImportCsv}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-background text-foreground transition-colors hover:bg-muted"
+            title="导入 CSV 密码"
+          >
+            <Upload className="h-3.5 w-3.5" />
+          </button>
+        )}
         <button
           type="button"
           onClick={onCreateNew}
@@ -73,13 +85,25 @@ export const ItemList: React.FC<ItemListProps> = ({
         {items.length === 0 ? (
           <div className="flex h-48 flex-col items-center justify-center px-4 text-center">
             <p className="text-xs font-medium text-muted-foreground">暂无匹配条目</p>
-            <button
-              type="button"
-              onClick={onCreateNew}
-              className="mt-3 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
-            >
-              + 创建第一条凭据
-            </button>
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={onCreateNew}
+                className="rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
+              >
+                + 创建第一条凭据
+              </button>
+              {onOpenImportCsv && (
+                <button
+                  type="button"
+                  onClick={onOpenImportCsv}
+                  className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
+                >
+                  <Upload className="h-3 w-3" />
+                  <span>导入 CSV</span>
+                </button>
+              )}
+            </div>
           </div>
         ) : (
           <div className="space-y-1">

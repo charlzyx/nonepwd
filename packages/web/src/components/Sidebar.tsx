@@ -13,6 +13,7 @@ import {
   StickyNote,
   Sun,
   Terminal,
+  Upload,
   Wifi,
   WifiOff,
 } from 'lucide-react';
@@ -30,6 +31,7 @@ interface SidebarProps {
   onSelectVault: (id: string | 'all') => void;
   section: ActiveSection;
   onSelectSection: (s: ActiveSection) => void;
+  onOpenImportCsv?: () => void;
   onBackHome?: () => void;
 }
 
@@ -38,6 +40,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectVault,
   section,
   onSelectSection,
+  onOpenImportCsv,
   onBackHome,
 }) => {
   const { vaults, items, emails, wsConnected, lock, createVault, account } = useVault();
@@ -278,6 +281,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       <div className="mt-auto space-y-2 border-t border-border pt-3">
+        {onOpenImportCsv && (
+          <button
+            type="button"
+            onClick={onOpenImportCsv}
+            className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+          >
+            <Upload className="h-3.5 w-3.5" />
+            <span>导入浏览器 CSV</span>
+          </button>
+        )}
         {onBackHome && (
           <button
             type="button"
