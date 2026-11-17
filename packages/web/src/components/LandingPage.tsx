@@ -2,9 +2,12 @@ import React, { useState } from 'react';
 import {
   ArrowRight,
   ChevronDown,
+  Cloud,
   Cpu,
+  Database,
   Download,
   FolderLock,
+  HardDrive,
   KeyRound,
   Layers,
   Lock,
@@ -72,8 +75,12 @@ const FAQ_ITEMS = [
     a: '完全同源。核心密码学、RFC 6238 TOTP、邮件验证码清洗与 np:// 引用解析全部由 crates/nonepwd-core 用纯 Rust 编写：同一份代码编译为 nonepwd_core.wasm 驱动 Web 与浏览器插件，同时静态链接产出 macOS arm64 / Linux x86_64 原生 np 单二进制。',
   },
   {
-    q: '自建需要重型数据库或 Node 运行时吗？',
-    a: '不需要。服务端已完全使用纯 Rust 重写并集成到单二进制 np server 中，内置 SQLite 持久化。一条 np server 即可在本机运行，也支持配合 Cloudflare Tunnel 或 Caddy 安全接入公网多端同步。',
+    q: '自建支持哪些运行方式？需要重型数据库或按年付费吗？',
+    a: '不需要重型依赖，永久 0 订阅费。你可以用纯 Rust 单二进制 np server + 内置 SQLite 在本机或 VPS 一键运行；也可以使用新版 @nonepwd/cf-server 直接部署到 Cloudflare Workers + D1 + R2 + Durable Objects，绑定自有域名并免服务器运维。',
+  },
+  {
+    q: '绑定自有域名部署 Cloudflare Worker + D1 + R2 安全吗？费用如何？',
+    a: '零知识边界完全不变：主密码与 VaultKey 仍在你本地浏览器/客户端内存中派生与解密，D1 与 R2 仅存储 AES-256-GCM 密文与 X25519 密封邮件；Worker、D1、R2、Email Routing 与 SQLite-backed Durable Objects 均有个人免费额度，且支持 Web 管理台一键 R2 快照备份与恢复。',
   },
   {
     q: '和商业云密码管理器有什么区别？',
@@ -138,6 +145,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               <a href="#cli" className="transition-colors hover:text-foreground">
                 命令行
               </a>
+              <a href="#cloudflare" className="transition-colors hover:text-foreground">
+                Cloudflare 部署
+              </a>
               <a
                 href="/downloads/nonepwd-extension.zip"
                 download="nonepwd-extension.zip"
@@ -181,9 +191,10 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               一个私有实例，接管你的全部密码与验证码。
             </h1>
 
-            <p className="mt-5 max-w-[40rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
+            <p className="mt-5 max-w-[42rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
               双密钥零知识加密（<code className="font-mono text-[15px] text-foreground">NP3-...</code>）、Rust 单二进制服务端{' '}
-              <code className="font-mono text-[15px] text-foreground">np server</code>、macOS 原生桌面客户端（Asuka）、密码 / 银行卡 / 地址填充、2FA 导入与邮件正则过滤 — 完全运行在你自己的设备上。
+              <code className="font-mono text-[15px] text-foreground">np server</code>、自有域名{' '}
+              <code className="font-mono text-[15px] text-foreground">Cloudflare Worker + D1 + R2</code> Serverless 部署、macOS 原生 SwiftUI 客户端（菜单栏 2FA / 邮箱码 · Touch ID · AI 提取）与 MV3 自动填充扩展 — 完全掌握在你自己手中。
             </p>
 
             <div className="mt-8 flex flex-wrap items-center gap-x-3.5 gap-y-3">
@@ -217,12 +228,13 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               </div>
               <div className="mt-4 flex flex-wrap items-center gap-x-7 gap-y-2.5 font-mono text-xs text-muted-foreground">
                 <span>Rust + WASM + C ABI</span>
+                <span>CF Worker + D1 + R2</span>
                 <span>np server (SQLite)</span>
-                <span>macOS Native (Asuka)</span>
+                <span>macOS Native (SwiftUI)</span>
                 <span>AES-256-GCM</span>
                 <span>X25519 Sealed Box</span>
-                <span>Chrome / Arc MV3</span>
-                <span>IMAP IDLE + Regex Filter</span>
+                <span>Chrome / Brave MV3</span>
+                <span>IMAP + Email Routing</span>
               </div>
             </div>
           </section>
@@ -374,7 +386,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 {
                   icon: Terminal,
                   title: 'macOS 原生客户端 & np CLI',
-                  desc: '基于 Asuka 打造的 macOS 原生桌面客户端（自动清剪贴板、实时 2FA/邮箱码），配合 np run 零落盘注入与 Service Account 隔离。',
+                  desc: '原生 SwiftUI macOS 桌面应用（Liquid Glass 视觉、菜单栏 2FA/邮箱码 Cron + AI 提取、Touch ID 与可配置免密时长），配合 np run 零落盘注入与 Service Account 隔离。',
                 },
                 {
                   icon: Shield,
@@ -383,8 +395,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 },
                 {
                   icon: Layers,
-                  title: 'Rust 单二进制零依赖自建',
-                  desc: '核心密码学、CLI 与 HTTP/WS 服务端（np server）全部由纯 Rust 编写并内置 SQLite，告别 Node 运行时，永久 0 订阅费。',
+                  title: '单二进制或 Cloudflare Serverless',
+                  desc: '既可用纯 Rust 单二进制 np server + SQLite 在本机或 VPS 运行，也可部署为 Cloudflare Worker + D1 + R2 + Durable Objects 绑定自有域名，永久 0 订阅费。',
                 },
               ].map((item) => {
                 const Icon = item.icon;
@@ -450,6 +462,91 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
             </div>
           </section>
 
+          {/* Cloudflare Workers + D1 + R2 Serverless Edition */}
+          <section id="cloudflare" className="border-t border-border/70 px-5 py-16 md:px-10 md:py-20">
+            <div className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground/80 uppercase">
+              Cloudflare Serverless
+            </div>
+            <h2 className="mt-3 text-2xl font-semibold tracking-tight">
+              自有域名一键上云：Worker + D1 + R2
+            </h2>
+            <p className="mt-3 max-w-3xl text-sm leading-relaxed text-muted-foreground">
+              无需购买 VPS 或配置反向代理与 TLS 证书。将你的域名绑定到{' '}
+              <code className="font-mono text-foreground">@nonepwd/cf-server</code>
+              ，静态 Web Vault、零知识接口、D1 结构化存储、R2 定时加密快照与域名 Catch-All 邮件收信全部运行在同一个 Cloudflare 域名下，macOS 桌面端、浏览器插件与{' '}
+              <code className="font-mono text-foreground">np</code> CLI 协议 100% 互通。
+            </p>
+
+            <div className="mt-8 grid grid-cols-1 gap-px border border-border/70 bg-border/70 sm:grid-cols-2 lg:grid-cols-4">
+              {[
+                {
+                  icon: Cloud,
+                  tag: 'EDGE API + SPA',
+                  title: 'Worker + 同域托管',
+                  desc: '基于 Hono + 预编译 Rust WASM 托管全部 API 与 Web Vault（custom_domain 直绑 vault.yourdomain.com）。',
+                },
+                {
+                  icon: Database,
+                  tag: 'SQLITE AT EDGE',
+                  title: 'D1 零知识结构化库',
+                  desc: '存储加密 Vault/Item、会话凭证、Service Account 授权、域名别名与邮件过滤规则，服务端永不接触明文。',
+                },
+                {
+                  icon: HardDrive,
+                  tag: 'SNAPSHOTS + ARCHIVE',
+                  title: 'R2 定时快照与邮件归档',
+                  desc: '每封密封邮件同步归档至 R2（emails/<id>.json），Cron 每 6 小时生成零知识快照并在设置页一键恢复。',
+                },
+                {
+                  icon: MailCheck,
+                  tag: 'DIRECT EMAIL + DO WS',
+                  title: 'Email Routing 实时推送',
+                  desc: '*@yourdomain.com 邮件直达 Worker email() 边缘提取 X25519 密封，由 Durable Objects WebSocket 秒级推送。',
+                },
+              ].map((card) => {
+                const CardIcon = card.icon;
+                return (
+                  <div key={card.title} className="bg-background p-5">
+                    <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+                      <span>{card.tag}</span>
+                      <CardIcon className="size-3.5" />
+                    </div>
+                    <h3 className="mt-3 text-sm font-medium text-foreground">{card.title}</h3>
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                      {card.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="mt-6 rounded-lg border border-border bg-muted/30 p-4">
+              <div className="mb-2.5 flex items-center justify-between gap-3">
+                <span className="font-mono text-xs font-medium text-foreground">
+                  快速部署 packages/cf-server 到自有域名
+                </span>
+                <CopyButton
+                  value={`pnpm run build:rust && pnpm run build:cf-server
+cd packages/cf-server
+npx wrangler d1 create nonepwd-db
+npx wrangler r2 bucket create nonepwd-vault-blobs
+# 将 database_id 与 custom_domain 填入 wrangler.jsonc 后执行：
+pnpm run db:migrate:remote && pnpm run deploy`}
+                  label="复制部署命令"
+                  variant="minimal"
+                />
+              </div>
+              <pre className="overflow-x-auto font-mono text-xs leading-relaxed text-foreground">
+{`pnpm run build:rust && pnpm run build:cf-server
+cd packages/cf-server
+npx wrangler d1 create nonepwd-db
+npx wrangler r2 bucket create nonepwd-vault-blobs
+# 将 database_id 与 custom_domain 填入 wrangler.jsonc 后执行：
+pnpm run db:migrate:remote && pnpm run deploy`}
+              </pre>
+            </div>
+          </section>
+
           {/* 3-Step Installation & Downloads */}
           <section id="deploy" className="border-t border-border/70 px-5 py-16 md:px-10 md:py-20">
             <div className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground/80 uppercase">
@@ -465,9 +562,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                     <span>01 / SERVER</span>
                     <Cpu className="size-4" />
                   </div>
-                  <h3 className="mt-3 text-sm font-medium text-foreground">启动 Rust 单二进制服务端</h3>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">
+                    启动服务端（np server 或 CF Worker）
+                  </h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    一条 <code className="text-foreground">np server</code> 启动内置 SQLite 的纯 Rust 零知识服务端与 Web 管理台，也支持配合隧道接入公网。
+                    本机执行 <code className="text-foreground">np server</code> 启动内置 SQLite 的单二进制服务端；自有域名免服务器部署可使用上方 <code className="text-foreground">@nonepwd/cf-server</code>（Worker + D1 + R2）。
                   </p>
                 </div>
 
@@ -496,7 +595,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                   </div>
                   <h3 className="mt-3 text-sm font-medium text-foreground">macOS 原生客户端 &amp; MV3 插件</h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    使用 Asuka 构建的原生 macOS 桌面应用（直连 Rust 核心），搭配 Chrome / Arc MV3 插件自动填充账密、银行卡、地址与 2FA。
+                    基于 SwiftUI 打造的原生 macOS 桌面端（菜单栏 2FA / 邮箱码、Touch ID、AI 提取），搭配 Chrome / Brave / Arc MV3 插件自动填充。
                   </p>
                 </div>
 

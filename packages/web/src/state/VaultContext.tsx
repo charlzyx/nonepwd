@@ -78,6 +78,16 @@ export interface EmailFilterConfig {
   rules: EmailFilterRule[];
 }
 
+export interface R2BackupMeta {
+  key: string;
+  size: number;
+  uploadedAt: string;
+  reason: string;
+  vaultCount: number | null;
+  itemCount: number | null;
+  emailCount: number | null;
+}
+
 export type AuthPhase = 'loading' | 'uninitialized' | 'locked' | 'unlocked' | 'standalone';
 
 const TRUSTED_DEVICE_KEY = 'nonepwd.trusted_device.v1';
@@ -178,6 +188,10 @@ interface VaultContextValue {
   }): Promise<{ ok: boolean; messages?: number; error?: string }>;
   getEmailFilter(): Promise<EmailFilterConfig>;
   saveEmailFilter(config: EmailFilterConfig): Promise<EmailFilterConfig>;
+  listBackups(): Promise<{ enabled: boolean; backups: R2BackupMeta[] }>;
+  createBackup(): Promise<R2BackupMeta>;
+  restoreBackup(key?: string): Promise<{ restored: boolean; key: string; vaultCount: number; itemCount: number; emailCount: number }>;
+  deleteBackup(key: string): Promise<void>;
   generateNewSecretKey(): string;
 }
 
@@ -916,6 +930,44 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [apiFetch]
   );
 
+  const listBackups = useCallback<VaultContextValue['listBackups']>(async () => {
+    return apiFetch<{ enabled: boolean; backups: R2BackupMeta[] }>('/api/backups');
+  }, [apiFetch]);
+
+  const createBackup = useCallback<VaultContextValue['createBackup']>(async () => {
+    const res = await apiFetch<{ backup: R2BackupMeta }>('/api/backups', {
+      method: 'POST',
+    });
+    return res.backup;
+  }, [apiFetch]);
+
+  const restoreBackup = useCallback<VaultContextValue['restoreBackup']>(
+    async (key) => {
+      const res = await apiFetch<{
+        restored: boolean;
+        key: string;
+        vaultCount: number;
+        itemCount: number;
+        emailCount: number;
+      }>('/api/backups/restore', {
+        method: 'POST',
+        body: JSON.stringify(key ? { key } : {}),
+      });
+      await refreshAll();
+      return res;
+    },
+    [apiFetch, refreshAll]
+  );
+
+  const deleteBackup = useCallback<VaultContextValue['deleteBackup']>(
+    async (key) => {
+      await apiFetch<{ ok: boolean }>(`/api/backups/${encodeURIComponent(key)}`, {
+        method: 'DELETE',
+      });
+    },
+    [apiFetch]
+  );
+
   const value = useMemo<VaultContextValue>(
     () => ({
       phase,
@@ -952,6 +1004,10 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       testImapConfig,
       getEmailFilter,
       saveEmailFilter,
+      listBackups,
+      createBackup,
+      restoreBackup,
+      deleteBackup,
       generateNewSecretKey: generateSecretKey,
     }),
     [
@@ -988,6 +1044,10 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       testImapConfig,
       getEmailFilter,
       saveEmailFilter,
+      listBackups,
+      createBackup,
+      restoreBackup,
+      deleteBackup,
     ]
   );
 

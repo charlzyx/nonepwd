@@ -1,4 +1,4 @@
-import { invokeRust } from './wasm-bridge.js';
+import { invokeRust } from './wasm-runtime.js';
 
 export function extractEmailAddress(rawHeader: string): string {
   return invokeRust<string>('extract_email_address', { rawHeader });

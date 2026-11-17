@@ -1,0 +1,4 @@
+module CNpCore {
+    header "npcore.h"
+    export *
+}

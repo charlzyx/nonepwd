@@ -1,7 +1,0 @@
-{
-  "name": "NonePwd",
-  "id": "dev.nonepwd.desktop",
-  "version": "0.1.0",
-  "build": 1,
-  "orientations": ["portrait", "landscape"]
-}

@@ -1,0 +1,48 @@
+{
+  "name": "nonepwd-cf-server",
+  "main": "dist/index.js",
+  "compatibility_date": "2025-10-01",
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "vault.yourdomain.com", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/install.sh", "/downloads/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "nonepwd-db",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "nonepwd-vault-blobs"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "WS_HUB",
+        "class_name": "VaultWsHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["VaultWsHub"]
+    }
+  ],
+  // Optional Cron trigger if the Cloudflare account has free Cron slots available.
+  // Activity-triggered waitUntil(maybeAutoSnapshot) still backs up D1 -> R2 every 6 hours.
+  // "triggers": { "crons": ["0 */6 * * *"] },
+  "vars": {
+    "FORWARD_TO_EMAIL": ""
+  }
+}

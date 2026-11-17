@@ -7,6 +7,7 @@ data
 *.db-wal
 *.db-shm
 .wrangler
+.cloudflare
 .env
 .env.local
 coverage
@@ -17,3 +18,6 @@ site/public
 site/.cloudflare
 site/dist
 apps/desktop/npcore/build/
+.build/
+packages/cf-server/public
+packages/cf-server/src/nonepwd_core.wasm

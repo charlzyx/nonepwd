@@ -65,7 +65,28 @@ const StandaloneVaultGuide: React.FC<{ onBackHome: () => void }> = ({ onBackHome
               <div className="bg-background p-5">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="font-mono text-xs font-medium text-foreground">
-                    01 · 启动 Rust 单二进制零知识服务端
+                    01A · Cloudflare Worker + D1 + R2（绑定自有域名免服务器）
+                  </span>
+                  <CopyButton
+                    value={`pnpm run build:rust && pnpm run build:cf-server
+cd packages/cf-server && pnpm run db:migrate:remote && pnpm run deploy`}
+                    label="复制"
+                    variant="minimal"
+                  />
+                </div>
+                <pre className="overflow-x-auto rounded-md border border-border bg-muted/30 px-3 py-2 font-mono text-xs text-foreground">
+{`pnpm run build:rust && pnpm run build:cf-server
+cd packages/cf-server && pnpm run db:migrate:remote && pnpm run deploy`}
+                </pre>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  将 Web Vault、D1 数据库、R2 快照备份、Durable Objects WebSocket 与域名 Email Routing 收信全部部署到你自己的 Cloudflare 域名。
+                </p>
+              </div>
+
+              <div className="bg-background p-5">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="font-mono text-xs font-medium text-foreground">
+                    01B · 启动本地 Rust 单二进制零知识服务端
                   </span>
                   <CopyButton value="np server" label="复制" variant="minimal" />
                 </div>

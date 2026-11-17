@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Cloud, Filter, Inbox, Plus, RefreshCw, Save, TestTube2, Trash2 } from 'lucide-react';
+import { Cloud, Filter, HardDrive, Inbox, Plus, RefreshCw, RotateCcw, Save, TestTube2, Trash2 } from 'lucide-react';
 import { randomId } from '@nonepwd/core';
 import {
   useVault,
@@ -7,6 +7,7 @@ import {
   type EmailFilterField,
   type EmailFilterMode,
   type EmailFilterRule,
+  type R2BackupMeta,
 } from '../state/VaultContext';
 import { CopyButton } from './CopyButton';
 
@@ -47,6 +48,10 @@ export const SettingsView: React.FC = () => {
     testImapConfig,
     getEmailFilter,
     saveEmailFilter,
+    listBackups,
+    createBackup,
+    restoreBackup,
+    deleteBackup,
   } = useVault();
 
   const [aliasDomain, setAliasDomain] = useState(account?.aliasDomain ?? '');
@@ -68,6 +73,31 @@ export const SettingsView: React.FC = () => {
   const [filterNotice, setFilterNotice] = useState<string | null>(null);
   const [sampleField, setSampleField] = useState<EmailFilterField | 'all'>('all');
   const [sampleText, setSampleText] = useState('');
+
+  const [backupsSupported, setBackupsSupported] = useState(false);
+  const [r2Enabled, setR2Enabled] = useState(false);
+  const [backups, setBackups] = useState<R2BackupMeta[]>([]);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupNotice, setBackupNotice] = useState<string | null>(null);
+  const [backupError, setBackupError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listBackups()
+      .then((res) => {
+        if (cancelled) return;
+        setBackupsSupported(true);
+        setR2Enabled(Boolean(res.enabled));
+        setBackups(Array.isArray(res.backups) ? res.backups : []);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setBackupsSupported(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [listBackups]);
 
   useEffect(() => {
     let cancelled = false;
@@ -214,6 +244,52 @@ export const SettingsView: React.FC = () => {
       setImapPass('');
     } finally {
       setSavingImap(false);
+    }
+  };
+
+  const handleCreateBackup = async () => {
+    setBackupBusy(true);
+    setBackupError(null);
+    setBackupNotice(null);
+    try {
+      const created = await createBackup();
+      setBackups((prev) => [created, ...prev.filter((b) => b.key !== created.key)]);
+      setBackupNotice(`已创建 R2 零知识加密快照：${created.key}`);
+    } catch (err) {
+      setBackupError(err instanceof Error ? err.message : '创建 R2 快照失败');
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleRestoreBackup = async (key: string) => {
+    setBackupBusy(true);
+    setBackupError(null);
+    setBackupNotice(null);
+    try {
+      const res = await restoreBackup(key);
+      setBackupNotice(
+        `已从 ${res.key} 恢复 ${res.vaultCount} 个库 / ${res.itemCount} 条条目 / ${res.emailCount} 封邮件`
+      );
+    } catch (err) {
+      setBackupError(err instanceof Error ? err.message : '恢复快照失败');
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleDeleteBackup = async (key: string) => {
+    setBackupBusy(true);
+    setBackupError(null);
+    setBackupNotice(null);
+    try {
+      await deleteBackup(key);
+      setBackups((prev) => prev.filter((b) => b.key !== key));
+      setBackupNotice(`已删除快照：${key}`);
+    } catch (err) {
+      setBackupError(err instanceof Error ? err.message : '删除快照失败');
+    } finally {
+      setBackupBusy(false);
     }
   };
 
@@ -609,6 +685,12 @@ export const SettingsView: React.FC = () => {
             </button>
           </div>
 
+          <p className="text-xs text-muted-foreground">
+            若服务端部署在 Cloudflare 版 <code className="font-mono text-foreground">@nonepwd/cf-server</code>
+            ，可在 Cloudflare Dashboard Email Routing Catch-All 直接指向 Worker{' '}
+            <code className="font-mono text-foreground">nonepwd-cf-server</code>，无需额外转发与 Webhook Secret。
+          </p>
+
           <form onSubmit={handleSaveAliasDomain} className="flex gap-2">
             <input
               type="text"
@@ -656,6 +738,99 @@ export const SettingsView: React.FC = () => {
             </div>
           </div>
         </div>
+
+        {/* R2 Zero-Knowledge Snapshots Card (Cloudflare @nonepwd/cf-server) */}
+        {backupsSupported && (
+          <div className="space-y-4 rounded-xl border border-border bg-card p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                  <HardDrive className="h-4 w-4 text-muted-foreground" />
+                  R2 零知识加密快照备份
+                </h3>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Cron 每 6 小时自动生成全库密文快照并存入 Cloudflare R2，也可在此随时手动备份与回滚。
+                </p>
+              </div>
+              {r2Enabled && (
+                <button
+                  type="button"
+                  disabled={backupBusy}
+                  onClick={() => void handleCreateBackup()}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/85 disabled:opacity-50"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  <span>{backupBusy ? '处理中...' : '立即创建 R2 快照'}</span>
+                </button>
+              )}
+            </div>
+
+            {backupError && (
+              <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
+                {backupError}
+              </div>
+            )}
+
+            {backupNotice && (
+              <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-600 dark:text-emerald-400">
+                {backupNotice}
+              </div>
+            )}
+
+            {!r2Enabled ? (
+              <div className="rounded-lg border border-dashed border-border bg-background px-3 py-4 text-xs text-muted-foreground">
+                当前 Worker 尚未绑定 R2 Bucket（<code className="font-mono text-foreground">BUCKET</code>
+                ）。请在 <code className="font-mono text-foreground">packages/cf-server/wrangler.jsonc</code>{' '}
+                中配置 <code className="font-mono text-foreground">r2_buckets</code> 后重新部署以开启 R2 快照备份。
+              </div>
+            ) : backups.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-border bg-background px-3 py-4 text-center text-xs text-muted-foreground">
+                R2 桶暂无加密快照，点击右上角「立即创建 R2 快照」生成首份全库备份。
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {backups.map((b) => (
+                  <div
+                    key={b.key}
+                    className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background px-3.5 py-2.5 text-xs"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate font-mono font-medium text-foreground">{b.key}</div>
+                      <div className="mt-0.5 flex flex-wrap items-center gap-2 font-mono text-[11px] text-muted-foreground">
+                        <span>{b.uploadedAt}</span>
+                        <span>· {b.reason}</span>
+                        {b.vaultCount !== null && <span>· {b.vaultCount} 库</span>}
+                        {b.itemCount !== null && <span>· {b.itemCount} 条目</span>}
+                        {b.emailCount !== null && <span>· {b.emailCount} 邮件</span>}
+                        <span>· {(b.size / 1024).toFixed(1)} KB</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={backupBusy}
+                        onClick={() => void handleRestoreBackup(b.key)}
+                        className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50"
+                      >
+                        <RotateCcw className="h-3 w-3" />
+                        从此快照恢复
+                      </button>
+                      <button
+                        type="button"
+                        disabled={backupBusy}
+                        onClick={() => void handleDeleteBackup(b.key)}
+                        aria-label="删除快照"
+                        className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-rose-600 dark:hover:text-rose-400 disabled:opacity-50"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

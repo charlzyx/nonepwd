@@ -1,5 +1,5 @@
 import type { VaultItemPayload } from './types.js';
-import { invokeRust } from './wasm-bridge.js';
+import { invokeRust } from './wasm-runtime.js';
 
 export interface ParsedSecretRef {
   raw: string;

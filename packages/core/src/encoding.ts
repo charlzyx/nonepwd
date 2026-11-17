@@ -1,4 +1,4 @@
-import { invokeRust } from './wasm-bridge.js';
+import { invokeRust } from './wasm-runtime.js';
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();

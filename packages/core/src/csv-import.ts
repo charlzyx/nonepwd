@@ -1,4 +1,4 @@
-import { invokeRust } from './wasm-bridge.js';
+import { invokeRust } from './wasm-runtime.js';
 import type { ItemCategory } from './types.js';
 
 export interface CsvImportedEntry {

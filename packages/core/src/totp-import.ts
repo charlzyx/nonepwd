@@ -1,6 +1,6 @@
 import type { TotpAlgorithm } from './totp.js';
 import type { VaultItemPayload } from './types.js';
-import { invokeRust } from './wasm-bridge.js';
+import { invokeRust } from './wasm-runtime.js';
 
 export interface TotpImportEntry {
   issuer?: string;

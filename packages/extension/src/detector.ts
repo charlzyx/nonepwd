@@ -478,6 +478,48 @@ export function findFormFields(anchor: HTMLInputElement): {
   return { usernameInput, passwordInput };
 }
 
+export function extractSubmittedLogin(
+  scope: ParentNode,
+  fallbackUsername?: string
+): { username: string; password: string } | null {
+  const inputs = Array.from(scope.querySelectorAll('input')).filter(isInputElement);
+  const candidates = inputs.filter((el) => {
+    const type = (el.type || '').toLowerCase();
+    if (type !== 'password') return false;
+    if (el.disabled || el.readOnly || !el.value) return false;
+    const detected = detectInputTarget(el);
+    if (
+      detected &&
+      (detected.kind === 'cc-csc' ||
+        detected.kind === 'otp-single' ||
+        detected.kind === 'otp-split')
+    ) {
+      return false;
+    }
+    return true;
+  });
+
+  if (candidates.length === 0) return null;
+
+  const chosenPwInput =
+    candidates.find((el) => detectInputTarget(el)?.kind === 'new-password') ?? candidates[0];
+
+  let { usernameInput } = findFormFields(chosenPwInput);
+  if (!usernameInput || !usernameInput.value.trim()) {
+    const scopeUser = inputs.find((el) => {
+      if (el === chosenPwInput || el.disabled || el.readOnly || !el.value.trim()) return false;
+      const t = detectInputTarget(el);
+      return t?.kind === 'username' || t?.kind === 'identity-email';
+    });
+    if (scopeUser) {
+      usernameInput = scopeUser;
+    }
+  }
+
+  const username = (usernameInput?.value ?? '').trim() || (fallbackUsername ?? '').trim();
+  return { username, password: chosenPwInput.value };
+}
+
 export function findCardFormFields(
   anchor: FormFieldElement
 ): Partial<Record<CardInputKind, FormFieldElement>> {

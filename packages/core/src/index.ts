@@ -1,4 +1,4 @@
-export { initNonePwdCore } from './wasm-bridge.js';
+export { initNonePwdCore, setNonePwdWasmModule } from './wasm-bridge.js';
 export * from './encoding.js';
 export * from './types.js';
 export * from './crypto.js';

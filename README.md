@@ -43,9 +43,10 @@ nonepwd/
 │   ├── build-rust.mjs         # 构建 Rust WASM、macOS 原生二进制与 Linux musl 静态二进制
 │   └── install-cli.sh         # macOS / Linux 一键安装 `np` 到 ~/.local/bin
 ├── packages/
-│   ├── core/                  # @nonepwd/core：内联封装 Rust WASM 引擎
+│   ├── core/                  # @nonepwd/core：内联封装 Rust WASM 引擎（含 Cloudflare Worker 专用无内联入口）
 │   ├── server/                # Hono + Node 26 内置 SQLite + WebSocket + IMAP IDLE + CF Webhook
-│   ├── cf-email-worker/       # Cloudflare Email Routing Worker（含 wrangler.toml）
+│   ├── cf-server/             # @nonepwd/cf-server：Cloudflare Worker + D1 + R2 + Durable Objects + Direct Email Routing 全栈服务端
+│   ├── cf-email-worker/       # Cloudflare Email Routing Worker（独立转发外部服务端用，含 wrangler.toml）
 │   ├── cli/                   # CLI 兼容包装与 E2E 测试
 │   ├── web/                   # React 19 + TailwindCSS v4 官网 & 三栏式 Web Vault
 │   └── extension/             # Chrome / Arc / Edge Manifest V3 自动填充插件
@@ -149,6 +150,28 @@ docker compose up -d --build
 ```
 
 容器镜像内同时运行自建服务端，并将 Linux 原生 `np` 二进制内置在 `/usr/local/bin/np`。
+
+### 方式五：Cloudflare Worker + D1 + R2 自有域名无服务器部署（`@nonepwd/cf-server`）
+
+适合拥有自己域名的场景：将静态官网与 Web Vault、`/api/*` 零知识接口、**D1 数据库**、**R2 加密快照与邮件归档**、**Durable Objects (WebSocket Hibernation)** 与 **Cloudflare Email Routing Catch-All** 全部运行在自有域名（如 `https://vault.yourdomain.com`）上：
+
+```bash
+# 1. 构建 Rust WASM 与 Cloudflare 全栈产物
+pnpm run build:rust
+pnpm run build:cf-server
+
+# 2. 创建 D1 与 R2，并执行远端建表
+cd packages/cf-server
+npx wrangler login
+npx wrangler d1 create nonepwd-db          # 把输出的 database_id 填入 wrangler.jsonc
+npx wrangler r2 bucket create nonepwd-vault-blobs
+pnpm run db:migrate:remote
+
+# 3. 绑定 custom_domain 后发布
+pnpm run deploy
+```
+
+然后在 Cloudflare Dashboard → **Email → Email Routing → Catch-all address** 直接选择发送到 Worker **`nonepwd-cf-server`**，自有域名别名邮件就会在边缘提取验证码并按你的 X25519 公钥密封存库及推送（macOS 桌面端、MV3 插件、`np` CLI 均直连该域名即可）。
 
 ---
 

@@ -32,58 +32,83 @@ function pngChunk(type, data) {
   return Buffer.concat([lenBuf, crcInput, crcBuf]);
 }
 
-function generateShieldPng(size) {
+function generateThreeKeysPng(size) {
   const raw = Buffer.alloc((size * 4 + 1) * size);
-  const cx = (size - 1) / 2;
-  const cy = (size - 1) / 2;
-  const radius = size * 0.22;
+  const cx = size / 2;
+  const cy = size / 2;
+  const half = size / 2;
+  const radius = size * 0.225;
+  const bg = [28, 29, 33];
+  const keys = [
+    { kx: -0.43, ky: -0.04, color: [245, 204, 46] },
+    { kx: 0.0, ky: 0.06, color: [61, 204, 97] },
+    { kx: 0.43, ky: -0.04, color: [61, 138, 250] },
+  ];
+  const subOffsets = [0.25, 0.75];
+
+  const sampleAt = (px, py) => {
+    const dx = Math.max(0, Math.abs(px - cx) - (half - radius));
+    const dy = Math.max(0, Math.abs(py - cy) - (half - radius));
+    if (dx * dx + dy * dy > radius * radius) {
+      return null;
+    }
+
+    const nx = (px - cx) / half;
+    const ny = (py - cy) / half;
+    for (const k of keys) {
+      const rx = nx - k.kx;
+      const bowDy = ny - (-0.23 + k.ky);
+      const holeDy = ny - (-0.25 + k.ky);
+      const inBow = rx * rx + bowDy * bowDy <= 0.165 * 0.165;
+      const inHole = rx * rx + holeDy * holeDy <= 0.055 * 0.055;
+      const inShaft =
+        (Math.abs(rx) <= 0.048 && ny >= -0.09 + k.ky && ny <= 0.39 + k.ky) ||
+        (rx * rx + (ny - (0.39 + k.ky)) * (ny - (0.39 + k.ky)) <= 0.048 * 0.048);
+      const inTeeth =
+        rx >= 0.04 &&
+        rx <= 0.135 &&
+        ((ny >= 0.15 + k.ky && ny <= 0.225 + k.ky) ||
+          (ny >= 0.285 + k.ky && ny <= 0.36 + k.ky));
+
+      if ((inBow && !inHole) || inShaft || inTeeth) {
+        return k.color;
+      }
+    }
+    return bg;
+  };
 
   for (let y = 0; y < size; y++) {
     const rowStart = y * (size * 4 + 1);
     raw[rowStart] = 0; // filter type 0
     for (let x = 0; x < size; x++) {
       const idx = rowStart + 1 + x * 4;
-      // Rounded square mask
-      const dx = Math.max(0, Math.abs(x - cx) - (size / 2 - radius));
-      const dy = Math.max(0, Math.abs(y - cy) - (size / 2 - radius));
-      const inRoundedRect = dx * dx + dy * dy <= radius * radius;
+      let sumR = 0;
+      let sumG = 0;
+      let sumB = 0;
+      let hits = 0;
 
-      if (!inRoundedRect) {
+      for (const oy of subOffsets) {
+        for (const ox of subOffsets) {
+          const rgb = sampleAt(x + ox, y + oy);
+          if (rgb) {
+            sumR += rgb[0];
+            sumG += rgb[1];
+            sumB += rgb[2];
+            hits++;
+          }
+        }
+      }
+
+      if (hits === 0) {
         raw[idx] = 0;
         raw[idx + 1] = 0;
         raw[idx + 2] = 0;
         raw[idx + 3] = 0;
-        continue;
-      }
-
-      // Draw crisp white keyhole silhouette in center
-      const nx = (x - cx) / (size / 2);
-      const ny = (y - cy) / (size / 2);
-      const inKeyHead = nx * nx + (ny + 0.14) * (ny + 0.14) <= 0.22 * 0.22;
-      const inKeyStem = Math.abs(nx) <= 0.1 && ny >= -0.04 && ny <= 0.44;
-      const inOuterRing =
-        Math.abs(nx) <= 0.56 &&
-        ny >= -0.56 &&
-        ny <= 0.56 &&
-        (Math.abs(nx) >= 0.45 || Math.abs(ny) >= 0.45);
-
-      if (inKeyHead || inKeyStem) {
-        raw[idx] = 255;
-        raw[idx + 1] = 255;
-        raw[idx + 2] = 255;
-        raw[idx + 3] = 255;
-      } else if (inOuterRing) {
-        raw[idx] = 165;
-        raw[idx + 1] = 180;
-        raw[idx + 2] = 252;
-        raw[idx + 3] = 255;
       } else {
-        // Indigo gradient (#4f46e5 -> #6366f1)
-        const t = y / size;
-        raw[idx] = Math.round(79 + t * 20);
-        raw[idx + 1] = Math.round(70 + t * 32);
-        raw[idx + 2] = Math.round(229 + t * 12);
-        raw[idx + 3] = 255;
+        raw[idx] = Math.round(sumR / hits);
+        raw[idx + 1] = Math.round(sumG / hits);
+        raw[idx + 2] = Math.round(sumB / hits);
+        raw[idx + 3] = Math.round((hits / 4) * 255);
       }
     }
   }
@@ -142,11 +167,23 @@ await esbuild.build({
   minify: true,
 });
 
-// 3. Copy manifest & generate valid PNG icons
+// 3. Copy manifest & icons (prefer native SF-Symbol PNGs from public/icons)
 fs.copyFileSync(path.join(__dirname, 'public/manifest.json'), path.join(distDir, 'manifest.json'));
 fs.mkdirSync(iconsDir, { recursive: true });
-for (const size of [16, 48, 128]) {
-  fs.writeFileSync(path.join(iconsDir, `icon${size}.png`), generateShieldPng(size));
+const publicIconsDir = path.join(__dirname, 'public/icons');
+if (fs.existsSync(path.join(publicIconsDir, 'icon128.png'))) {
+  for (const size of [16, 32, 48, 128]) {
+    const srcIcon = path.join(publicIconsDir, `icon${size}.png`);
+    if (fs.existsSync(srcIcon)) {
+      fs.copyFileSync(srcIcon, path.join(iconsDir, `icon${size}.png`));
+    } else {
+      fs.writeFileSync(path.join(iconsDir, `icon${size}.png`), generateThreeKeysPng(size));
+    }
+  }
+} else {
+  for (const size of [16, 32, 48, 128]) {
+    fs.writeFileSync(path.join(iconsDir, `icon${size}.png`), generateThreeKeysPng(size));
+  }
 }
 
 // 4. Package built MV3 extension into dist/bin/nonepwd-extension.zip for one-click server download

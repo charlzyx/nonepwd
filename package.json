@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build:rust": "node scripts/build-rust.mjs",
-    "build": "pnpm build:rust && pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && pnpm --filter @nonepwd/server build && pnpm --filter @nonepwd/cli build && pnpm --filter @nonepwd/cf-email-worker build",
+    "build": "pnpm build:rust && pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && pnpm --filter @nonepwd/server build && pnpm --filter @nonepwd/cli build && pnpm --filter @nonepwd/cf-email-worker build && pnpm --filter @nonepwd/cf-server build",
+    "build:cf-server": "pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && pnpm --filter @nonepwd/cf-server build",
     "build:site": "pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && node scripts/build-cf-site.mjs",
     "dev:server": "pnpm --filter @nonepwd/server dev",
     "dev:web": "pnpm --filter @nonepwd/web dev",
@@ -15,8 +16,10 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "cf": "1.0.0-rc.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
-    "vitest": "^3.0.8"
+    "vitest": "^3.0.8",
+    "wrangler": "^4.163.0"
   }
 }

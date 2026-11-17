@@ -1,4 +1,4 @@
-import { invokeRust, invokeRustAsync } from './wasm-bridge.js';
+import { invokeRust, invokeRustAsync } from './wasm-runtime.js';
 
 export type TotpAlgorithm = 'SHA1' | 'SHA256' | 'SHA512';
 

@@ -1,7 +1,8 @@
 import { JSDOM } from 'jsdom';
 import { describe, expect, it } from 'vitest';
+import { classifyCapturedCredential } from '../src/capture.js';
 import { POPOVER_CSS } from '../src/content.js';
-import { detectInputTarget, findFormFields } from '../src/detector.js';
+import { detectInputTarget, extractSubmittedLogin, findFormFields } from '../src/detector.js';
 import {
   fillCardCvv,
   fillCardForm,
@@ -11,9 +12,16 @@ import {
   formatCardDisplay,
 } from '../src/filler.js';
 import {
+  loadInlineBadgeHidden,
+  loadPopupActiveTab,
+  loadUnlockDuration,
   nextThemePreference,
   normalizeThemePreference,
   resolveIsDark,
+  saveInlineBadgeHidden,
+  savePopupActiveTab,
+  saveUnlockDuration,
+  unlockDurationToMs,
 } from '../src/theme.js';
 
 describe('@nonepwd/extension DOM detection & autofill', () => {
@@ -395,5 +403,155 @@ describe('@nonepwd/extension DOM detection & autofill', () => {
     expect(POPOVER_CSS).toContain('--np-bg: #ffffff');
     expect(POPOVER_CSS).toContain(':host([data-theme="dark"])');
     expect(POPOVER_CSS).toContain('@media (prefers-color-scheme: dark)');
+  });
+
+  it('extracts submitted login credentials, handles 2-step fallback usernames, prefers new-password, and ignores CVV', () => {
+    const dom = new JSDOM(`
+      <form id="login-form">
+        <input id="u" type="email" autocomplete="username" />
+        <input id="p" type="password" autocomplete="current-password" />
+      </form>
+      <form id="pw-change">
+        <input id="cur-pw" type="password" autocomplete="current-password" />
+        <input id="new-pw" type="password" autocomplete="new-password" />
+      </form>
+      <form id="two-step">
+        <input id="step2-pw" type="password" autocomplete="current-password" />
+      </form>
+      <form id="card-form">
+        <input id="cvv" type="password" autocomplete="cc-csc" />
+      </form>
+    `);
+    const doc = dom.window.document;
+
+    (doc.getElementById('u') as HTMLInputElement).value = 'alice@example.com';
+    (doc.getElementById('p') as HTMLInputElement).value = 'FirstPass!123';
+    expect(extractSubmittedLogin(doc.getElementById('login-form')!)).toEqual({
+      username: 'alice@example.com',
+      password: 'FirstPass!123',
+    });
+
+    (doc.getElementById('cur-pw') as HTMLInputElement).value = 'OldPass!123';
+    (doc.getElementById('new-pw') as HTMLInputElement).value = 'BrandNew!999';
+    expect(extractSubmittedLogin(doc.getElementById('pw-change')!, 'alice@example.com')).toEqual({
+      username: 'alice@example.com',
+      password: 'BrandNew!999',
+    });
+
+    (doc.getElementById('step2-pw') as HTMLInputElement).value = 'StepTwoPass!';
+    expect(extractSubmittedLogin(doc.getElementById('two-step')!, 'step1@example.com')).toEqual({
+      username: 'step1@example.com',
+      password: 'StepTwoPass!',
+    });
+
+    (doc.getElementById('cvv') as HTMLInputElement).value = '482';
+    expect(extractSubmittedLogin(doc.getElementById('card-form')!)).toBeNull();
+  });
+
+  it('classifies captured credentials as create, update, or skip accurately', () => {
+    const items = [
+      {
+        id: 'item-1',
+        vaultId: 'v-1',
+        category: 'login' as const,
+        title: 'Example',
+        favorite: false,
+        tags: [],
+        urls: ['https://app.example.com/login'],
+        username: 'alice@example.com',
+        password: 'SavedPassword!1',
+        customFields: [],
+        createdAt: '2026-11-17T00:00:00Z',
+        updatedAt: '2026-11-17T00:00:00Z',
+      },
+    ];
+
+    expect(
+      classifyCapturedCredential({
+        url: 'https://login.example.com/auth',
+        username: 'alice@example.com',
+        password: 'SavedPassword!1',
+        items,
+      }).action
+    ).toBe('skip');
+
+    const updateRes = classifyCapturedCredential({
+      url: 'https://example.com/settings',
+      username: 'Alice@Example.com',
+      password: 'RotatedPassword!2',
+      items,
+    });
+    expect(updateRes.action).toBe('update');
+    if (updateRes.action === 'update') {
+      expect(updateRes.existingItem.id).toBe('item-1');
+    }
+
+    const createRes = classifyCapturedCredential({
+      url: 'https://brandnew.dev/signup',
+      username: 'bob@brandnew.dev',
+      password: 'BrandNewPass!3',
+      items,
+    });
+    expect(createRes.action).toBe('create');
+    if (createRes.action === 'create') {
+      expect(createRes.host).toBe('brandnew.dev');
+      expect(createRes.originUrl).toBe('https://brandnew.dev');
+    }
+
+    expect(
+      classifyCapturedCredential({
+        url: 'https://ignored.site/login',
+        username: 'bob',
+        password: 'Secret!',
+        items,
+        neverSaveDomains: ['ignored.site'],
+      }).action
+    ).toBe('skip');
+  });
+
+  it('uses borderless pill CSS on overlay inputs/buttons and persists inline badge visibility preference', async () => {
+    expect(POPOVER_CSS).toContain('.np-badge-wrap');
+    expect(POPOVER_CSS).toContain('.np-badge-close');
+    expect(POPOVER_CSS).toMatch(/\.np-save-input[\s\S]*border-radius:\s*999px/);
+    expect(POPOVER_CSS).toMatch(/\.np-save-input:focus[\s\S]*box-shadow:\s*none/);
+    expect(POPOVER_CSS).toMatch(/\.np-save-btn[\s\S]*border-radius:\s*999px/);
+
+    const store: Record<string, unknown> = {};
+    const prevChrome = (globalThis as { chrome?: unknown }).chrome;
+    (globalThis as { chrome?: unknown }).chrome = {
+      storage: {
+        local: {
+          get: async (key: string) => ({ [key]: store[key] }),
+          set: async (obj: Record<string, unknown>) => {
+            Object.assign(store, obj);
+          },
+        },
+      },
+    };
+    try {
+      expect(await loadInlineBadgeHidden()).toBe(false);
+      await saveInlineBadgeHidden(true);
+      expect(await loadInlineBadgeHidden()).toBe(true);
+      await saveInlineBadgeHidden(false);
+      expect(await loadInlineBadgeHidden()).toBe(false);
+
+      expect(await loadPopupActiveTab()).toBeNull();
+      await savePopupActiveTab('2fa');
+      expect(await loadPopupActiveTab()).toBe('2fa');
+      await savePopupActiveTab('site');
+      expect(await loadPopupActiveTab()).toBe('site');
+
+      expect(unlockDurationToMs('3h')).toBe(3 * 3600_000);
+      expect(unlockDurationToMs('24h')).toBe(24 * 3600_000);
+      expect(unlockDurationToMs('7d')).toBe(7 * 86400_000);
+      expect(unlockDurationToMs('session')).toBeNull();
+      expect(await loadUnlockDuration()).toBe('24h');
+      await saveUnlockDuration('3h');
+      expect(await loadUnlockDuration()).toBe('3h');
+      await saveUnlockDuration('session');
+      expect(await loadUnlockDuration()).toBe('session');
+    } finally {
+      (globalThis as { chrome?: unknown }).chrome = prevChrome;
+    }
   });
 });

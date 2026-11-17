@@ -10,7 +10,7 @@ import {
   type SealedEnvelope,
   type ServiceAccountTokenPayload,
 } from './types.js';
-import { invokeRust, invokeRustAsync } from './wasm-bridge.js';
+import { invokeRust, invokeRustAsync } from './wasm-runtime.js';
 
 export const AAD = {
   ROOT_KEYSET: 'nonepwd:root-keyset:v1',

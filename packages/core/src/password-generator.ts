@@ -1,4 +1,4 @@
-import { invokeRust } from './wasm-bridge.js';
+import { invokeRust } from './wasm-runtime.js';
 
 export interface PasswordOptions {
   length?: number;

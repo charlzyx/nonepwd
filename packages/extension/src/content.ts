@@ -1,6 +1,8 @@
 import type { DecryptedEmailPayload, VaultItemPayload } from '@nonepwd/core';
+import type { PendingCredentialCapture } from './capture.js';
 import {
   detectInputTarget,
+  extractSubmittedLogin,
   isCardKind,
   isIdentityKind,
   type DetectedTarget,
@@ -15,8 +17,35 @@ import {
   formatCardDisplay,
   formatCardExpiry,
 } from './filler.js';
-import { loadThemePreference, normalizeThemePreference, THEME_STORAGE_KEY } from './theme.js';
+import {
+  INLINE_BADGE_HIDDEN_KEY,
+  loadInlineBadgeHidden,
+  loadThemePreference,
+  normalizeThemePreference,
+  saveInlineBadgeHidden,
+  THEME_STORAGE_KEY,
+} from './theme.js';
 import type { ExtendedVaultItem } from './types.js';
+
+export { INLINE_BADGE_HIDDEN_KEY as HIDE_BADGE_STORAGE_KEY };
+
+const THREE_KEYS_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+  <circle cx="7.2" cy="7.4" r="3.1" fill="#f5cc2e"/>
+  <circle cx="7.2" cy="7.1" r="1.05" fill="#1c1c1e"/>
+  <rect x="6.1" y="9.8" width="2.2" height="9.2" rx="1.1" fill="#f5cc2e"/>
+  <rect x="8.1" y="14.5" width="1.9" height="1.5" rx="0.45" fill="#f5cc2e"/>
+  <rect x="8.1" y="17.1" width="1.9" height="1.5" rx="0.45" fill="#f5cc2e"/>
+  <circle cx="12" cy="9.2" r="3.1" fill="#3dcc61"/>
+  <circle cx="12" cy="8.9" r="1.05" fill="#1c1c1e"/>
+  <rect x="10.9" y="11.6" width="2.2" height="9.2" rx="1.1" fill="#3dcc61"/>
+  <rect x="12.9" y="16.3" width="1.9" height="1.5" rx="0.45" fill="#3dcc61"/>
+  <rect x="12.9" y="18.9" width="1.9" height="1.5" rx="0.45" fill="#3dcc61"/>
+  <circle cx="16.8" cy="7.4" r="3.1" fill="#3d8afa"/>
+  <circle cx="16.8" cy="7.1" r="1.05" fill="#1c1c1e"/>
+  <rect x="15.7" y="9.8" width="2.2" height="9.2" rx="1.1" fill="#3d8afa"/>
+  <rect x="17.7" y="14.5" width="1.9" height="1.5" rx="0.45" fill="#3d8afa"/>
+  <rect x="17.7" y="17.1" width="1.9" height="1.5" rx="0.45" fill="#3d8afa"/>
+</svg>`;
 
 interface TabLoginMatch {
   item: VaultItemPayload;
@@ -33,85 +62,123 @@ interface TabQueryResponse {
   identities: ExtendedVaultItem[];
   pendingItem: TabLoginMatch | null;
   latestOtpEmail: (DecryptedEmailPayload & { id: string }) | null;
+  pendingCapture?: PendingCredentialCapture | null;
 }
 
 export const POPOVER_CSS = `
   :host {
     all: initial;
     --np-bg: #ffffff;
-    --np-surface: #fafafa;
-    --np-fg: #0a0a0a;
-    --np-muted: #737373;
-    --np-border: #e5e5e5;
-    --np-hover: #f5f5f5;
-    --np-active-border: #d4d4d4;
-    --np-primary: #171717;
-    --np-primary-fg: #fafafa;
-    --np-pill-bg: #f5f5f5;
-    --np-pill-fg: #171717;
-    --np-pill-border: #e5e5e5;
-    --np-dot-unlocked: #171717;
+    --np-surface: #f5f5f7;
+    --np-fg: #1d1d1f;
+    --np-muted: #6e6e73;
+    --np-border: rgba(0, 0, 0, 0.08);
+    --np-hover: rgba(0, 0, 0, 0.05);
+    --np-active-border: rgba(53, 85, 245, 0.35);
+    --np-primary: #3555f5;
+    --np-primary-fg: #ffffff;
+    --np-pill-bg: rgba(0, 0, 0, 0.055);
+    --np-pill-fg: #1d1d1f;
+    --np-pill-border: transparent;
+    --np-dot-unlocked: #30d158;
     --np-dot-locked: #a3a3a3;
-    --np-shadow: 0 10px 30px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+    --np-input-bg: rgba(0, 0, 0, 0.055);
+    --np-shadow: 0 14px 36px rgba(0, 0, 0, 0.14), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
   }
   :host([data-theme="dark"]) {
-    --np-bg: #141414;
-    --np-surface: #1b1b1b;
-    --np-fg: #fafafa;
-    --np-muted: #a3a3a3;
-    --np-border: rgba(255, 255, 255, 0.12);
-    --np-hover: #262626;
-    --np-active-border: rgba(255, 255, 255, 0.22);
-    --np-primary: #ebebeb;
-    --np-primary-fg: #171717;
-    --np-pill-bg: #242424;
-    --np-pill-fg: #fafafa;
-    --np-pill-border: rgba(255, 255, 255, 0.14);
-    --np-dot-unlocked: #fafafa;
+    --np-bg: #1c1c1e;
+    --np-surface: #2c2c2e;
+    --np-fg: #f5f5f7;
+    --np-muted: #98989d;
+    --np-border: rgba(255, 255, 255, 0.10);
+    --np-hover: rgba(255, 255, 255, 0.08);
+    --np-active-border: rgba(76, 110, 245, 0.45);
+    --np-primary: #4c6ef5;
+    --np-primary-fg: #ffffff;
+    --np-pill-bg: rgba(255, 255, 255, 0.10);
+    --np-pill-fg: #f5f5f7;
+    --np-pill-border: transparent;
+    --np-dot-unlocked: #30d158;
     --np-dot-locked: #737373;
-    --np-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+    --np-input-bg: rgba(255, 255, 255, 0.08);
+    --np-shadow: 0 18px 44px rgba(0, 0, 0, 0.55), 0 0 0 0.5px rgba(255, 255, 255, 0.10);
   }
   @media (prefers-color-scheme: dark) {
     :host([data-theme="system"]) {
-      --np-bg: #141414;
-      --np-surface: #1b1b1b;
-      --np-fg: #fafafa;
-      --np-muted: #a3a3a3;
-      --np-border: rgba(255, 255, 255, 0.12);
-      --np-hover: #262626;
-      --np-active-border: rgba(255, 255, 255, 0.22);
-      --np-primary: #ebebeb;
-      --np-primary-fg: #171717;
-      --np-pill-bg: #242424;
-      --np-pill-fg: #fafafa;
-      --np-pill-border: rgba(255, 255, 255, 0.14);
-      --np-dot-unlocked: #fafafa;
+      --np-bg: #1c1c1e;
+      --np-surface: #2c2c2e;
+      --np-fg: #f5f5f7;
+      --np-muted: #98989d;
+      --np-border: rgba(255, 255, 255, 0.10);
+      --np-hover: rgba(255, 255, 255, 0.08);
+      --np-active-border: rgba(76, 110, 245, 0.45);
+      --np-primary: #4c6ef5;
+      --np-primary-fg: #ffffff;
+      --np-pill-bg: rgba(255, 255, 255, 0.10);
+      --np-pill-fg: #f5f5f7;
+      --np-pill-border: transparent;
+      --np-dot-unlocked: #30d158;
       --np-dot-locked: #737373;
-      --np-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+      --np-input-bg: rgba(255, 255, 255, 0.08);
+      --np-shadow: 0 18px 44px rgba(0, 0, 0, 0.55), 0 0 0 0.5px rgba(255, 255, 255, 0.10);
     }
   }
   * {
     box-sizing: border-box;
-    font-family: "Geist Variable", "Geist", -apple-system, BlinkMacSystemFont, "Inter", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", sans-serif;
   }
-  .np-badge {
+  .np-badge-wrap {
     position: fixed;
     z-index: 2147483646;
-    width: 20px;
-    height: 20px;
-    border-radius: 5px;
-    border: 1px solid var(--np-border);
-    background: var(--np-primary);
-    color: var(--np-primary-fg);
+    width: 22px;
+    height: 22px;
+    display: none;
+    user-select: none;
+  }
+  .np-badge {
+    width: 22px;
+    height: 22px;
+    border-radius: 5.5px;
+    border: 0.5px solid rgba(255, 255, 255, 0.14);
+    background: #1c1c1e;
+    color: #ffffff;
     display: flex;
     align-items: center;
     justify-content: center;
-    cursor: pointer;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    cursor: grab;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16);
     transition: transform 0.12s ease, opacity 0.12s ease;
     padding: 0;
   }
   .np-badge:hover { transform: scale(1.06); }
+  .np-badge.dragging, .np-badge:active { cursor: grabbing; transform: scale(1.04); }
+  .np-badge-close {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: #1c1c1e;
+    color: #f5f5f7;
+    font-size: 10px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  }
+  .np-badge-wrap:hover .np-badge-close,
+  .np-badge-close:focus-visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
   .np-popover {
     position: fixed;
     z-index: 2147483647;
@@ -218,12 +285,199 @@ export const POPOVER_CSS = `
     background: var(--np-surface);
     border-top: 1px solid var(--np-border);
   }
+  .np-save-banner {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 2147483647;
+    width: 316px;
+    max-width: calc(100vw - 24px);
+    background: var(--np-bg);
+    color: var(--np-fg);
+    border-radius: 14px;
+    box-shadow: 0 18px 42px rgba(0, 0, 0, 0.16), 0 0 0 1px var(--np-border);
+    padding: 14px;
+    animation: np-fade 0.14s ease-out;
+  }
+  .np-save-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .np-save-head-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .np-save-emblem {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    background: #1c1c1e;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .np-save-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--np-fg);
+    line-height: 1.25;
+  }
+  .np-save-sub {
+    font-size: 11px;
+    color: var(--np-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .np-save-close {
+    width: 22px;
+    height: 22px;
+    border: none;
+    background: var(--np-input-bg);
+    color: var(--np-muted);
+    border-radius: 999px;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .np-save-close:hover {
+    color: var(--np-fg);
+  }
+  .np-save-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .np-save-pw-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+  .np-save-input {
+    width: 100%;
+    height: 34px;
+    border: none;
+    outline: none;
+    border-radius: 999px;
+    background: var(--np-input-bg);
+    color: var(--np-fg);
+    font-size: 12.5px;
+    padding: 0 14px;
+  }
+  .np-save-pw-wrap .np-save-input {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    padding-right: 36px;
+  }
+  .np-save-input:focus {
+    background: var(--np-hover);
+    box-shadow: none;
+  }
+  .np-save-eye {
+    position: absolute;
+    right: 6px;
+    border: none;
+    background: transparent;
+    color: var(--np-muted);
+    cursor: pointer;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+  .np-save-eye:hover {
+    color: var(--np-fg);
+  }
+  .np-save-err {
+    font-size: 11px;
+    color: #e5484d;
+    margin-bottom: 8px;
+  }
+  .np-save-notice {
+    font-size: 12px;
+    color: var(--np-muted);
+    background: var(--np-input-bg);
+    border-radius: 9px;
+    padding: 9px 11px;
+    line-height: 1.45;
+    margin-bottom: 12px;
+  }
+  .np-save-done {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: #18a957;
+    text-align: center;
+    padding: 10px 4px 4px;
+  }
+  .np-save-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .np-save-actions-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .np-save-btn {
+    height: 32px;
+    border: none;
+    border-radius: 999px;
+    padding: 0 14px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.12s ease, background 0.12s ease;
+  }
+  .np-save-btn.secondary {
+    background: var(--np-input-bg);
+    color: var(--np-fg);
+  }
+  .np-save-btn.secondary:hover {
+    background: var(--np-hover);
+  }
+  .np-save-btn.link {
+    background: transparent;
+    color: var(--np-muted);
+    padding: 0 4px;
+    font-weight: 500;
+  }
+  .np-save-btn.link:hover {
+    color: var(--np-fg);
+  }
+  .np-save-btn.primary {
+    background: var(--np-primary);
+    color: var(--np-primary-fg);
+  }
+  .np-save-btn.primary:hover {
+    opacity: 0.92;
+  }
+  .np-save-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
 `;
 
 let hostEl: HTMLDivElement | null = null;
 let shadowRoot: ShadowRoot | null = null;
+let badgeWrap: HTMLDivElement | null = null;
 let badgeBtn: HTMLButtonElement | null = null;
+let badgeHideBtn: HTMLButtonElement | null = null;
 let popoverEl: HTMLDivElement | null = null;
+let saveBannerEl: HTMLDivElement | null = null;
 
 let currentTarget: DetectedTarget | null = null;
 let lastQueryData: TabQueryResponse | null = null;
@@ -231,6 +485,59 @@ let liveEmailOverride: (DecryptedEmailPayload & { id?: string }) | null = null;
 let activeIndex = 0;
 let optionHandlers: Array<{ run: () => void; clickOnly?: boolean }> = [];
 let currentThemePref: 'light' | 'dark' | 'system' = 'light';
+let inlineBadgeHidden = false;
+let badgeDragOffset = { x: 0, y: 0 };
+let activeBannerId: string | null = null;
+let activeBannerUnlocked = false;
+let lastCaptureSig = '';
+let lastCaptureAt = 0;
+
+const LAST_USER_KEY = '__np_last_user';
+
+function rememberTypedUsername(val: string) {
+  const clean = val.trim();
+  if (!clean) return;
+  try {
+    sessionStorage.setItem(LAST_USER_KEY, JSON.stringify({ value: clean, ts: Date.now() }));
+  } catch {
+    // ignore storage-restricted origins
+  }
+}
+
+function readLastTypedUsername(): string {
+  try {
+    const raw = sessionStorage.getItem(LAST_USER_KEY);
+    if (!raw) return '';
+    const parsed = JSON.parse(raw) as { value?: string; ts?: number };
+    if (parsed.value && parsed.ts && Date.now() - parsed.ts < 5 * 60_000) {
+      return parsed.value;
+    }
+  } catch {
+    // ignore
+  }
+  return '';
+}
+
+function tryCaptureCredentials(scope: ParentNode) {
+  if (typeof chrome === 'undefined' || typeof chrome.runtime?.sendMessage !== 'function') return;
+  const creds = extractSubmittedLogin(scope, readLastTypedUsername());
+  if (!creds) return;
+  rememberTypedUsername(creds.username);
+  const sig = `${window.location.origin}|${creds.username}|${creds.password}`;
+  const now = Date.now();
+  if (sig === lastCaptureSig && now - lastCaptureAt < 900) return;
+  lastCaptureSig = sig;
+  lastCaptureAt = now;
+
+  void chrome.runtime
+    .sendMessage({
+      type: 'NONEPWD_CAPTURE_CREDENTIAL',
+      url: window.location.href,
+      username: creds.username,
+      password: creds.password,
+    })
+    .catch(() => {});
+}
 
 function syncHostTheme() {
   if (hostEl) {
@@ -249,39 +556,331 @@ function ensureShadowUi(): ShadowRoot {
   style.textContent = POPOVER_CSS;
   shadowRoot.appendChild(style);
 
+  badgeWrap = document.createElement('div');
+  badgeWrap.className = 'np-badge-wrap';
+
   badgeBtn = document.createElement('button');
   badgeBtn.type = 'button';
   badgeBtn.className = 'np-badge';
-  badgeBtn.title = 'nonepwd 自动填充';
-  badgeBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`;
-  badgeBtn.style.display = 'none';
+  badgeBtn.title = 'NonePwd 自动填充（可拖动位置，悬停点 × 可隐藏）';
+  badgeBtn.innerHTML = THREE_KEYS_SVG;
   badgeBtn.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
-    if (popoverEl && popoverEl.style.display !== 'none') {
-      hidePopover();
-    } else if (currentTarget) {
-      void openPopoverForTarget(currentTarget);
-    }
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const origX = badgeDragOffset.x;
+    const origY = badgeDragOffset.y;
+    let dragged = false;
+
+    const onMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (!dragged && Math.hypot(dx, dy) >= 4) {
+        dragged = true;
+        badgeBtn?.classList.add('dragging');
+      }
+      if (dragged) {
+        badgeDragOffset = { x: origX + dx, y: origY + dy };
+        if (currentTarget) positionOverlays(currentTarget.anchor);
+      }
+    };
+
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove, true);
+      window.removeEventListener('mouseup', onUp, true);
+      badgeBtn?.classList.remove('dragging');
+      if (!dragged) {
+        if (popoverEl && popoverEl.style.display !== 'none') {
+          hidePopover();
+        } else if (currentTarget) {
+          void openPopoverForTarget(currentTarget);
+        }
+      }
+    };
+
+    window.addEventListener('mousemove', onMove, true);
+    window.addEventListener('mouseup', onUp, true);
   });
-  shadowRoot.appendChild(badgeBtn);
+
+  badgeHideBtn = document.createElement('button');
+  badgeHideBtn.type = 'button';
+  badgeHideBtn.className = 'np-badge-close';
+  badgeHideBtn.title = '隐藏网页内悬浮图标（可在浏览器右上角 NonePwd 扩展中重新开启）';
+  badgeHideBtn.setAttribute('aria-label', '隐藏网页内悬浮图标');
+  badgeHideBtn.textContent = '×';
+  badgeHideBtn.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  badgeHideBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    inlineBadgeHidden = true;
+    if (badgeWrap) badgeWrap.style.display = 'none';
+    hidePopover();
+    void saveInlineBadgeHidden(true);
+  });
+
+  badgeWrap.appendChild(badgeBtn);
+  badgeWrap.appendChild(badgeHideBtn);
+  shadowRoot.appendChild(badgeWrap);
 
   popoverEl = document.createElement('div');
   popoverEl.className = 'np-popover';
   popoverEl.style.display = 'none';
   shadowRoot.appendChild(popoverEl);
 
+  saveBannerEl = document.createElement('div');
+  saveBannerEl.className = 'np-save-banner';
+  saveBannerEl.style.display = 'none';
+  shadowRoot.appendChild(saveBannerEl);
+
   document.documentElement.appendChild(hostEl);
   return shadowRoot;
 }
 
+function hideSaveBanner() {
+  if (saveBannerEl) {
+    saveBannerEl.style.display = 'none';
+    saveBannerEl.innerHTML = '';
+  }
+  activeBannerId = null;
+  activeBannerUnlocked = false;
+}
+
+function renderSaveBanner(capture: PendingCredentialCapture, unlocked: boolean) {
+  if (!saveBannerEl) return;
+  activeBannerId = capture.id;
+  saveBannerEl.innerHTML = '';
+
+  const head = document.createElement('div');
+  head.className = 'np-save-head';
+
+  const headLeft = document.createElement('div');
+  headLeft.className = 'np-save-head-left';
+
+  const emblem = document.createElement('div');
+  emblem.className = 'np-save-emblem';
+  emblem.innerHTML = THREE_KEYS_SVG.replace('width="16" height="16"', 'width="20" height="20"');
+
+  const titleWrap = document.createElement('div');
+  titleWrap.style.minWidth = '0';
+  const titleEl = document.createElement('div');
+  titleEl.className = 'np-save-title';
+  titleEl.textContent = capture.mode === 'update' ? '更新密码？' : '保存密码到 NonePwd？';
+  const subEl = document.createElement('div');
+  subEl.className = 'np-save-sub';
+  subEl.textContent = capture.host;
+  titleWrap.appendChild(titleEl);
+  titleWrap.appendChild(subEl);
+
+  headLeft.appendChild(emblem);
+  headLeft.appendChild(titleWrap);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'np-save-close';
+  closeBtn.setAttribute('aria-label', '关闭');
+  closeBtn.textContent = '×';
+  closeBtn.addEventListener('click', () => {
+    void chrome.runtime.sendMessage({
+      type: 'NONEPWD_DISMISS_SAVE_CREDENTIAL',
+      captureId: capture.id,
+    });
+    hideSaveBanner();
+  });
+
+  head.appendChild(headLeft);
+  head.appendChild(closeBtn);
+  saveBannerEl.appendChild(head);
+
+  const dismissBanner = (neverForSite: boolean) => {
+    void chrome.runtime.sendMessage({
+      type: 'NONEPWD_DISMISS_SAVE_CREDENTIAL',
+      captureId: capture.id,
+      neverForSite,
+      host: capture.host,
+    });
+    hideSaveBanner();
+  };
+
+  if (!unlocked) {
+    const notice = document.createElement('div');
+    notice.className = 'np-save-notice';
+    notice.textContent = `已捕获 ${capture.username || capture.host} 的凭据。密码库当前已锁定，请点击浏览器右上角 NonePwd 扩展图标解锁后保存。`;
+    saveBannerEl.appendChild(notice);
+
+    const actions = document.createElement('div');
+    actions.className = 'np-save-actions';
+    const neverBtn = document.createElement('button');
+    neverBtn.type = 'button';
+    neverBtn.className = 'np-save-btn link';
+    neverBtn.textContent = '对此网站一律不';
+    neverBtn.addEventListener('click', () => dismissBanner(true));
+
+    const laterBtn = document.createElement('button');
+    laterBtn.type = 'button';
+    laterBtn.className = 'np-save-btn secondary';
+    laterBtn.textContent = '暂不';
+    laterBtn.addEventListener('click', () => dismissBanner(false));
+
+    actions.appendChild(neverBtn);
+    actions.appendChild(laterBtn);
+    saveBannerEl.appendChild(actions);
+    saveBannerEl.style.display = 'block';
+    return;
+  }
+
+  const fields = document.createElement('div');
+  fields.className = 'np-save-fields';
+
+  const userInput = document.createElement('input');
+  userInput.type = 'text';
+  userInput.className = 'np-save-input';
+  userInput.placeholder = '用户名 / 邮箱（可选）';
+  userInput.value = capture.username;
+
+  const pwWrap = document.createElement('div');
+  pwWrap.className = 'np-save-pw-wrap';
+  const pwInput = document.createElement('input');
+  pwInput.type = 'password';
+  pwInput.className = 'np-save-input';
+  pwInput.value = capture.password;
+
+  let pwVisible = false;
+  const eyeBtn = document.createElement('button');
+  eyeBtn.type = 'button';
+  eyeBtn.className = 'np-save-eye';
+  eyeBtn.title = '显示密码';
+  const renderEyeIcon = () => {
+    eyeBtn.innerHTML = pwVisible
+      ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`
+      : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
+  };
+  renderEyeIcon();
+  eyeBtn.addEventListener('click', () => {
+    pwVisible = !pwVisible;
+    pwInput.type = pwVisible ? 'text' : 'password';
+    eyeBtn.title = pwVisible ? '隐藏密码' : '显示密码';
+    renderEyeIcon();
+  });
+
+  pwWrap.appendChild(pwInput);
+  pwWrap.appendChild(eyeBtn);
+  fields.appendChild(userInput);
+  fields.appendChild(pwWrap);
+  saveBannerEl.appendChild(fields);
+
+  const errEl = document.createElement('div');
+  errEl.className = 'np-save-err';
+  errEl.style.display = 'none';
+  saveBannerEl.appendChild(errEl);
+
+  const actions = document.createElement('div');
+  actions.className = 'np-save-actions';
+
+  const neverBtn = document.createElement('button');
+  neverBtn.type = 'button';
+  neverBtn.className = 'np-save-btn link';
+  neverBtn.textContent = '一律不';
+  neverBtn.addEventListener('click', () => dismissBanner(true));
+
+  const rightGroup = document.createElement('div');
+  rightGroup.className = 'np-save-actions-right';
+
+  const laterBtn = document.createElement('button');
+  laterBtn.type = 'button';
+  laterBtn.className = 'np-save-btn secondary';
+  laterBtn.textContent = '暂不';
+  laterBtn.addEventListener('click', () => dismissBanner(false));
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'np-save-btn primary';
+  saveBtn.textContent = capture.mode === 'update' ? '更新' : '保存';
+  saveBtn.addEventListener('click', () => {
+    void (async () => {
+      saveBtn.disabled = true;
+      saveBtn.textContent = '保存中...';
+      errEl.style.display = 'none';
+      try {
+        const res = (await chrome.runtime.sendMessage({
+          type: 'NONEPWD_CONFIRM_SAVE_CREDENTIAL',
+          captureId: capture.id,
+          username: userInput.value,
+          password: pwInput.value,
+          title: capture.title,
+        })) as { ok: boolean; error?: string; mode?: 'create' | 'update' };
+        if (!res.ok) throw new Error(res.error || '保存失败');
+        if (saveBannerEl) {
+          saveBannerEl.innerHTML = '';
+          const done = document.createElement('div');
+          done.className = 'np-save-done';
+          done.textContent =
+            res.mode === 'update' ? '✓ 已加密更新至 NonePwd' : '✓ 已加密保存至 NonePwd';
+          saveBannerEl.appendChild(done);
+          setTimeout(hideSaveBanner, 1200);
+        }
+      } catch (err) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = capture.mode === 'update' ? '更新' : '保存';
+        errEl.textContent = err instanceof Error ? err.message : String(err);
+        errEl.style.display = 'block';
+      }
+    })();
+  });
+
+  rightGroup.appendChild(laterBtn);
+  rightGroup.appendChild(saveBtn);
+  actions.appendChild(neverBtn);
+  actions.appendChild(rightGroup);
+  saveBannerEl.appendChild(actions);
+  saveBannerEl.style.display = 'block';
+}
+
+async function ensureThemeAndShowBanner(capture: PendingCredentialCapture, unlocked: boolean) {
+  if (
+    activeBannerId === capture.id &&
+    activeBannerUnlocked === unlocked &&
+    saveBannerEl?.style.display === 'block'
+  ) {
+    return;
+  }
+  currentThemePref = await loadThemePreference();
+  ensureShadowUi();
+  syncHostTheme();
+  activeBannerUnlocked = unlocked;
+  renderSaveBanner(capture, unlocked);
+}
+
 function positionOverlays(anchor: FormFieldElement) {
   const rect = anchor.getBoundingClientRect();
-  if (badgeBtn) {
-    const rightOffset = anchor.tagName === 'SELECT' ? 36 : 25;
-    badgeBtn.style.display = 'flex';
-    badgeBtn.style.top = `${Math.max(4, rect.top + (rect.height - 20) / 2)}px`;
-    badgeBtn.style.left = `${Math.max(4, rect.right - rightOffset)}px`;
+  if (badgeWrap) {
+    if (inlineBadgeHidden) {
+      badgeWrap.style.display = 'none';
+    } else {
+      const isPasswordField =
+        anchor instanceof HTMLInputElement &&
+        (anchor.type === 'password' ||
+          currentTarget?.kind === 'password' ||
+          currentTarget?.kind === 'new-password');
+      const baseRightOffset =
+        isPasswordField && rect.width >= 150 ? 50 : anchor.tagName === 'SELECT' ? 38 : 26;
+      const top = Math.max(
+        4,
+        Math.min(window.innerHeight - 26, rect.top + (rect.height - 22) / 2 + badgeDragOffset.y)
+      );
+      const left = Math.max(
+        4,
+        Math.min(window.innerWidth - 26, rect.right - baseRightOffset + badgeDragOffset.x)
+      );
+      badgeWrap.style.display = 'block';
+      badgeWrap.style.top = `${top}px`;
+      badgeWrap.style.left = `${left}px`;
+    }
   }
   if (popoverEl && popoverEl.style.display !== 'none') {
     const popHeight = popoverEl.offsetHeight || 180;
@@ -303,7 +902,7 @@ function hidePopover() {
 
 function hideAllOverlays() {
   hidePopover();
-  if (badgeBtn) badgeBtn.style.display = 'none';
+  if (badgeWrap) badgeWrap.style.display = 'none';
   currentTarget = null;
 }
 
@@ -323,6 +922,7 @@ async function queryBackground(): Promise<TabQueryResponse> {
       identities: [],
       pendingItem: null,
       latestOtpEmail: null,
+      pendingCapture: null,
     };
   }
 }
@@ -629,6 +1229,54 @@ if (typeof document !== 'undefined') {
     syncHostTheme();
   });
 
+  void loadInlineBadgeHidden().then((hidden) => {
+    inlineBadgeHidden = hidden;
+    if (inlineBadgeHidden && badgeWrap) {
+      badgeWrap.style.display = 'none';
+    }
+  });
+
+  if (typeof chrome !== 'undefined' && typeof chrome.runtime?.sendMessage === 'function') {
+    void queryBackground().then((data) => {
+      if (data.pendingCapture) {
+        void ensureThemeAndShowBanner(data.pendingCapture, data.unlocked);
+      }
+    });
+  }
+
+  const trackUsernameField = (evt: Event) => {
+    const el = evt.target;
+    if (!(el instanceof HTMLInputElement)) return;
+    const t = detectInputTarget(el);
+    if (t?.kind === 'username' || t?.kind === 'identity-email') {
+      rememberTypedUsername(el.value);
+    }
+  };
+  document.addEventListener('input', trackUsernameField, true);
+  document.addEventListener('change', trackUsernameField, true);
+
+  document.addEventListener(
+    'submit',
+    (evt) => {
+      const scope = evt.target instanceof HTMLFormElement ? evt.target : document;
+      tryCaptureCredentials(scope);
+    },
+    true
+  );
+
+  document.addEventListener(
+    'click',
+    (evt) => {
+      const targetEl = evt.target instanceof Element ? evt.target : null;
+      const btn = targetEl?.closest('button, input[type="submit"], [role="button"]');
+      if (!btn) return;
+      if ((btn.getAttribute('type') || '').toLowerCase() === 'reset') return;
+      const scope = btn.closest('form') ?? document;
+      tryCaptureCredentials(scope);
+    },
+    true
+  );
+
   document.addEventListener(
     'focusin',
     (evt) => {
@@ -647,6 +1295,12 @@ if (typeof document !== 'undefined') {
         hideAllOverlays();
         return;
       }
+      if (inlineBadgeHidden) {
+        currentTarget = detected;
+        hidePopover();
+        if (badgeWrap) badgeWrap.style.display = 'none';
+        return;
+      }
       void openPopoverForTarget(detected);
     },
     true
@@ -655,6 +1309,10 @@ if (typeof document !== 'undefined') {
   document.addEventListener(
     'keydown',
     (evt) => {
+      if (evt.key === 'Enter' && evt.target instanceof HTMLInputElement) {
+        const scope = evt.target.closest('form') ?? document;
+        tryCaptureCredentials(scope);
+      }
       if (!popoverEl || popoverEl.style.display === 'none' || optionHandlers.length === 0) {
         return;
       }
@@ -716,16 +1374,28 @@ if (typeof window !== 'undefined') {
 
 if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === 'local' && changes[THEME_STORAGE_KEY]) {
+    if (areaName !== 'local') return;
+    if (changes[THEME_STORAGE_KEY]) {
       currentThemePref = normalizeThemePreference(changes[THEME_STORAGE_KEY].newValue);
       syncHostTheme();
+    }
+    if (changes[INLINE_BADGE_HIDDEN_KEY]) {
+      inlineBadgeHidden = Boolean(changes[INLINE_BADGE_HIDDEN_KEY].newValue);
+      if (inlineBadgeHidden) {
+        if (badgeWrap) badgeWrap.style.display = 'none';
+        hidePopover();
+      } else if (currentTarget) {
+        positionOverlays(currentTarget.anchor);
+      }
     }
   });
 }
 
 if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener((msg) => {
-    if (msg?.type === 'NONEPWD_LIVE_OTP' && msg.email) {
+    if (msg?.type === 'NONEPWD_PROMPT_SAVE' && msg.capture) {
+      void ensureThemeAndShowBanner(msg.capture as PendingCredentialCapture, Boolean(msg.unlocked));
+    } else if (msg?.type === 'NONEPWD_LIVE_OTP' && msg.email) {
       liveEmailOverride = msg.email as DecryptedEmailPayload & { id?: string };
       if (currentTarget && (currentTarget.kind === 'otp-single' || currentTarget.kind === 'otp-split')) {
         void openPopoverForTarget(currentTarget);

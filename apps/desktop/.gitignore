@@ -1,5 +1,3 @@
-/build/
-/dist/
-# Keep your upload key out of the repository, and backed up.
-*.jks
-*.keystore
+.build/
+dist/
+.DS_Store

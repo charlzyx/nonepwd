@@ -1,0 +1,28 @@
+{
+  "name": "@nonepwd/cf-server",
+  "version": "0.1.0",
+  "description": "Cloudflare Workers + D1 + R2 + Durable Objects serverless backend for nonepwd zero-knowledge password manager.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "node scripts/prepare-assets.mjs --pre && tsc -p tsconfig.json && node scripts/prepare-assets.mjs --post",
+    "typecheck": "node scripts/prepare-assets.mjs --pre && tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "deploy": "pnpm run build && pnpm exec cf deploy",
+    "db:migrate:remote": "npx wrangler d1 execute nonepwd-db --remote --file=./migrations/0001_init.sql",
+    "db:migrate:local": "npx wrangler d1 execute nonepwd-db --local --file=./migrations/0001_init.sql"
+  },
+  "dependencies": {
+    "@nonepwd/core": "workspace:*",
+    "hono": "^4.7.5",
+    "postal-mime": "^2.4.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250310.0",
+    "cf": "1.0.0-rc.0",
+    "wrangler": "^4.163.0"
+  }
+}
