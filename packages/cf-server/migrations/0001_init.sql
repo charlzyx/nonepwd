@@ -85,3 +85,22 @@ CREATE TABLE IF NOT EXISTS email_filter (
 
 INSERT OR IGNORE INTO email_filter (id, config_json, updated_at)
 VALUES (1, '{"enabled":false,"otpOnly":false,"mode":"allow","rules":[]}', '1970-01-01T00:00:00.000Z');
+
+CREATE TABLE IF NOT EXISTS imap_config (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled INTEGER NOT NULL DEFAULT 0,
+  host TEXT NOT NULL DEFAULT '',
+  port INTEGER NOT NULL DEFAULT 993,
+  tls INTEGER NOT NULL DEFAULT 1,
+  username TEXT NOT NULL DEFAULT '',
+  password_enc TEXT NOT NULL DEFAULT '',
+  last_uid INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'disabled',
+  last_error TEXT,
+  last_sync_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO imap_config (
+  id, enabled, host, port, tls, username, password_enc, last_uid, status, updated_at
+) VALUES (1, 0, '', 993, 1, '', '', 0, 'disabled', '1970-01-01T00:00:00.000Z');

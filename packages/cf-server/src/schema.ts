@@ -74,6 +74,20 @@ const SCHEMA_STATEMENTS = [
     config_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS imap_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled INTEGER NOT NULL DEFAULT 0,
+    host TEXT NOT NULL DEFAULT '',
+    port INTEGER NOT NULL DEFAULT 993,
+    tls INTEGER NOT NULL DEFAULT 1,
+    username TEXT NOT NULL DEFAULT '',
+    password_enc TEXT NOT NULL DEFAULT '',
+    last_uid INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'disabled',
+    last_error TEXT,
+    last_sync_at TEXT,
+    updated_at TEXT NOT NULL
+  )`,
 ];
 
 export async function ensureSchema(db: D1Database): Promise<void> {
@@ -86,6 +100,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   }
 
   const initPromise = (async () => {
+    const now = new Date().toISOString();
     const stmts = SCHEMA_STATEMENTS.map((sql) => db.prepare(sql));
     stmts.push(
       db
@@ -95,8 +110,15 @@ export async function ensureSchema(db: D1Database): Promise<void> {
         )
         .bind(
           '{"enabled":false,"otpOnly":false,"mode":"allow","rules":[]}',
-          new Date().toISOString()
+          now
+        ),
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO imap_config
+           (id, enabled, host, port, tls, username, password_enc, last_uid, status, updated_at)
+           VALUES (1, 0, '', 993, 1, '', '', 0, 'disabled', ?)`
         )
+        .bind(now)
     );
     await db.batch(stmts);
     initializedDbs.add(db);

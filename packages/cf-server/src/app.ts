@@ -27,6 +27,13 @@ import {
   saveEmailFilter,
 } from './email.js';
 import {
+  encryptImapPassword,
+  getImapPublicConfig,
+  getStoredImapPassword,
+  syncImapInbox,
+  testImapConnection,
+} from './imap.js';
+import {
   createEncryptedSnapshot,
   deleteEncryptedSnapshot,
   listEncryptedSnapshots,
@@ -82,6 +89,14 @@ function scheduleAutoBackup(c: Context<{ Bindings: CfServerEnv }>): void {
   if (!c.env.BUCKET) return;
   try {
     c.executionCtx.waitUntil(maybeAutoSnapshot(c.env));
+  } catch {
+    // Unit tests call app.fetch without ExecutionContext
+  }
+}
+
+function scheduleImapSync(c: Context<{ Bindings: CfServerEnv }>): void {
+  try {
+    c.executionCtx.waitUntil(syncImapInbox(c.env));
   } catch {
     // Unit tests call app.fetch without ExecutionContext
   }
@@ -145,20 +160,6 @@ async function queryAliases(db: D1Database) {
   return (res.results ?? []).map((r) => ({ ...r, enabled: Boolean(r.enabled) }));
 }
 
-function getImapPublicStatus() {
-  return {
-    enabled: false,
-    host: '',
-    port: 993,
-    tls: true,
-    username: '',
-    hasPassword: false,
-    status: 'disabled' as const,
-    lastError: null as string | null,
-    cloudflareMode: true,
-  };
-}
-
 export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
   const app = new Hono<{ Bindings: CfServerEnv }>();
 
@@ -200,15 +201,14 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
 
   app.get('/api/auth/params', async (c) => {
     const row = await c.env.DB.prepare(
-      'SELECT email, kdf_salt, kdf_iterations FROM account WHERE id = 1'
-    ).first<{ email: string; kdf_salt: string; kdf_iterations: number }>();
+      'SELECT kdf_salt, kdf_iterations FROM account WHERE id = 1'
+    ).first<{ kdf_salt: string; kdf_iterations: number }>();
 
     if (!row) {
       return c.json({ initialized: false });
     }
     return c.json({
       initialized: true,
-      email: row.email,
       kdfSalt: row.kdf_salt,
       kdfIterations: row.kdf_iterations,
     });
@@ -414,7 +414,7 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       });
     }
 
-    const [account, vaults, itemsRes, aliases, emails, emailFilter] = await Promise.all([
+    const [account, vaults, itemsRes, aliases, emails, emailFilter, imapStatus] = await Promise.all([
       c.env.DB.prepare(
         `SELECT email, encrypted_root_keyset AS encryptedRootKeyset,
                 email_public_key AS emailPublicKey, cf_webhook_secret AS cfWebhookSecret,
@@ -430,7 +430,12 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       queryAliases(c.env.DB),
       queryEmails(c.env, 100),
       getEmailFilter(c.env.DB),
+      getImapPublicConfig(c.env.DB),
     ]);
+
+    if (imapStatus.enabled) {
+      scheduleImapSync(c);
+    }
 
     return c.json({
       kind: 'owner',
@@ -439,7 +444,7 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       items: itemsRes.results ?? [],
       aliases,
       emails,
-      imapStatus: getImapPublicStatus(),
+      imapStatus,
       emailFilter,
       cfRuntime: {
         runtime: 'cloudflare-workers',
@@ -886,6 +891,10 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     const ownerOrRes = await requireOwner(c);
     if (ownerOrRes instanceof Response) return ownerOrRes;
 
+    const imapCfg = await getImapPublicConfig(c.env.DB);
+    if (imapCfg.enabled) {
+      scheduleImapSync(c);
+    }
     const emails = await queryEmails(c.env, 100);
     return c.json({ emails });
   });
@@ -1107,22 +1116,149 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
   app.get('/api/imap', async (c) => {
     const ownerOrRes = await requireOwner(c);
     if (ownerOrRes instanceof Response) return ownerOrRes;
-    return c.json({ imap: getImapPublicStatus() });
+    return c.json({ imap: await getImapPublicConfig(c.env.DB) });
   });
 
   app.put('/api/imap', async (c) => {
     const ownerOrRes = await requireOwner(c);
     if (ownerOrRes instanceof Response) return ownerOrRes;
-    return c.json({ imap: getImapPublicStatus() });
+
+    const body = (await c.req.json()) as {
+      enabled?: boolean;
+      host?: string;
+      port?: number;
+      tls?: boolean;
+      username?: string;
+      password?: string;
+    };
+
+    const existing = await c.env.DB.prepare(
+      'SELECT enabled, host, port, tls, username, password_enc, last_uid FROM imap_config WHERE id = 1'
+    ).first<{
+      enabled: number;
+      host: string;
+      port: number;
+      tls: number;
+      username: string;
+      password_enc: string;
+      last_uid: number;
+    }>();
+
+    const account = await c.env.DB.prepare(
+      'SELECT cf_webhook_secret FROM account WHERE id = 1'
+    ).first<{ cf_webhook_secret: string }>();
+    if (!account) {
+      return c.json({ error: 'Account not initialized' }, 400);
+    }
+
+    const nextEnabled =
+      body.enabled !== undefined ? Boolean(body.enabled) : Boolean(existing?.enabled);
+    const nextHost = body.host !== undefined ? body.host.trim() : existing?.host ?? '';
+    const parsedPort = body.port !== undefined ? Number(body.port) : existing?.port ?? 993;
+    const nextPort =
+      Number.isFinite(parsedPort) && parsedPort >= 1 && parsedPort <= 65535
+        ? Math.floor(parsedPort)
+        : 993;
+    const nextTls = body.tls !== undefined ? Boolean(body.tls) : (existing?.tls ?? 1) === 1;
+    const nextUsername =
+      body.username !== undefined ? body.username.trim() : existing?.username ?? '';
+
+    let nextPasswordEnc = existing?.password_enc ?? '';
+    if (body.password && body.password.length > 0) {
+      nextPasswordEnc = await encryptImapPassword(account.cf_webhook_secret, body.password);
+    }
+
+    const endpointChanged =
+      nextHost !== (existing?.host ?? '') || nextUsername !== (existing?.username ?? '');
+    const nextLastUid = endpointChanged ? 0 : existing?.last_uid ?? 0;
+    const nextStatus = nextEnabled ? 'listening' : 'disabled';
+    const now = new Date().toISOString();
+
+    await c.env.DB.prepare(
+      `UPDATE imap_config
+       SET enabled = ?, host = ?, port = ?, tls = ?, username = ?, password_enc = ?,
+           last_uid = ?, status = ?, last_error = NULL, updated_at = ?
+       WHERE id = 1`
+    )
+      .bind(
+        nextEnabled ? 1 : 0,
+        nextHost,
+        nextPort,
+        nextTls ? 1 : 0,
+        nextUsername,
+        nextPasswordEnc,
+        nextLastUid,
+        nextStatus,
+        now
+      )
+      .run();
+
+    if (nextEnabled && nextHost && nextUsername && nextPasswordEnc) {
+      await syncImapInbox(c.env, { force: true });
+    }
+
+    return c.json({ imap: await getImapPublicConfig(c.env.DB) });
   });
 
   app.post('/api/imap/test', async (c) => {
     const ownerOrRes = await requireOwner(c);
     if (ownerOrRes instanceof Response) return ownerOrRes;
+
+    const body = (await c.req.json().catch(() => ({}))) as {
+      host?: string;
+      port?: number;
+      tls?: boolean;
+      username?: string;
+      password?: string;
+    };
+
+    const existing = await c.env.DB.prepare(
+      'SELECT host, port, tls, username, password_enc FROM imap_config WHERE id = 1'
+    ).first<{
+      host: string;
+      port: number;
+      tls: number;
+      username: string;
+      password_enc: string;
+    }>();
+
+    const host = (body.host ?? existing?.host ?? '').trim();
+    const parsedPort = Number(body.port ?? existing?.port ?? 993);
+    const port =
+      Number.isFinite(parsedPort) && parsedPort >= 1 && parsedPort <= 65535
+        ? Math.floor(parsedPort)
+        : 993;
+    const tls = body.tls ?? (existing?.tls ?? 1) === 1;
+    const username = (body.username ?? existing?.username ?? '').trim();
+
+    let password = body.password ?? '';
+    if (!password && existing?.password_enc) {
+      const account = await c.env.DB.prepare(
+        'SELECT cf_webhook_secret FROM account WHERE id = 1'
+      ).first<{ cf_webhook_secret: string }>();
+      if (account?.cf_webhook_secret) {
+        password = await getStoredImapPassword(c.env.DB, account.cf_webhook_secret);
+      }
+    }
+
+    if (!host || !username || !password) {
+      return c.json({ ok: false, error: '请填写完整的 IMAP 服务器、邮箱账号与授权码' });
+    }
+
+    const result = await testImapConnection({ host, port, tls, username, password });
+    return c.json(result);
+  });
+
+  app.post('/api/imap/sync', async (c) => {
+    const ownerOrRes = await requireOwner(c);
+    if (ownerOrRes instanceof Response) return ownerOrRes;
+
+    const syncRes = await syncImapInbox(c.env, { force: true });
     return c.json({
-      ok: false,
-      error:
-        'Cloudflare Workers 运行时请直接在 Cloudflare Dashboard 将域名 Catch-All Email Routing 绑定到 nonepwd-cf-server，无需配置 IMAP 长连接。',
+      ok: !syncRes.error,
+      synced: syncRes.synced,
+      error: syncRes.error ?? null,
+      imap: await getImapPublicConfig(c.env.DB),
     });
   });
 

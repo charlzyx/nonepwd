@@ -112,6 +112,7 @@ private struct SyncResponse: Decodable {
     let items: [EncryptedItemRecord]
     let aliases: [AliasRecord]?
     let emails: [EncryptedEmailRecord]?
+    let imapStatus: ImapConfigPublic?
     let emailFilter: EmailFilterConfig?
 }
 
@@ -156,6 +157,7 @@ public final class VaultStore: ObservableObject {
     @Published public private(set) var securityIssues: [String: String] = [:]
     @Published public var aliases: [AliasRecord] = []
     @Published public var emails: [DecryptedEmailPayload] = []
+    @Published public var imapConfig: ImapConfigPublic = ImapConfigPublic()
     @Published public var emailFilter: EmailFilterConfig = EmailFilterConfig()
     @Published public var wsConnected = false
     @Published public var isRefreshingEmails = false
@@ -195,6 +197,7 @@ public final class VaultStore: ObservableObject {
     @Published public var editingItem: VaultItemPayload?
     @Published public var showEditor = false
     @Published public var showImportSheet = false
+    @Published public var showImapSheet = false
     @Published public var showEmailFilterSheet = false
     @Published public var showExtensionSheet = false
 
@@ -874,6 +877,7 @@ public final class VaultStore: ObservableObject {
         items = []
         aliases = []
         emails = []
+        imapConfig = ImapConfigPublic()
         totpSnapshot = [:]
         aiEmailExtractions = [:]
         aiExtractingIds = []
@@ -903,6 +907,9 @@ public final class VaultStore: ObservableObject {
             accountEmail = email
         }
         aliasDomain = syncRes.account?.aliasDomain ?? aliasDomain
+        if let imapStatus = syncRes.imapStatus {
+            imapConfig = imapStatus
+        }
         emailFilter = syncRes.emailFilter ?? EmailFilterConfig()
 
         var keyMap: [String: Data] = [:]
@@ -1247,7 +1254,41 @@ public final class VaultStore: ObservableObject {
         )
     }
 
-    // MARK: - Email Filter Settings
+    // MARK: - IMAP & Email Filter Settings
+
+    public func loadImapConfig() async throws {
+        struct ImapResp: Decodable { let imap: ImapConfigPublic }
+        let res: ImapResp = try await apiRequest("/api/imap")
+        imapConfig = res.imap
+    }
+
+    @discardableResult
+    public func saveImapConfig(_ payload: ImapSavePayload) async throws -> ImapConfigPublic {
+        struct ImapResp: Decodable { let imap: ImapConfigPublic }
+        let data = try JSONEncoder().encode(payload)
+        let res: ImapResp = try await apiRequest("/api/imap", method: "PUT", bodyObj: data)
+        imapConfig = res.imap
+        try? await syncAll()
+        return res.imap
+    }
+
+    public func testImapConfig(_ payload: ImapSavePayload) async throws -> ImapTestResponse {
+        let data = try JSONEncoder().encode(payload)
+        return try await apiRequest("/api/imap/test", method: "POST", bodyObj: data)
+    }
+
+    public func triggerImapSync() async {
+        struct ImapSyncResp: Decodable {
+            let ok: Bool
+            let synced: Int?
+            let imap: ImapConfigPublic?
+        }
+        if let res: ImapSyncResp = try? await apiRequest("/api/imap/sync", method: "POST") {
+            if let cfg = res.imap {
+                imapConfig = cfg
+            }
+        }
+    }
 
     public func loadEmailFilter() async throws {
         let res: EmailFilterConfig = try await apiRequest("/api/email-filter")
@@ -1548,6 +1589,9 @@ public final class VaultStore: ObservableObject {
         isRefreshingEmails = true
         defer { isRefreshingEmails = false }
         do {
+            if imapConfig.enabled || forceLatest {
+                await triggerImapSync()
+            }
             try await syncAll()
             if isAIConfigured {
                 for (idx, em) in emails.prefix(5).enumerated() {

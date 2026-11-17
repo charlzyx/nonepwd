@@ -6,6 +6,7 @@ import {
   Cpu,
   Database,
   Download,
+  ExternalLink,
   FolderLock,
   HardDrive,
   KeyRound,
@@ -102,7 +103,7 @@ const BrandMark: React.FC<{ className?: string }> = ({ className = 'size-8' }) =
 );
 
 export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
-  const { phase, knownEmail } = useVault();
+  const { phase } = useVault();
   const { isDark, toggleTheme } = useTheme();
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:8787';
 
@@ -122,10 +123,10 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
     phase === 'standalone'
       ? 'Zero-knowledge · Self-hosted · 0 订阅费'
       : phase === 'uninitialized'
-      ? '本地私有实例已就绪 · 等待初始化'
+      ? '私有实例已就绪 · 等待初始化'
       : phase === 'unlocked'
-      ? `Vault 已解锁 (${knownEmail ?? 'owner'})`
-      : `实例已初始化 (${knownEmail ?? 'locked'}) · 双密钥保护`;
+      ? 'Vault 已解锁 · 双密钥零知识保护'
+      : '私有实例已就绪 · 双密钥零知识保护';
 
   return (
     <div className="min-h-dvh bg-background text-foreground antialiased">
@@ -521,10 +522,22 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
             </div>
 
             <div className="mt-6 rounded-lg border border-border bg-muted/30 p-4">
-              <div className="mb-2.5 flex items-center justify-between gap-3">
-                <span className="font-mono text-xs font-medium text-foreground">
-                  快速部署 packages/cf-server 到自有域名
-                </span>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <a
+                    href="https://deploy.workers.cloudflare.com/?url=https://github.com/charlzyx/nonepwd/tree/main/packages/cf-server"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/85"
+                  >
+                    <Cloud className="size-3.5" />
+                    <span>一键部署到 Cloudflare</span>
+                    <ExternalLink className="size-3" />
+                  </a>
+                  <span className="font-mono text-xs text-muted-foreground">
+                    或手动 CLI 部署 packages/cf-server
+                  </span>
+                </div>
                 <CopyButton
                   value={`pnpm run build:rust && pnpm run build:cf-server
 cd packages/cf-server

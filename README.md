@@ -6,6 +6,10 @@
 - **2FA 动态码（TOTP）+ 闭合 Shadow DOM 浏览器自动填充扩展（含六宫格接力）**；
 - **原生命令行 `np` + Service Account 分库隔离 + 本地 Connect HTTP API**。
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/charlzyx/nonepwd/tree/main/packages/cf-server)
+
+> 点击上方按钮可将 `@nonepwd/cf-server`（Worker + D1 + R2 + Durable Objects）一键部署到你自己的 Cloudflare 账号；部署后绑定自定义域名与 Email Routing Catch-All 即可使用。
+
 ---
 
 ## 核心特性
@@ -154,6 +158,10 @@ docker compose up -d --build
 ### 方式五：Cloudflare Worker + D1 + R2 自有域名无服务器部署（`@nonepwd/cf-server`）
 
 适合拥有自己域名的场景：将静态官网与 Web Vault、`/api/*` 零知识接口、**D1 数据库**、**R2 加密快照与邮件归档**、**Durable Objects (WebSocket Hibernation)** 与 **Cloudflare Email Routing Catch-All** 全部运行在自有域名（如 `https://vault.yourdomain.com`）上：
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/charlzyx/nonepwd/tree/main/packages/cf-server)
+
+> 点击按钮即可自动克隆并创建 Worker + D1 + R2 + Durable Objects；部署完成后在 Cloudflare Dashboard 绑定自定义域名与 Email Routing Catch-All 即可。如需手动 CLI 部署：
 
 ```bash
 # 1. 构建 Rust WASM 与 Cloudflare 全栈产物

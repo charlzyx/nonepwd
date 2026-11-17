@@ -996,3 +996,320 @@ public struct BrowserExtensionSheet: View {
         }
     }
 }
+
+// MARK: - IMAP & Email Routing Configuration Sheet
+
+public struct ImapSettingsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject public var store: VaultStore
+
+    @State private var enabled = false
+    @State private var host = ""
+    @State private var portText = "993"
+    @State private var tls = true
+    @State private var username = ""
+    @State private var password = ""
+    @State private var testing = false
+    @State private var saving = false
+    @State private var testMsg: String?
+    @State private var testSuccess = false
+    @State private var errorMsg: String?
+    @State private var loadedInitial = false
+
+    private let presets: [(label: String, host: String, port: String)] = [
+        ("QQ 邮箱", "imap.qq.com", "993"),
+        ("Gmail", "imap.gmail.com", "993"),
+        ("163 邮箱", "imap.163.com", "993"),
+        ("iCloud", "imap.mail.me.com", "993"),
+        ("Outlook", "outlook.office365.com", "993"),
+    ]
+
+    private var statusBadge: (text: String, color: Color) {
+        switch store.imapConfig.status {
+        case "listening":
+            return ("监听/同步中", Color(red: 0.14, green: 0.62, blue: 0.30))
+        case "connecting":
+            return ("连接中", .orange)
+        case "error":
+            return ("连接异常", .red)
+        default:
+            return ("未启用", .secondary)
+        }
+    }
+
+    public var body: some View {
+        VStack(spacing: 16) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .fill(Color.accentColor.opacity(0.14))
+                        .frame(width: 40, height: 40)
+                    Image(systemName: "tray.full.fill")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(Color.accentColor)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("邮箱收信配置 (IMAP & 域名路由)")
+                        .font(.system(size: 17, weight: .medium))
+                    Text("拉取主力邮箱验证码（需填邮箱授权码，非登录密码）")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(statusBadge.text)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(statusBadge.color)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill(statusBadge.color.opacity(0.12))
+                    )
+            }
+
+            if let errorMsg {
+                Text(errorMsg)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.red.opacity(0.08)))
+            } else if let testMsg {
+                Text(testMsg)
+                    .font(.system(size: 12))
+                    .foregroundStyle(testSuccess ? Color(red: 0.14, green: 0.62, blue: 0.30) : .red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill((testSuccess ? Color.green : Color.red).opacity(0.08))
+                    )
+            } else if let lastErr = store.imapConfig.lastError?.nilIfBlank {
+                Text("最近错误：\(lastErr)")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.red.opacity(0.08)))
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    InsetGroupCard(header: "IMAP 自动收信设置") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Toggle("启用 IMAP 自动收信", isOn: $enabled)
+                                .font(.system(size: 13))
+
+                            HStack(spacing: 6) {
+                                Text("常用预设:")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(.secondary)
+                                ForEach(presets, id: \.label) { preset in
+                                    Button {
+                                        host = preset.host
+                                        portText = preset.port
+                                        tls = true
+                                    } label: {
+                                        Text(preset.label)
+                                            .font(.system(size: 11.5))
+                                            .foregroundStyle(host == preset.host ? Color.accentColor : .primary)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(
+                                                Capsule()
+                                                    .fill(host == preset.host ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.06))
+                                            )
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+
+                            HStack(spacing: 10) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("IMAP 服务器")
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(.secondary)
+                                    BorderlessInputField("imap.qq.com / imap.gmail.com", text: $host, isMonospaced: true)
+                                }
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("端口")
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(.secondary)
+                                    BorderlessInputField("993", text: $portText, isMonospaced: true)
+                                        .frame(width: 84)
+                                }
+                            }
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("邮箱账号")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(.secondary)
+                                BorderlessInputField("you@qq.com / you@gmail.com", text: $username, isMonospaced: true)
+                            }
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text("授权码 / 应用专用密码")
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(.secondary)
+                                    if store.imapConfig.hasPassword {
+                                        Text("· 已加密保存")
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(Color(red: 0.14, green: 0.62, blue: 0.30))
+                                    }
+                                }
+                                BorderlessInputField(
+                                    store.imapConfig.hasPassword ? "已加密保存（留空保持原密码不变）" : "填写邮箱 16 位授权码或 App Password",
+                                    text: $password,
+                                    isSecure: true,
+                                    isMonospaced: true
+                                )
+                            }
+
+                            Toggle("启用 SSL/TLS 加密连接 (端口 993 推荐)", isOn: $tls)
+                                .font(.system(size: 12.5))
+                        }
+                        .padding(14)
+                    }
+
+                    InsetGroupCard(header: "Cloudflare 域名邮箱路由（别名自动收信）") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("• 主力邮箱（QQ / Gmail / 163 / iCloud）通过上方 IMAP 授权码拉取或实时监听收信。")
+                            Text("• 自有域名（当前：\(store.aliasDomain.nilIfBlank ?? "未配置别名域名")）无限随机别名由 Cloudflare Email Routing Catch-All 在边缘直接密封推送。")
+                        }
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                    }
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await runTest() }
+                } label: {
+                    HStack(spacing: 6) {
+                        if testing {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text(testing ? "测试中..." : "测试连接")
+                    }
+                }
+                .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 30, cornerRadius: 8))
+                .disabled(testing || saving || host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                Spacer()
+
+                Button {
+                    dismiss()
+                } label: {
+                    Text("取消")
+                        .frame(minWidth: 46)
+                }
+                .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 30, cornerRadius: 8))
+                .keyboardShortcut(.cancelAction)
+
+                Button {
+                    Task { await save() }
+                } label: {
+                    HStack(spacing: 6) {
+                        if saving {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text(saving ? "保存并同步中..." : "保存并同步")
+                    }
+                }
+                .buttonStyle(ApplePillButtonStyle(isProminent: true, height: 30, cornerRadius: 8))
+                .disabled(testing || saving)
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 20)
+        .frame(width: 540, height: 560)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear {
+            if !loadedInitial {
+                syncDraftFromStore()
+                loadedInitial = true
+            }
+            Task {
+                let prevHost = store.imapConfig.host
+                let prevUser = store.imapConfig.username
+                try? await store.loadImapConfig()
+                if host == prevHost && username == prevUser {
+                    syncDraftFromStore()
+                }
+            }
+        }
+    }
+
+    private func syncDraftFromStore() {
+        let cfg = store.imapConfig
+        enabled = cfg.enabled
+        host = cfg.host
+        portText = String(cfg.port > 0 ? cfg.port : 993)
+        tls = cfg.tls
+        username = cfg.username
+        password = ""
+    }
+
+    private func buildPayload() -> ImapSavePayload {
+        let parsedPort = Int(portText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 993
+        return ImapSavePayload(
+            enabled: enabled,
+            host: host.trimmingCharacters(in: .whitespacesAndNewlines),
+            port: min(65535, max(1, parsedPort)),
+            tls: tls,
+            username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+            password: password.nilIfBlank
+        )
+    }
+
+    private func runTest() async {
+        testing = true
+        errorMsg = nil
+        testMsg = nil
+        defer { testing = false }
+        do {
+            let res = try await store.testImapConfig(buildPayload())
+            if res.ok {
+                testSuccess = true
+                testMsg = "连接成功 · 收件箱共 \(res.messages ?? 0) 封邮件"
+            } else {
+                testSuccess = false
+                testMsg = res.error ?? "IMAP 连接测试失败"
+            }
+        } catch {
+            testSuccess = false
+            errorMsg = error.localizedDescription
+        }
+    }
+
+    private func save() async {
+        saving = true
+        errorMsg = nil
+        testMsg = nil
+        defer { saving = false }
+        do {
+            let cleanHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
+            if enabled && (cleanHost.isEmpty || cleanUser.isEmpty || (!store.imapConfig.hasPassword && password.nilIfBlank == nil)) {
+                errorMsg = "启用 IMAP 收信前请填写完整的服务器、邮箱账号和授权码"
+                return
+            }
+            let updated = try await store.saveImapConfig(buildPayload())
+            if updated.status == "error", let lastErr = updated.lastError?.nilIfBlank {
+                errorMsg = "已保存配置，但同步连接失败：\(lastErr)"
+                return
+            }
+            dismiss()
+        } catch {
+            errorMsg = error.localizedDescription
+        }
+    }
+}

@@ -46,6 +46,9 @@ public struct MainWorkspaceView: View {
         .sheet(isPresented: $store.showEmailFilterSheet) {
             EmailFilterSheet(store: store)
         }
+        .sheet(isPresented: $store.showImapSheet) {
+            ImapSettingsSheet(store: store)
+        }
         .sheet(isPresented: $store.showExtensionSheet) {
             BrowserExtensionSheet(store: store)
         }
@@ -265,6 +268,18 @@ public struct MainWorkspaceView: View {
                         }
 
                         sidebarRow(
+                            title: "邮箱 IMAP 收信",
+                            systemImage: "tray.full.fill",
+                            tint: store.imapConfig.status == "listening"
+                                ? Color(red: 0.14, green: 0.62, blue: 0.30)
+                                : (store.imapConfig.status == "error" ? .red : .secondary),
+                            count: nil,
+                            isSelected: false
+                        ) {
+                            store.showImapSheet = true
+                        }
+
+                        sidebarRow(
                             title: "邮件接收过滤",
                             systemImage: "line.3.horizontal.decrease.circle",
                             tint: .secondary,
@@ -380,6 +395,15 @@ public struct MainWorkspaceView: View {
                             .foregroundStyle(.primary)
                     }
                     .help("邮件接收过滤规则")
+
+                    Button {
+                        store.showImapSheet = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 15.5, weight: .regular))
+                            .foregroundStyle(store.imapConfig.status == "error" ? Color.red : .primary)
+                    }
+                    .help("配置邮箱 IMAP 收信")
                 } else {
                     Menu {
                         Picker("排序方式", selection: $store.sortField) {
@@ -503,6 +527,14 @@ public struct MainWorkspaceView: View {
                             store.showEmailFilterSheet = true
                         } label: {
                             Text("过滤规则")
+                                .padding(.horizontal, 6)
+                        }
+                        .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 32, cornerRadius: 8))
+
+                        Button {
+                            store.showImapSheet = true
+                        } label: {
+                            Text("配置 IMAP 收信")
                                 .padding(.horizontal, 6)
                         }
                         .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 32, cornerRadius: 8))

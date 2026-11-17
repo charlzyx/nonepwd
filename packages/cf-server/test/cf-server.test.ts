@@ -164,6 +164,19 @@ describe('@nonepwd/cf-server', () => {
     expect(account.aliasDomain).toBe('mail.example.com');
 
     // Wrong password rejected; valid login returns new session token
+    const paramsAfterSetup = (await (await api('/api/auth/params')).json()) as {
+      initialized: boolean;
+      email?: string;
+      kdfSalt?: string;
+      kdfIterations?: number;
+    };
+    expect(paramsAfterSetup).toEqual({
+      initialized: true,
+      kdfSalt,
+      kdfIterations: 10_000,
+    });
+    expect(paramsAfterSetup.email).toBeUndefined();
+
     const badLoginRes = await api('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -495,5 +508,57 @@ describe('@nonepwd/cf-server', () => {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(delBackupRes.status).toBe(200);
+
+    // 6. IMAP configuration persistence & encrypted password storage in D1
+    const getImapInitial = await api('/api/imap', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(getImapInitial.status).toBe(200);
+    expect(await getImapInitial.json()).toEqual({
+      imap: {
+        enabled: false,
+        host: '',
+        port: 993,
+        tls: true,
+        username: '',
+        hasPassword: false,
+        status: 'disabled',
+        lastError: null,
+      },
+    });
+
+    const putImapRes = await api('/api/imap', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        enabled: false,
+        host: 'imap.qq.com',
+        port: 993,
+        tls: true,
+        username: 'user@qq.com',
+        password: 'app-password-16chars',
+      }),
+    });
+    expect(putImapRes.status).toBe(200);
+    const putImapJson = (await putImapRes.json()) as {
+      imap: {
+        enabled: boolean;
+        host: string;
+        port: number;
+        tls: boolean;
+        username: string;
+        hasPassword: boolean;
+        status: string;
+      };
+    };
+    expect(putImapJson.imap).toMatchObject({
+      enabled: false,
+      host: 'imap.qq.com',
+      port: 993,
+      tls: true,
+      username: 'user@qq.com',
+      hasPassword: true,
+      status: 'disabled',
+    });
   });
 });

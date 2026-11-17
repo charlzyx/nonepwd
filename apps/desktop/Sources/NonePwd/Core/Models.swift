@@ -489,6 +489,68 @@ public struct EmailFilterConfig: Codable, Equatable, Sendable {
     }
 }
 
+public struct ImapConfigPublic: Codable, Equatable, Sendable {
+    public var enabled: Bool
+    public var host: String
+    public var port: Int
+    public var tls: Bool
+    public var username: String
+    public var hasPassword: Bool
+    public var status: String
+    public var lastError: String?
+
+    public init(
+        enabled: Bool = false,
+        host: String = "",
+        port: Int = 993,
+        tls: Bool = true,
+        username: String = "",
+        hasPassword: Bool = false,
+        status: String = "disabled",
+        lastError: String? = nil
+    ) {
+        self.enabled = enabled
+        self.host = host
+        self.port = port
+        self.tls = tls
+        self.username = username
+        self.hasPassword = hasPassword
+        self.status = status
+        self.lastError = lastError
+    }
+}
+
+public struct ImapSavePayload: Encodable, Sendable {
+    public var enabled: Bool
+    public var host: String
+    public var port: Int
+    public var tls: Bool
+    public var username: String
+    public var password: String?
+
+    public init(
+        enabled: Bool,
+        host: String,
+        port: Int,
+        tls: Bool,
+        username: String,
+        password: String? = nil
+    ) {
+        self.enabled = enabled
+        self.host = host
+        self.port = port
+        self.tls = tls
+        self.username = username
+        self.password = password
+    }
+}
+
+public struct ImapTestResponse: Decodable, Sendable {
+    public let ok: Bool
+    public let messages: Int?
+    public let error: String?
+}
+
 public struct TotpResult: Codable, Equatable, Sendable {
     public let code: String
     public let period: Int

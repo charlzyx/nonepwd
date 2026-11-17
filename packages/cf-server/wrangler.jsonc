@@ -2,10 +2,14 @@
   "name": "nonepwd-cf-server",
   "main": "dist/index.js",
   "compatibility_date": "2025-10-01",
-  "workers_dev": false,
-  "routes": [
-    { "pattern": "vault.yourdomain.com", "custom_domain": true }
-  ],
+  "workers_dev": true,
+  "build": {
+    "command": "pnpm --filter @nonepwd/web build && pnpm run build"
+  },
+  // 部署后可在 Cloudflare Dashboard 绑定自有域名，或取消下方注释启用 custom_domain
+  // "routes": [
+  //   { "pattern": "vault.yourdomain.com", "custom_domain": true }
+  // ],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -15,8 +19,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "nonepwd-db",
-      "database_id": "00000000-0000-0000-0000-000000000000"
+      "database_name": "nonepwd-db"
+      // 使用 Deploy to Cloudflare 会自动创建 D1；手动部署请执行 `npx wrangler d1 create nonepwd-db` 并填入 database_id
     }
   ],
   "r2_buckets": [
