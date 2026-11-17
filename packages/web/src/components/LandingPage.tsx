@@ -1,19 +1,18 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowRight,
-  CheckCircle2,
-  Cloud,
+  ChevronDown,
   Cpu,
   Download,
   ExternalLink,
-  Globe,
   KeyRound,
+  Layers,
   Lock,
   MailCheck,
+  Moon,
   RefreshCw,
   Shield,
-  ShieldCheck,
-  Sparkles,
+  Sun,
   Terminal,
   Zap,
 } from 'lucide-react';
@@ -37,34 +36,34 @@ interface LandingPageProps {
   onOpenVault: () => void;
 }
 
-type LabTab = 'otp' | 'crypto' | 'totp';
+type LabTab = 'otp' | 'crypto' | 'totp' | 'cli';
 type CliTab = 'run' | 'mail' | 'sa' | 'connect';
 
 const OTP_PRESETS = [
   {
     id: 'github',
-    label: 'GitHub HTML 邮件',
+    label: 'GitHub HTML',
     from: 'GitHub <noreply@github.com>',
     subject: '[GitHub] Please verify your device',
     body: `<div style="color:#445566">Your GitHub verification code is:</div>\n<div style="font-size:28px;color:#112233">839204</div>\n<p>Or verify directly: https://github.com/login/verify?token=gh_91a2</p>\n<footer>© 2026 GitHub Inc. Order #998877</footer>`,
   },
   {
     id: 'steam',
-    label: 'Steam 中文验证码',
+    label: 'Steam 中文',
     from: 'Steam <noreply@steampowered.com>',
     subject: '您的 Steam 令牌安全验证码',
     body: '您好，您本次登录的安全验证码为：649-102，5分钟内有效。客服电话 4001234567。',
   },
   {
     id: 'cursor',
-    label: 'Cursor Magic Link',
+    label: 'Magic Link',
     from: 'Cursor <no-reply@cursor.com>',
     subject: 'Sign in to Cursor',
     body: 'Your one-time verification code is 519382.\nMagic link: https://cursor.com/auth/magic?token=cur_demo_881',
   },
   {
     id: 'promo',
-    label: '促销邮件防误判',
+    label: '防误判过滤',
     from: 'Store <promo@store.example.com>',
     subject: 'Spring Sale 2026 - Save $1500 today!',
     body: 'Order #441239 total price $1500 USD. Copyright 2026 Store Inc.',
@@ -104,12 +103,66 @@ curl -H "Authorization: Bearer my-connect-secret" \\
   },
 };
 
+const FAQ_ITEMS = [
+  {
+    q: '服务端真的拿不到我的任何密码或邮件内容吗？',
+    a: '是的。主密码与 Secret Key (NP3-...) 仅在本地浏览器 WASM 或原生 Rust CLI 内存中完成 60 万次 PBKDF2 派生；每条条目再以独立的 256-bit VaultKey + AES-256-GCM 加密，并绑定 AAD(vaultId, itemId)。收到的验证码邮件也会被 X25519 公钥当场密封落库。',
+  },
+  {
+    q: '邮箱验证码和 6 宫格自动填充是怎么串起来的？',
+    a: '主力邮箱走 IMAP IDLE 长连接，自有域名别名走 Cloudflare Email Routing Worker。服务端解析验证码并密封后通过 WebSocket 秒级推送到已解锁的浏览器扩展和 np CLI；多步登录在第 1 步填完账密后，第 2 步会自动弹出 2FA TOTP 或刚收到的 6 位邮箱码一次填满 6 格输入框。',
+  },
+  {
+    q: '浏览器扩展和原生命令行共用一套加密核心吗？',
+    a: '完全同源。核心密码学、RFC 6238 TOTP、邮件验证码清洗与 np:// 引用解析全部由 crates/nonepwd-core 用纯 Rust 编写：同一份代码编译为 nonepwd_core.wasm 驱动 Web 与浏览器插件，同时静态链接产出 macOS arm64 / Linux x86_64 原生 np 单二进制。',
+  },
+  {
+    q: '自建需要重型数据库或外部依赖吗？',
+    a: '不需要。@nonepwd/server 内置 Node SQLite 持久化数据库，一条 npx @nonepwd/server 即可在本机运行，也提供轻量单容器 Docker 镜像（配合 Cloudflare Tunnel 或 Caddy 即可安全接入公网多端同步）。',
+  },
+  {
+    q: '和商业云密码管理器有什么区别？',
+    a: '没有云端账户体系、没有按年订阅费，所有密文、别名策略与邮箱收信通道全部掌握在你自己的设备或服务器上，同时原生补齐了开发者和 AI Agent 最常卡住的「阻塞等待实时邮箱验证码」最后一公里。',
+  },
+];
+
+const BrandMark: React.FC<{ className?: string }> = ({ className = 'size-8' }) => (
+  <span
+    className={`inline-flex shrink-0 items-center justify-center rounded-[6px] bg-primary text-primary-foreground ${className}`}
+    aria-hidden="true"
+  >
+    <svg viewBox="0 0 24 24" className="size-[58%]" fill="none" stroke="currentColor" strokeWidth="2.1">
+      <circle cx="12" cy="9.5" r="3.2" />
+      <path d="M12 12.7v5.3" strokeLinecap="round" />
+      <path d="M12 15.5h2.5" strokeLinecap="round" />
+    </svg>
+  </span>
+);
+
 export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
   const { phase, knownEmail } = useVault();
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:8787';
 
-  // Live Lab State
+  // Sync light/dark theme toggle with documentElement.classList('dark')
+  const [isDark, setIsDark] = useState(() =>
+    typeof document !== 'undefined' ? document.documentElement.classList.contains('dark') : false
+  );
+
+  const toggleTheme = () => {
+    const next = !isDark;
+    setIsDark(next);
+    document.documentElement.classList.toggle('dark', next);
+    try {
+      localStorage.setItem('nonepwd.theme', next ? 'dark' : 'light');
+    } catch {
+      // ignore storage failure
+    }
+  };
+
+  // Workbench Tabs
   const [labTab, setLabTab] = useState<LabTab>('otp');
+  const [cliTab, setCliTab] = useState<CliTab>('run');
+  const [openFaq, setOpenFaq] = useState<number | null>(0);
 
   // Tab 1: Email OTP Live Extractor
   const [otpFrom, setOtpFrom] = useState(OTP_PRESETS[0].from);
@@ -199,923 +252,769 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
     };
   }, [totpSecret]);
 
-  // CLI Tabs
-  const [cliTab, setCliTab] = useState<CliTab>('run');
-
   const primaryCtaLabel =
     phase === 'standalone'
-      ? '私有部署与快速上手'
+      ? '私有部署与上手'
       : phase === 'uninitialized'
-      ? '立即初始化密码库'
+      ? '初始化密码库'
       : phase === 'unlocked'
-      ? '进入已解锁密码库'
-      : '解锁 Web 密码库';
+      ? '进入密码库'
+      : '解锁密码库';
+
+  const statusPillText =
+    phase === 'standalone'
+      ? 'Zero-knowledge · Self-hosted · 0 订阅费'
+      : phase === 'uninitialized'
+      ? '本地私有实例已就绪 · 等待初始化'
+      : phase === 'unlocked'
+      ? `Vault 已解锁 (${knownEmail ?? 'owner'})`
+      : `实例已初始化 (${knownEmail ?? 'locked'}) · 双密钥保护`;
 
   return (
-    <div className="min-h-screen bg-[#0b0e14] text-slate-100">
-      {/* Top Sticky Navbar */}
-      <header className="sticky top-0 z-40 border-b border-slate-800/80 bg-[#0b0e14]/85 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3.5">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-lg shadow-indigo-600/30">
-              <ShieldCheck className="h-5 w-5" />
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-base font-bold tracking-tight text-white">nonepwd</span>
-              <span className="hidden rounded-full border border-indigo-500/35 bg-indigo-500/10 px-2 py-0.5 text-[10px] font-semibold text-indigo-300 sm:inline-block">
-                Self-Hosted · Rust + WASM
-              </span>
-            </div>
-          </div>
+    <div className="min-h-dvh bg-background text-foreground antialiased">
+      <div className="mx-auto w-full max-w-[1100px] border-border/70 md:border-x">
+        {/* Header */}
+        <header className="flex h-16 items-center justify-between px-5 md:px-10">
+          <a href="/" className="flex items-center gap-2.5">
+            <BrandMark className="size-8" />
+            <span className="text-[15px] font-semibold tracking-tight">nonepwd</span>
+          </a>
 
-          <nav className="hidden items-center gap-6 text-xs font-medium text-slate-400 md:flex">
-            <a href="#live-lab" className="transition hover:text-white">
-              实时 WASM 实验室
-            </a>
-            <a href="#extension" className="transition hover:text-white">
-              浏览器插件
-            </a>
-            <a href="#pipeline" className="transition hover:text-white">
-              OTP 全链路
-            </a>
-            <a href="#comparison" className="transition hover:text-white">
-              架构对比
-            </a>
-            <a href="#cli" className="transition hover:text-white">
-              原生 CLI 下载
-            </a>
-            <a href="#deploy" className="transition hover:text-white">
-              Docker 自建
-            </a>
-          </nav>
+          <div className="flex items-center gap-4">
+            <nav className="hidden items-center gap-5 text-[13px] text-muted-foreground sm:flex">
+              <a href="#live-lab" className="transition-colors hover:text-foreground">
+                WASM 实验室
+              </a>
+              <a href="/demo-login" className="transition-colors hover:text-foreground">
+                6 宫格沙盒
+              </a>
+              <a
+                href="/downloads/nonepwd-extension.zip"
+                download="nonepwd-extension.zip"
+                className="transition-colors hover:text-foreground"
+              >
+                浏览器插件
+              </a>
+            </nav>
 
-          <div className="flex items-center gap-2.5">
-            <a
-              href="/demo-login"
-              className="hidden rounded-xl border border-slate-800 bg-[#121622] px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-indigo-500/40 hover:text-white sm:inline-flex"
+            <button
+              type="button"
+              onClick={toggleTheme}
+              aria-label="切换明暗主题"
+              className="inline-flex size-7 items-center justify-center rounded-md border border-border/70 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
-              6 宫格沙盒
-            </a>
+              {isDark ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
+            </button>
+
             <button
               type="button"
               onClick={onOpenVault}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-2 text-xs font-semibold text-white shadow-md shadow-indigo-600/25 transition hover:bg-indigo-500"
+              className="inline-flex h-7 items-center gap-1 rounded-[8px] bg-primary px-2.5 text-[0.8rem] font-medium text-primary-foreground transition-colors hover:bg-primary/85"
             >
               <span>{primaryCtaLabel}</span>
-              <ArrowRight className="h-3.5 w-3.5" />
             </button>
           </div>
-        </div>
-      </header>
+        </header>
 
-      {/* Hero Section */}
-      <section className="relative overflow-hidden border-b border-slate-800/80 bg-[radial-gradient(ellipse_at_top,_rgba(99,102,241,0.2),_#0b0e14_65%)]">
-        <div className="mx-auto max-w-6xl px-6 pb-16 pt-16 sm:pt-24">
-          <div className="mx-auto max-w-3xl text-center">
-            <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-indigo-500/35 bg-indigo-500/10 px-3.5 py-1 text-xs font-medium text-indigo-200">
-              <span
-                className={`h-2 w-2 rounded-full ${
-                  phase === 'unlocked' || phase === 'standalone'
-                    ? 'bg-emerald-400'
-                    : phase === 'locked'
-                    ? 'bg-amber-400'
-                    : 'bg-indigo-400'
-                }`}
-              />
-              <span>
-                {phase === 'standalone'
-                  ? '零知识自建密码库官网 · 浏览器端 Rust WASM 实时运行中'
-                  : phase === 'uninitialized'
-                  ? '单人私有化自建实例已就绪 · 等待初始化'
-                  : phase === 'unlocked'
-                  ? `密码库已解锁 (${knownEmail ?? 'owner'})`
-                  : `实例已初始化 (${knownEmail ?? 'locked'}) · 双密钥零知识保护`}
+        <main>
+          {/* Left-aligned Hero Section */}
+          <section className="px-5 pt-14 pb-14 md:px-10 md:pt-24">
+            <div className="mb-7 inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
+              <span className="flex size-3.5 items-center justify-center rounded-[3px] bg-foreground text-[10px] font-bold text-background">
+                N
               </span>
+              <span>{statusPillText}</span>
             </div>
 
-            <h1 className="text-4xl font-bold tracking-tight text-white sm:text-5xl sm:leading-[1.15]">
-              nonepwd：密码归自己，
-              <span className="bg-gradient-to-r from-indigo-300 via-sky-300 to-emerald-300 bg-clip-text text-transparent">
-                告别云端托管与年费订阅。
-              </span>
+            <h1 className="max-w-4xl text-4xl font-semibold tracking-[-0.03em] text-balance md:text-[3.35rem] md:leading-[1.06]">
+              一个私有实例，接管你的全部密码与验证码。
             </h1>
 
-            <p className="mt-5 text-base leading-relaxed text-slate-300 sm:text-lg">
-              单人私有化自建零知识 Vault：双密钥（<code className="rounded bg-slate-800/80 px-1.5 py-0.5 font-mono text-sm text-indigo-200">NP3-...</code>）+ 实时邮箱验证码自动提取（IMAP IDLE &amp; Cloudflare Worker）+ 2FA TOTP
-              + 浏览器 MV3 自动填充插件 + 原生跨平台 Rust <code className="rounded bg-slate-800/80 px-1.5 py-0.5 font-mono text-sm text-indigo-200">np</code> CLI。
+            <p className="mt-5 max-w-[38rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
+              双密钥零知识加密（<code className="font-mono text-[15px] text-foreground">NP3-...</code>）、实时邮箱验证码提取、2FA
+              动态口令、MV3 浏览器自动填充与原生 Rust <code className="font-mono text-[15px] text-foreground">np</code> CLI —
+              完全运行在你自己的机器上。
             </p>
 
-            <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+            <div className="mt-8 flex flex-wrap items-center gap-x-3.5 gap-y-3">
               <button
                 type="button"
                 onClick={onOpenVault}
-                className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-600/30 transition hover:bg-indigo-500"
+                className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/85"
               >
-                <ShieldCheck className="h-4.5 w-4.5" />
                 <span>{primaryCtaLabel}</span>
-                <ArrowRight className="h-4 w-4" />
+                <ArrowRight className="size-4" />
               </button>
 
               <a
-                href="/demo-login"
-                className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-[#121622] px-5 py-3 text-sm font-medium text-slate-200 transition hover:border-indigo-500/50 hover:text-white"
+                href="/downloads/nonepwd-extension.zip"
+                download="nonepwd-extension.zip"
+                className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-4 text-sm font-medium text-foreground transition-colors hover:bg-muted/60"
               >
-                <KeyRound className="h-4 w-4 text-indigo-400" />
-                <span>体验多步登录与 6 宫格沙盒</span>
+                <Download className="size-4" />
+                <span>下载浏览器插件</span>
               </a>
-            </div>
 
-            {/* Quick Install Pill */}
-            <div className="mx-auto mt-8 flex max-w-xl items-center justify-between gap-3 rounded-2xl border border-slate-800 bg-[#10141f]/90 px-4 py-2.5 text-left shadow-xl">
-              <div className="flex min-w-0 items-center gap-2.5">
-                <Terminal className="h-4 w-4 shrink-0 text-emerald-400" />
-                <code className="truncate font-mono text-xs text-slate-200">
-                  curl -fsSL {origin}/install.sh | bash
-                </code>
-              </div>
-              <CopyButton value={`curl -fsSL ${origin}/install.sh | bash`} label="复制安装命令" />
-            </div>
-          </div>
-
-          {/* 4 Core Pillars */}
-          <div className="mt-14 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded-2xl border border-slate-800/90 bg-[#121622]/80 p-5">
-              <Lock className="mb-3 h-5 w-5 text-indigo-400" />
-              <h3 className="text-sm font-semibold text-white">双密钥零知识加密</h3>
-              <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
-                Master Password + Secret Key (<code className="text-slate-300">NP3-...</code>) 本地 PBKDF2 60万次派生，Per-Vault 密钥 + AAD 绑定。
-              </p>
-            </div>
-            <div className="rounded-2xl border border-slate-800/90 bg-[#121622]/80 p-5">
-              <MailCheck className="mb-3 h-5 w-5 text-emerald-400" />
-              <h3 className="text-sm font-semibold text-white">邮箱验证码 + 域名别名</h3>
-              <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
-                IMAP IDLE 长连接 + Cloudflare Worker 无限随机别名，X25519 公钥密封后通过 WebSocket 秒级推送。
-              </p>
-            </div>
-            <div className="rounded-2xl border border-slate-800/90 bg-[#121622]/80 p-5">
-              <Zap className="mb-3 h-5 w-5 text-amber-400" />
-              <h3 className="text-sm font-semibold text-white">Shadow DOM 六宫格接力</h3>
-              <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
-                MV3 扩展识别分步登录流，第 1 步填充账密后，第 2 步自动弹出 TOTP 与实时邮箱码填入 6 格输入框。
-              </p>
-            </div>
-            <div className="rounded-2xl border border-slate-800/90 bg-[#121622]/80 p-5">
-              <Cpu className="mb-3 h-5 w-5 text-sky-400" />
-              <h3 className="text-sm font-semibold text-white">纯 Rust 五端同源核心</h3>
-              <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
-                <code className="text-slate-300">nonepwd-core</code> 编译为 WASM 驱动全栈，同时产出 macOS 与 Linux 静态单二进制 <code className="text-slate-300">np</code>。
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Interactive Rust WASM Live Lab */}
-      <section id="live-lab" className="border-b border-slate-800/80 py-16">
-        <div className="mx-auto max-w-6xl px-6">
-          <div className="mb-8 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-            <div>
-              <div className="mb-2 inline-flex items-center gap-1.5 rounded-full bg-indigo-500/15 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-300">
-                <Sparkles className="h-3.5 w-3.5" />
-                <span>真实运行于你当前浏览器的 nonepwd_core.wasm</span>
-              </div>
-              <h2 className="text-2xl font-bold text-white sm:text-3xl">Rust WASM 实时交互实验室</h2>
-              <p className="mt-1.5 text-sm text-slate-400">
-                无需注册即可现场测试邮箱验证码提取、零知识密文结构与 RFC 6238 动态 2FA 生成。
-              </p>
-            </div>
-
-            <div className="inline-flex rounded-xl border border-slate-800 bg-[#121622] p-1">
-              <button
-                type="button"
-                onClick={() => setLabTab('otp')}
-                className={`rounded-lg px-3.5 py-1.5 text-xs font-medium transition ${
-                  labTab === 'otp' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                邮箱验证码提取
-              </button>
-              <button
-                type="button"
-                onClick={() => setLabTab('crypto')}
-                className={`rounded-lg px-3.5 py-1.5 text-xs font-medium transition ${
-                  labTab === 'crypto' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                零知识密文透视
-              </button>
-              <button
-                type="button"
-                onClick={() => setLabTab('totp')}
-                className={`rounded-lg px-3.5 py-1.5 text-xs font-medium transition ${
-                  labTab === 'totp' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                2FA 与别名生成
-              </button>
-            </div>
-          </div>
-
-          {labTab === 'otp' && (
-            <div className="grid grid-cols-1 gap-6 rounded-2xl border border-slate-800 bg-[#121622] p-6 lg:grid-cols-12">
-              <div className="space-y-3 lg:col-span-7">
-                <div className="flex flex-wrap gap-2">
-                  {OTP_PRESETS.map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => {
-                        setOtpFrom(p.from);
-                        setOtpSubject(p.subject);
-                        setOtpBody(p.body);
-                      }}
-                      className="rounded-lg border border-slate-700/80 bg-[#0b0e14] px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:border-indigo-500/60 hover:text-white"
-                    >
-                      {p.label}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div>
-                    <label className="mb-1 block text-[11px] font-medium text-slate-400">
-                      发件人 From
-                    </label>
-                    <input
-                      type="text"
-                      value={otpFrom}
-                      onChange={(e) => setOtpFrom(e.target.value)}
-                      className="w-full rounded-xl border border-slate-700 bg-[#0b0e14] px-3 py-2 text-xs text-white outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-[11px] font-medium text-slate-400">
-                      邮件主题 Subject
-                    </label>
-                    <input
-                      type="text"
-                      value={otpSubject}
-                      onChange={(e) => setOtpSubject(e.target.value)}
-                      className="w-full rounded-xl border border-slate-700 bg-[#0b0e14] px-3 py-2 text-xs text-white outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="mb-1 block text-[11px] font-medium text-slate-400">
-                    邮件正文（支持纯文本或完整 HTML，实时调用 Rust <code className="text-indigo-300">extract_email_otp</code>）
-                  </label>
-                  <textarea
-                    rows={5}
-                    value={otpBody}
-                    onChange={(e) => setOtpBody(e.target.value)}
-                    className="w-full rounded-xl border border-slate-700 bg-[#0b0e14] px-3.5 py-2.5 font-mono text-xs leading-relaxed text-slate-200 outline-none focus:border-indigo-500"
-                  />
-                </div>
-              </div>
-
-              <div className="flex flex-col justify-between rounded-2xl border border-slate-800 bg-[#0b0e14] p-5 lg:col-span-5">
-                <div>
-                  <div className="mb-4 flex items-center justify-between text-xs">
-                    <span className="font-semibold text-slate-300">WASM 实时提取结果</span>
-                    <span className="rounded-full bg-indigo-500/15 px-2.5 py-0.5 font-mono text-[11px] text-indigo-300">
-                      {otpResult.senderDomain || 'unknown'}
-                    </span>
-                  </div>
-
-                  {otpResult.otpCode ? (
-                    <div className="rounded-xl border border-emerald-500/35 bg-emerald-500/10 p-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-medium text-emerald-300">
-                          提取验证码 · 置信度 {Math.round(otpResult.confidence * 100)}%
-                        </span>
-                        <CopyButton value={otpResult.otpCode} label="复制" />
-                      </div>
-                      <div
-                        data-testid="lab-otp-code"
-                        className="mt-2 font-mono text-3xl font-bold tracking-[0.2em] text-white"
-                      >
-                        {otpResult.otpCode}
-                      </div>
-                    </div>
-                  ) : (
-                    <div
-                      data-testid="lab-otp-empty"
-                      className="rounded-xl border border-slate-700 bg-slate-900/70 p-4 text-xs text-slate-300"
-                    >
-                      未检测到高置信度验证码（已自动过滤年份、金额、订单号与 CSS 十六进制色值）。
-                    </div>
-                  )}
-
-                  {otpResult.magicLink && (
-                    <div className="mt-3 rounded-xl border border-slate-800 bg-[#121622] p-3">
-                      <div className="text-[11px] text-slate-400">识别到登录确认链接 (Magic Link)</div>
-                      <div className="mt-1 flex items-center gap-1.5 truncate font-mono text-xs text-indigo-300">
-                        <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-                        <span className="truncate">{otpResult.magicLink}</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div className="mt-4 border-t border-slate-800 pt-3">
-                  <div className="text-[11px] font-medium text-slate-500">HTML 清洗后摘要</div>
-                  <p className="mt-1 line-clamp-3 text-xs leading-relaxed text-slate-400">
-                    {otpResult.snippet || '(空)'}
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {labTab === 'crypto' && (
-            <div className="grid grid-cols-1 gap-6 rounded-2xl border border-slate-800 bg-[#121622] p-6 lg:grid-cols-2">
-              <div className="space-y-4">
-                <div>
-                  <label className="mb-1.5 block text-xs font-medium text-slate-300">
-                    输入任意测试明文（仅在本地 WASM 内存加密）
-                  </label>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={secretInput}
-                      onChange={(e) => setSecretInput(e.target.value)}
-                      className="flex-1 rounded-xl border border-slate-700 bg-[#0b0e14] px-3.5 py-2.5 font-mono text-xs text-white outline-none focus:border-indigo-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setCryptoSeed((n) => n + 1)}
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-indigo-500"
-                    >
-                      <RefreshCw className="h-3.5 w-3.5" />
-                      重新密封
-                    </button>
-                  </div>
-                </div>
-
-                <div className="rounded-xl border border-slate-800 bg-[#0b0e14] p-4 text-xs leading-relaxed text-slate-400">
-                  <div className="mb-1.5 font-semibold text-slate-200">零知识落库原则</div>
-                  <ul className="list-disc space-y-1 pl-4">
-                    <li>
-                      Vault 条目使用随机 256-bit <code className="text-indigo-300">VaultKey</code> +{' '}
-                      <code className="text-indigo-300">AES-256-GCM</code> 加密，并绑定{' '}
-                      <code className="text-indigo-300">AAD(vaultId, itemId)</code> 防止跨库密文调包。
-                    </li>
-                    <li>
-                      收到的验证码邮件由服务端或 Cloudflare 边缘 Worker 用你的{' '}
-                      <code className="text-emerald-300">X25519</code> 公钥当场密封，服务端无法查看历史邮件。
-                    </li>
-                  </ul>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <div className="rounded-xl border border-slate-800 bg-[#0b0e14] p-4">
-                  <div className="mb-1.5 flex items-center justify-between text-[11px] font-semibold text-indigo-300">
-                    <span>SQLite 存储形态：items.encrypted_data (AES-256-GCM + AAD)</span>
-                    {cryptoPreview && <CopyButton value={cryptoPreview.vaultBlob} />}
-                  </div>
-                  <code
-                    data-testid="lab-vault-blob"
-                    className="block break-all font-mono text-[11px] text-slate-300"
-                  >
-                    {cryptoPreview?.vaultBlob ?? '计算中...'}
-                  </code>
-                </div>
-
-                <div className="rounded-xl border border-slate-800 bg-[#0b0e14] p-4">
-                  <div className="mb-1.5 flex items-center justify-between text-[11px] font-semibold text-emerald-300">
-                    <span>邮件密封盒：encrypted_emails.sealed_envelope (X25519 + HKDF)</span>
-                  </div>
-                  <pre className="overflow-x-auto font-mono text-[11px] text-slate-300">
-                    {cryptoPreview
-                      ? JSON.stringify(cryptoPreview.sealedEnvelope, null, 2)
-                      : '计算中...'}
-                  </pre>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {labTab === 'totp' && (
-            <div className="grid grid-cols-1 gap-6 rounded-2xl border border-slate-800 bg-[#121622] p-6 lg:grid-cols-2">
-              {/* Live TOTP */}
-              <div className="flex flex-col justify-between rounded-xl border border-slate-800 bg-[#0b0e14] p-5">
-                <div>
-                  <label className="mb-1.5 block text-xs font-medium text-slate-300">
-                    Base32 2FA 密钥或 otpauth:// URI
-                  </label>
-                  <input
-                    type="text"
-                    value={totpSecret}
-                    onChange={(e) => setTotpSecret(e.target.value)}
-                    className="w-full rounded-xl border border-slate-700 bg-[#121622] px-3 py-2 font-mono text-xs text-white outline-none focus:border-indigo-500"
-                  />
-                </div>
-
-                <div className="mt-6 flex items-center justify-between rounded-2xl border border-indigo-500/30 bg-indigo-500/10 p-5">
-                  <div className="flex items-center gap-4">
-                    <svg className="h-12 w-12 -rotate-90" viewBox="0 0 36 36">
-                      <circle
-                        cx="18"
-                        cy="18"
-                        r="15"
-                        fill="none"
-                        stroke="rgba(148,163,184,0.2)"
-                        strokeWidth="3"
-                      />
-                      <circle
-                        cx="18"
-                        cy="18"
-                        r="15"
-                        fill="none"
-                        stroke={(totpLive?.remainingSeconds ?? 30) <= 5 ? '#f43f5e' : '#6366f1'}
-                        strokeWidth="3"
-                        strokeDasharray="94.25"
-                        strokeDashoffset={
-                          totpLive
-                            ? 94.25 * (1 - totpLive.remainingSeconds / Math.max(1, totpLive.period))
-                            : 0
-                        }
-                        strokeLinecap="round"
-                      />
-                    </svg>
-                    <div>
-                      <div className="text-xs text-indigo-200">
-                        RFC 6238 动态码 · 剩余 {totpLive?.remainingSeconds ?? '-'}s
-                      </div>
-                      <div
-                        data-testid="lab-totp-code"
-                        className="mt-1 font-mono text-3xl font-bold tracking-widest text-white"
-                      >
-                        {totpLive
-                          ? `${totpLive.code.slice(0, 3)} ${totpLive.code.slice(3)}`
-                          : '无效密钥'}
-                      </div>
-                    </div>
-                  </div>
-                  {totpLive && <CopyButton value={totpLive.code} label="复制" />}
-                </div>
-              </div>
-
-              {/* Password / Passphrase / Alias Generator */}
-              <div className="space-y-3 rounded-xl border border-slate-800 bg-[#0b0e14] p-5">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-white">强密码 & 站点别名生成器</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSamplePassword(generatePassword({ length: 20 }));
-                      setSamplePhrase(generatePassphrase({ words: 4 }));
-                      try {
-                        setSampleAlias(generateEmailAlias(aliasSite, aliasDomainInput));
-                      } catch {
-                        // ignore invalid domain while typing
-                      }
-                    }}
-                    className="inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-500"
-                  >
-                    <RefreshCw className="h-3 w-3" /> 换一批
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <input
-                    type="text"
-                    value={aliasSite}
-                    onChange={(e) => {
-                      setAliasSite(e.target.value);
-                      try {
-                        setSampleAlias(generateEmailAlias(e.target.value, aliasDomainInput));
-                      } catch {
-                        // ignore
-                      }
-                    }}
-                    placeholder="目标网站"
-                    className="rounded-lg border border-slate-700 bg-[#121622] px-2.5 py-1.5 text-xs text-white outline-none"
-                  />
-                  <input
-                    type="text"
-                    value={aliasDomainInput}
-                    onChange={(e) => {
-                      setAliasDomainInput(e.target.value);
-                      try {
-                        setSampleAlias(generateEmailAlias(aliasSite, e.target.value));
-                      } catch {
-                        // ignore
-                      }
-                    }}
-                    placeholder="你的域名"
-                    className="rounded-lg border border-slate-700 bg-[#121622] px-2.5 py-1.5 text-xs text-white outline-none"
-                  />
-                </div>
-
-                <div className="space-y-2 text-xs">
-                  <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-[#121622] px-3 py-2">
-                    <div className="min-w-0">
-                      <div className="text-[10px] text-slate-500">随机 20 位高熵密码</div>
-                      <div className="truncate font-mono text-indigo-200">{samplePassword}</div>
-                    </div>
-                    <CopyButton value={samplePassword} />
-                  </div>
-                  <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-[#121622] px-3 py-2">
-                    <div className="min-w-0">
-                      <div className="text-[10px] text-slate-500">4 词易记助记词短语</div>
-                      <div className="truncate font-mono text-slate-200">{samplePhrase}</div>
-                    </div>
-                    <CopyButton value={samplePhrase} />
-                  </div>
-                  <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-[#121622] px-3 py-2">
-                    <div className="min-w-0">
-                      <div className="text-[10px] text-slate-500">域名防追踪邮箱别名</div>
-                      <div className="truncate font-mono text-emerald-300">{sampleAlias}</div>
-                    </div>
-                    <CopyButton value={sampleAlias} />
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      </section>
-
-      {/* Full-Chain Architecture */}
-      <section id="pipeline" className="border-b border-slate-800/80 bg-[#0d111a] py-16">
-        <div className="mx-auto max-w-6xl px-6">
-          <div className="mb-10 max-w-2xl">
-            <h2 className="text-2xl font-bold text-white sm:text-3xl">从「收到邮件」到「六宫格自动填入」，不到 1 秒</h2>
-            <p className="mt-2 text-sm text-slate-400">
-              告别切窗口、翻收件箱、复制粘贴 6 位数字。全链路端到端加密，哪怕自建服务器被攻破也无法回溯你的历史邮件。
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
-            {[
-              {
-                step: '01',
-                icon: <Cloud className="h-5 w-5 text-sky-400" />,
-                title: '双通道毫秒收信',
-                desc: '主力邮箱走 IMAP IDLE 长连接；自有域名别名走 Cloudflare Email Routing Worker（支持一键屏蔽垃圾别名）。',
-              },
-              {
-                step: '02',
-                icon: <Shield className="h-5 w-5 text-indigo-400" />,
-                title: 'X25519 公钥密封',
-                desc: '提取验证码与 Magic Link 后立即用你的 X25519 公钥密封落库；启用边缘加密模式时服务器全程零明文。',
-              },
-              {
-                step: '03',
-                icon: <Zap className="h-5 w-5 text-amber-400" />,
-                title: 'WebSocket 实时推送',
-                desc: '服务端通过 /api/ws 推送加密信封到已解锁的浏览器插件、Web Vault 与阻塞等待中的 np CLI。',
-              },
-              {
-                step: '04',
-                icon: <CheckCircle2 className="h-5 w-5 text-emerald-400" />,
-                title: '状态接力自动填',
-                desc: '第 1 步填充账密后插件记住目标账号，第 2 步自动匹配 TOTP 或最新邮箱验证码一键填满 6 宫格。',
-              },
-            ].map((card) => (
-              <div
-                key={card.step}
-                className="relative rounded-2xl border border-slate-800 bg-[#121622] p-5"
-              >
-                <div className="mb-4 flex items-center justify-between">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#0b0e14] ring-1 ring-slate-800">
-                    {card.icon}
-                  </div>
-                  <span className="font-mono text-xs font-bold text-slate-600">{card.step}</span>
-                </div>
-                <h3 className="text-sm font-semibold text-white">{card.title}</h3>
-                <p className="mt-2 text-xs leading-relaxed text-slate-400">{card.desc}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Browser Extension Showcase */}
-      <section id="extension" className="border-b border-slate-800/80 bg-[#0e121c] py-16">
-        <div className="mx-auto max-w-6xl px-6">
-          <div className="grid grid-cols-1 items-start gap-8 lg:grid-cols-12">
-            <div className="space-y-5 lg:col-span-6">
-              <div className="inline-flex items-center gap-1.5 rounded-full bg-indigo-500/15 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-300">
-                <Globe className="h-3.5 w-3.5" />
-                <span>Chrome · Arc · Edge · Brave MV3 扩展</span>
-              </div>
-              <h2 className="text-2xl font-bold text-white sm:text-3xl">
-                浏览器自动填充插件（含六宫格接力）
-              </h2>
-              <p className="text-sm leading-relaxed text-slate-300">
-                内置同源 <code className="text-indigo-300">nonepwd_core.wasm</code> 的 Manifest V3 扩展：在闭合 Shadow DOM 浮窗中安全隔离填充账号密码、TOTP 2FA、实时 WebSocket 推送的邮箱验证码，支持注册页一键生成别名邮箱与 20 位强密码。
-              </p>
-
-              <div className="flex flex-wrap gap-3 pt-1">
-                <a
-                  href="/downloads/nonepwd-extension.zip"
-                  download="nonepwd-extension.zip"
-                  className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-xs font-semibold text-white shadow-lg shadow-indigo-600/25 transition hover:bg-indigo-500"
-                >
-                  <Download className="h-4 w-4" />
-                  <span>下载浏览器插件包 (nonepwd-extension.zip)</span>
-                </a>
-                <a
-                  href="/demo-login"
-                  className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-[#121622] px-4 py-2.5 text-xs font-medium text-slate-200 transition hover:border-indigo-500/50 hover:text-white"
-                >
-                  <KeyRound className="h-3.5 w-3.5 text-indigo-400" />
-                  <span>体验插件自动填充沙盒</span>
-                </a>
-              </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-[#0b0e14] p-4 text-xs text-slate-300">
-                <div className="mb-2 font-semibold text-white">3 步本地加载扩展程序：</div>
-                <ol className="list-decimal space-y-1.5 pl-4 text-slate-400">
-                  <li>
-                    点击上方下载 <code className="text-indigo-300">nonepwd-extension.zip</code> 并解压（源码构建目录同样位于{' '}
-                    <code className="text-slate-200">packages/extension/dist</code>）。
-                  </li>
-                  <li>
-                    在浏览器地址栏打开 <code className="text-slate-200">chrome://extensions</code>，开启右上角{' '}
-                    <strong className="text-slate-200">开发者模式 (Developer mode)</strong>。
-                  </li>
-                  <li>
-                    点击 <strong className="text-slate-200">加载已解压的扩展程序</strong> 选择解压文件夹即可启用（图标解锁后通过 WebSocket 与服务端保持同步）。
-                  </li>
-                </ol>
+              <div className="inline-flex h-10 items-center gap-2.5 rounded-lg border border-border bg-muted/40 px-3 font-mono text-xs text-muted-foreground">
+                <span>npx @nonepwd/server</span>
+                <CopyButton value="npx @nonepwd/server" variant="minimal" />
               </div>
             </div>
 
-            <div className="space-y-3 lg:col-span-6">
-              <div className="rounded-2xl border border-slate-800 bg-[#121622] p-5">
-                <div className="flex items-start gap-3.5">
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-indigo-500/15 text-indigo-400">
-                    <Shield className="h-4.5 w-4.5" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-semibold text-white">
-                      闭合 Shadow DOM 内联浮窗（<code className="font-mono text-xs text-indigo-300">data-nonepwd-overlay</code>）
-                    </h3>
-                    <p className="mt-1 text-xs leading-relaxed text-slate-400">
-                      样式与事件完全隔离于宿主网页，免疫 CSS 污染与页面脚本窃取，支持键盘 <code className="text-slate-300">↑ ↓ Enter</code> 极速选取并触发 React/Vue 受控表单事件。
-                    </p>
-                  </div>
-                </div>
+            <div className="mt-16">
+              <div className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground/80 uppercase">
+                Built on one pure-Rust core across every surface
               </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-[#121622] p-5">
-                <div className="flex items-start gap-3.5">
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-400">
-                    <Zap className="h-4.5 w-4.5" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-semibold text-white">多步登录接力 + 6 宫格一次性填入</h3>
-                    <p className="mt-1 text-xs leading-relaxed text-slate-400">
-                      第 1 步填充账号密码后自动记录当前 Tab 关联条目；进入第 2 步验证页时，优先呈现对应 2FA TOTP 与刚通过 WebSocket 推送的邮箱验证码，一键填满 6 个独立方框。
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-[#121622] p-5">
-                <div className="flex items-start gap-3.5">
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-400">
-                    <MailCheck className="h-4.5 w-4.5" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-semibold text-white">注册页强密码 + 独立别名自动入库</h3>
-                    <p className="mt-1 text-xs leading-relaxed text-slate-400">
-                      识别 <code className="text-slate-300">autocomplete="new-password"</code> 注册输入框，一键申请当前域名专属 Masked Email 并生成 20 位高熵密码，自动加密保存至 Vault。
-                    </p>
-                  </div>
-                </div>
+              <div className="mt-4 flex flex-wrap items-center gap-x-7 gap-y-2.5 font-mono text-xs text-muted-foreground">
+                <span>Rust + WASM</span>
+                <span>AES-256-GCM</span>
+                <span>X25519 Sealed Box</span>
+                <span>Chrome / Arc / Edge MV3</span>
+                <span>IMAP IDLE</span>
+                <span>Cloudflare Workers</span>
+                <span>macOS &amp; Linux CLI</span>
               </div>
             </div>
-          </div>
-        </div>
-      </section>
+          </section>
 
-      {/* Comparison Matrix */}
-      <section id="comparison" className="border-b border-slate-800/80 py-16">
-        <div className="mx-auto max-w-6xl px-6">
-          <div className="mb-8">
-            <h2 className="text-2xl font-bold text-white sm:text-3xl">为什么自建 nonepwd？</h2>
-            <p className="mt-1.5 text-sm text-slate-400">
-              把双密钥零知识加密、开发者友好的 CLI/Connect 生态与实时邮箱验证码自动化，彻底整合进你自己的免费单容器服务。
-            </p>
-          </div>
-
-          <div className="overflow-x-auto rounded-2xl border border-slate-800 bg-[#121622]">
-            <table className="w-full min-w-[640px] border-collapse text-left text-xs">
-              <thead>
-                <tr className="border-b border-slate-800 bg-[#0d111a] text-slate-400">
-                  <th className="px-5 py-3.5 font-semibold">核心能力维度</th>
-                  <th className="px-5 py-3.5 font-semibold text-indigo-300">nonepwd (本项目)</th>
-                  <th className="px-5 py-3.5 font-semibold">传统商业云密码库</th>
-                  <th className="px-5 py-3.5 font-semibold">常规开源自建方案</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/70">
-                {[
-                  ['私有化自建与零订阅费', '单容器 + 内置 SQLite，永久 0 订阅费', '闭源云托管，按年付费', '支持自建'],
-                  ['双密钥架构 (Master + Secret Key)', '原生 NP3-... 双密钥 + 60万次 PBKDF2', '双密钥体系', '多数仅单主密码派生'],
-                  ['邮箱验证码提取 + 6 宫格自动填充', 'IMAP IDLE + CF Worker + 实时推送', '无内置邮件码通道', '无'],
-                  ['无限域名别名 + 一键拉黑防骚扰', '原生内置（不依赖第三方付费）', '需绑定付费邮箱服务', '需接第三方 Relay'],
-                  ['多步登录 2FA / 邮箱码接力', 'Shadow DOM 浮窗自动接力', '基础多步填充', '需频繁手动切菜单'],
-                  ['CLI / Connect API + 等待邮件码', '原生 Rust `np` + `np mail otp --wait`', '不支持阻塞等邮件码', '无内置实时邮箱等待'],
-                  ['核心引擎技术', '纯 Rust 同一代码库编译 WASM + Native', '闭源客户端实现', '前后端独立实现'],
-                ].map(([dim, npVal, cloudVal, ossVal]) => (
-                  <tr key={dim} className="hover:bg-slate-800/25">
-                    <td className="px-5 py-3.5 font-medium text-slate-200">{dim}</td>
-                    <td className="px-5 py-3.5 font-medium text-emerald-300">{npVal}</td>
-                    <td className="px-5 py-3.5 text-slate-400">{cloudVal}</td>
-                    <td className="px-5 py-3.5 text-slate-400">{ossVal}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      {/* Native np CLI & Binary Downloads */}
-      <section id="cli" className="border-b border-slate-800/80 bg-[#0d111a] py-16">
-        <div className="mx-auto max-w-6xl px-6">
-          <div className="grid grid-cols-1 gap-8 lg:grid-cols-12">
-            <div className="space-y-5 lg:col-span-5">
-              <div className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-300">
-                <Terminal className="h-3.5 w-3.5" />
-                <span>原生 Rust 单二进制 · 零 Node / 零 OpenSSL 依赖</span>
+          {/* Flush Interactive Workbench Showcase */}
+          <section id="live-lab" className="border-t border-border/70">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/70 bg-muted/30 px-5 py-3 md:px-10">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1.5" aria-hidden="true">
+                  <span className="size-2.5 rounded-full bg-foreground/15" />
+                  <span className="size-2.5 rounded-full bg-foreground/15" />
+                  <span className="size-2.5 rounded-full bg-foreground/15" />
+                </div>
+                <span className="font-mono text-xs text-muted-foreground">
+                  nonepwd_core.wasm · 本地浏览器实时运行中
+                </span>
               </div>
-              <h2 className="text-2xl font-bold text-white sm:text-3xl">为开发者而生的 `np` CLI</h2>
-              <p className="text-sm leading-relaxed text-slate-400">
-                现代命令行密钥体验：环境变量零落盘、Service Account 分库隔离、本地 Connect REST API，还能直接阻塞等待邮箱验证码，为 E2E 测试和 AI Agent 补齐登录最后一公里。
-              </p>
 
-              {/* Real Downloads / Standalone CLI Install */}
-              {phase === 'standalone' ? (
-                <div className="space-y-2.5 pt-2">
-                  <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-700/80 bg-[#121622] px-4 py-3">
-                    <div className="min-w-0">
-                      <div className="text-xs font-semibold text-white">一键安装脚本 (macOS / Linux)</div>
-                      <code className="block truncate font-mono text-[11px] text-indigo-300">
-                        curl -fsSL {origin}/install.sh | bash
-                      </code>
-                    </div>
-                    <CopyButton value={`curl -fsSL ${origin}/install.sh | bash`} label="复制" />
-                  </div>
-
-                  <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-700/80 bg-[#121622] px-4 py-3">
-                    <div className="min-w-0">
-                      <div className="text-xs font-semibold text-white">npm 全局安装 (@nonepwd/cli)</div>
-                      <code className="block truncate font-mono text-[11px] text-emerald-300">
-                        npm install -g @nonepwd/cli
-                      </code>
-                    </div>
-                    <CopyButton value="npm install -g @nonepwd/cli" label="复制" />
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-2.5 pt-2">
-                  <a
-                    href="/downloads/np-darwin-arm64"
-                    download="np-darwin-arm64"
-                    className="flex items-center justify-between rounded-xl border border-slate-700/80 bg-[#121622] px-4 py-3 transition hover:border-indigo-500/60"
-                  >
-                    <div>
-                      <div className="text-xs font-semibold text-white">macOS (Apple Silicon arm64)</div>
-                      <div className="text-[11px] text-slate-400">Mach-O 64-bit 原生可执行文件 · np-darwin-arm64</div>
-                    </div>
-                    <Download className="h-4 w-4 text-indigo-400" />
-                  </a>
-
-                  <a
-                    href="/downloads/np-linux-x86_64"
-                    download="np-linux-x86_64"
-                    className="flex items-center justify-between rounded-xl border border-slate-700/80 bg-[#121622] px-4 py-3 transition hover:border-emerald-500/60"
-                  >
-                    <div>
-                      <div className="text-xs font-semibold text-white">Linux (x86_64 musl 静态二进制)</div>
-                      <div className="text-[11px] text-slate-400">静态链接 ELF · np-linux-x86_64，Ubuntu / Alpine 拷贝即用</div>
-                    </div>
-                    <Download className="h-4 w-4 text-emerald-400" />
-                  </a>
-                </div>
-              )}
-            </div>
-
-            <div className="rounded-2xl border border-slate-800 bg-[#121622] p-5 lg:col-span-7">
-              <div className="mb-4 flex flex-wrap gap-1.5 border-b border-slate-800 pb-3">
+              <div className="inline-flex flex-wrap items-center gap-1 rounded-lg border border-border bg-background p-0.5">
                 {(
                   [
-                    ['run', 'np run 注入'],
-                    ['mail', 'np mail otp 等待码'],
-                    ['sa', 'Service Account'],
-                    ['connect', 'Connect HTTP API'],
+                    ['otp', '邮箱验证码提取'],
+                    ['crypto', '零知识密文'],
+                    ['totp', '2FA 与别名'],
+                    ['cli', 'np CLI'],
                   ] as const
                 ).map(([key, label]) => (
                   <button
                     key={key}
                     type="button"
-                    onClick={() => setCliTab(key)}
-                    className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                      cliTab === key
-                        ? 'bg-indigo-600 text-white'
-                        : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                    onClick={() => setLabTab(key)}
+                    className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                      labTab === key
+                        ? 'bg-primary text-primary-foreground'
+                        : 'text-muted-foreground hover:text-foreground'
                     }`}
                   >
                     {label}
                   </button>
                 ))}
               </div>
-
-              <div className="mb-2 flex items-center justify-between">
-                <span className="text-xs font-medium text-slate-300">
-                  {CLI_EXAMPLES[cliTab].title}
-                </span>
-                <CopyButton value={CLI_EXAMPLES[cliTab].cmd} label="复制脚本" />
-              </div>
-
-              <pre className="overflow-x-auto rounded-xl border border-slate-800 bg-[#0b0e14] p-4 font-mono text-xs leading-relaxed text-indigo-100">
-                {CLI_EXAMPLES[cliTab].cmd}
-              </pre>
             </div>
-          </div>
-        </div>
-      </section>
 
-      {/* Self-Hosting Deploy Section */}
-      <section id="deploy" className="py-16">
-        <div className="mx-auto max-w-6xl px-6">
-          <div className="rounded-3xl border border-indigo-500/30 bg-gradient-to-br from-indigo-950/40 via-[#121622] to-[#0d111a] p-8 sm:p-10">
-            <div className="grid grid-cols-1 items-center gap-8 lg:grid-cols-12">
-              <div className="lg:col-span-6">
-                <h2 className="text-2xl font-bold text-white sm:text-3xl">30 秒私有化部署</h2>
-                <p className="mt-2.5 text-sm leading-relaxed text-slate-300">
-                  单容器自带内置 SQLite 持久化数据库、Web 管理台、WebSocket 推送、IMAP IDLE 守护与 Cloudflare Webhook 接口。配合 Cloudflare Tunnel 或 Caddy 即可安全接入公网。
-                </p>
-                <div className="mt-6 flex flex-wrap gap-3">
+            {labTab === 'otp' && (
+              <div className="grid grid-cols-1 gap-px bg-border/70 lg:grid-cols-12">
+                <div className="space-y-4 bg-background p-5 md:p-8 lg:col-span-7">
+                  <div className="flex flex-wrap gap-1.5">
+                    {OTP_PRESETS.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => {
+                          setOtpFrom(p.from);
+                          setOtpSubject(p.subject);
+                          setOtpBody(p.body);
+                        }}
+                        className="rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className="mb-1.5 block font-mono text-[11px] text-muted-foreground uppercase">
+                        From
+                      </label>
+                      <input
+                        type="text"
+                        value={otpFrom}
+                        onChange={(e) => setOtpFrom(e.target.value)}
+                        className="w-full rounded-md border border-input bg-muted/25 px-3 py-2 font-mono text-xs text-foreground outline-none focus:border-ring"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block font-mono text-[11px] text-muted-foreground uppercase">
+                        Subject
+                      </label>
+                      <input
+                        type="text"
+                        value={otpSubject}
+                        onChange={(e) => setOtpSubject(e.target.value)}
+                        className="w-full rounded-md border border-input bg-muted/25 px-3 py-2 font-mono text-xs text-foreground outline-none focus:border-ring"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="mb-1.5 block font-mono text-[11px] text-muted-foreground uppercase">
+                      Body · <span className="normal-case">extract_email_otp(mime)</span>
+                    </label>
+                    <textarea
+                      rows={5}
+                      value={otpBody}
+                      onChange={(e) => setOtpBody(e.target.value)}
+                      className="w-full rounded-md border border-input bg-muted/25 px-3 py-2.5 font-mono text-xs leading-relaxed text-foreground outline-none focus:border-ring"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex flex-col justify-between bg-background p-5 md:p-8 lg:col-span-5">
+                  <div>
+                    <div className="mb-4 flex items-center justify-between">
+                      <span className="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+                        Extraction Output
+                      </span>
+                      <span className="rounded border border-border px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
+                        {otpResult.senderDomain || 'unknown'}
+                      </span>
+                    </div>
+
+                    {otpResult.otpCode ? (
+                      <div className="rounded-lg border border-border bg-muted/30 p-4">
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono text-xs text-muted-foreground">
+                            OTP · 置信度 {Math.round(otpResult.confidence * 100)}%
+                          </span>
+                          <CopyButton value={otpResult.otpCode} label="复制" variant="minimal" />
+                        </div>
+                        <div
+                          data-testid="lab-otp-code"
+                          className="mt-2 font-mono text-3xl font-semibold tracking-[0.2em] text-foreground"
+                        >
+                          {otpResult.otpCode}
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        data-testid="lab-otp-empty"
+                        className="rounded-lg border border-border bg-muted/25 p-4 text-xs leading-relaxed text-muted-foreground"
+                      >
+                        未检测到高置信度验证码（已自动过滤年份、金额、订单号与 CSS 十六进制色值）。
+                      </div>
+                    )}
+
+                    {otpResult.magicLink && (
+                      <div className="mt-3 rounded-lg border border-border bg-muted/20 p-3">
+                        <div className="font-mono text-[11px] text-muted-foreground uppercase">
+                          Magic Link
+                        </div>
+                        <div className="mt-1 flex items-center gap-1.5 truncate font-mono text-xs text-foreground">
+                          <ExternalLink className="size-3.5 shrink-0 text-muted-foreground" />
+                          <span className="truncate">{otpResult.magicLink}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-6 border-t border-border/70 pt-4">
+                    <div className="font-mono text-[11px] text-muted-foreground uppercase">
+                      Sanitized Snippet
+                    </div>
+                    <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-muted-foreground">
+                      {otpResult.snippet || '(空)'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {labTab === 'crypto' && (
+              <div className="grid grid-cols-1 gap-px bg-border/70 lg:grid-cols-2">
+                <div className="space-y-4 bg-background p-5 md:p-8">
+                  <div>
+                    <label className="mb-1.5 block font-mono text-[11px] text-muted-foreground uppercase">
+                      测试明文（仅在当前浏览器 WASM 内存加密）
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={secretInput}
+                        onChange={(e) => setSecretInput(e.target.value)}
+                        className="flex-1 rounded-md border border-input bg-muted/25 px-3 py-2 font-mono text-xs text-foreground outline-none focus:border-ring"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setCryptoSeed((n) => n + 1)}
+                        className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/85"
+                      >
+                        <RefreshCw className="size-3.5" />
+                        <span>重新密封</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 rounded-lg border border-border bg-muted/20 p-4 text-xs leading-relaxed text-muted-foreground">
+                    <div className="font-medium text-foreground">零知识落库原则</div>
+                    <p>
+                      Vault 条目使用随机 256-bit <code className="text-foreground">VaultKey</code> +{' '}
+                      <code className="text-foreground">AES-256-GCM</code> 加密，绑定{' '}
+                      <code className="text-foreground">AAD(vaultId, itemId)</code> 防止跨库密文调包。
+                    </p>
+                    <p>
+                      邮件验证码进入服务端或 Cloudflare 边缘 Worker 时，立刻使用你的{' '}
+                      <code className="text-foreground">X25519</code> 公钥密封。
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-3 bg-background p-5 md:p-8">
+                  <div className="rounded-lg border border-border bg-muted/25 p-4">
+                    <div className="mb-1.5 flex items-center justify-between font-mono text-[11px] text-muted-foreground">
+                      <span>SQLite · items.encrypted_data</span>
+                      {cryptoPreview && <CopyButton value={cryptoPreview.vaultBlob} variant="minimal" />}
+                    </div>
+                    <code
+                      data-testid="lab-vault-blob"
+                      className="block break-all font-mono text-[11px] text-foreground"
+                    >
+                      {cryptoPreview?.vaultBlob ?? '计算中...'}
+                    </code>
+                  </div>
+
+                  <div className="rounded-lg border border-border bg-muted/25 p-4">
+                    <div className="mb-1.5 font-mono text-[11px] text-muted-foreground">
+                      SQLite · encrypted_emails.sealed_envelope (X25519 + HKDF)
+                    </div>
+                    <pre className="overflow-x-auto font-mono text-[11px] text-foreground">
+                      {cryptoPreview
+                        ? JSON.stringify(cryptoPreview.sealedEnvelope, null, 2)
+                        : '计算中...'}
+                    </pre>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {labTab === 'totp' && (
+              <div className="grid grid-cols-1 gap-px bg-border/70 lg:grid-cols-2">
+                <div className="flex flex-col justify-between bg-background p-5 md:p-8">
+                  <div>
+                    <label className="mb-1.5 block font-mono text-[11px] text-muted-foreground uppercase">
+                      Base32 2FA Secret / otpauth:// URI
+                    </label>
+                    <input
+                      type="text"
+                      value={totpSecret}
+                      onChange={(e) => setTotpSecret(e.target.value)}
+                      className="w-full rounded-md border border-input bg-muted/25 px-3 py-2 font-mono text-xs text-foreground outline-none focus:border-ring"
+                    />
+                  </div>
+
+                  <div className="mt-6 flex items-center justify-between rounded-lg border border-border bg-muted/30 p-5">
+                    <div className="flex items-center gap-4">
+                      <svg className="size-11 -rotate-90" viewBox="0 0 36 36">
+                        <circle
+                          cx="18"
+                          cy="18"
+                          r="15"
+                          fill="none"
+                          stroke="currentColor"
+                          className="text-border"
+                          strokeWidth="3"
+                        />
+                        <circle
+                          cx="18"
+                          cy="18"
+                          r="15"
+                          fill="none"
+                          stroke="currentColor"
+                          className="text-foreground transition-all"
+                          strokeWidth="3"
+                          strokeDasharray="94.25"
+                          strokeDashoffset={
+                            totpLive
+                              ? 94.25 * (1 - totpLive.remainingSeconds / Math.max(1, totpLive.period))
+                              : 0
+                          }
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                      <div>
+                        <div className="font-mono text-[11px] text-muted-foreground">
+                          RFC 6238 TOTP · {totpLive?.remainingSeconds ?? '-'}s
+                        </div>
+                        <div
+                          data-testid="lab-totp-code"
+                          className="mt-1 font-mono text-3xl font-semibold tracking-widest text-foreground"
+                        >
+                          {totpLive
+                            ? `${totpLive.code.slice(0, 3)} ${totpLive.code.slice(3)}`
+                            : '无效密钥'}
+                        </div>
+                      </div>
+                    </div>
+                    {totpLive && <CopyButton value={totpLive.code} label="复制" variant="minimal" />}
+                  </div>
+                </div>
+
+                <div className="space-y-3 bg-background p-5 md:p-8">
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono text-[11px] text-muted-foreground uppercase">
+                      Password &amp; Alias Generator
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSamplePassword(generatePassword({ length: 20 }));
+                        setSamplePhrase(generatePassphrase({ words: 4 }));
+                        try {
+                          setSampleAlias(generateEmailAlias(aliasSite, aliasDomainInput));
+                        } catch {
+                          // ignore invalid domain while typing
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground hover:bg-muted"
+                    >
+                      <RefreshCw className="size-3" /> 换一批
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      value={aliasSite}
+                      onChange={(e) => {
+                        setAliasSite(e.target.value);
+                        try {
+                          setSampleAlias(generateEmailAlias(e.target.value, aliasDomainInput));
+                        } catch {
+                          // ignore
+                        }
+                      }}
+                      placeholder="目标网站"
+                      className="rounded-md border border-input bg-muted/25 px-2.5 py-1.5 font-mono text-xs text-foreground outline-none focus:border-ring"
+                    />
+                    <input
+                      type="text"
+                      value={aliasDomainInput}
+                      onChange={(e) => {
+                        setAliasDomainInput(e.target.value);
+                        try {
+                          setSampleAlias(generateEmailAlias(aliasSite, e.target.value));
+                        } catch {
+                          // ignore
+                        }
+                      }}
+                      placeholder="你的域名"
+                      className="rounded-md border border-input bg-muted/25 px-2.5 py-1.5 font-mono text-xs text-foreground outline-none focus:border-ring"
+                    />
+                  </div>
+
+                  <div className="space-y-2 text-xs">
+                    {[
+                      ['20 位高熵密码', samplePassword],
+                      ['4 词助记词', samplePhrase],
+                      ['域名防追踪别名', sampleAlias],
+                    ].map(([label, val]) => (
+                      <div
+                        key={label}
+                        className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/20 px-3 py-2"
+                      >
+                        <div className="min-w-0">
+                          <div className="font-mono text-[10px] text-muted-foreground">{label}</div>
+                          <div className="truncate font-mono text-foreground">{val}</div>
+                        </div>
+                        <CopyButton value={val} variant="minimal" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {labTab === 'cli' && (
+              <div className="grid grid-cols-1 gap-px bg-border/70 lg:grid-cols-12">
+                <div className="space-y-2 bg-background p-5 md:p-8 lg:col-span-5">
+                  <div className="mb-3 font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+                    Native Rust `np` CLI
+                  </div>
+                  {(
+                    [
+                      ['run', 'np run 零落盘注入'],
+                      ['mail', 'np mail otp 阻塞等待'],
+                      ['sa', 'Service Account 隔离'],
+                      ['connect', 'Connect HTTP API'],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setCliTab(key)}
+                      className={`flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-xs font-medium transition-colors ${
+                        cliTab === key
+                          ? 'border-foreground bg-primary text-primary-foreground'
+                          : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground'
+                      }`}
+                    >
+                      <span>{label}</span>
+                      <ArrowRight className="size-3.5" />
+                    </button>
+                  ))}
+                </div>
+
+                <div className="bg-background p-5 md:p-8 lg:col-span-7">
+                  <div className="mb-3 flex items-center justify-between">
+                    <span className="text-xs font-medium text-muted-foreground">
+                      {CLI_EXAMPLES[cliTab].title}
+                    </span>
+                    <CopyButton value={CLI_EXAMPLES[cliTab].cmd} label="复制" variant="minimal" />
+                  </div>
+                  <pre className="overflow-x-auto rounded-lg border border-border bg-muted/30 p-4 font-mono text-xs leading-relaxed text-foreground">
+                    {CLI_EXAMPLES[cliTab].cmd}
+                  </pre>
+                </div>
+              </div>
+            )}
+          </section>
+
+          {/* 6-Cell Hairline Feature Grid (Waku Style) */}
+          <section id="pipeline" className="border-t border-border/70">
+            <div className="px-5 pt-14 md:px-10">
+              <div className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground/80 uppercase">
+                Why self-hosted
+              </div>
+            </div>
+
+            <div className="mt-8 grid grid-cols-1 gap-px border-t border-border/70 bg-border/70 sm:grid-cols-2 lg:grid-cols-3">
+              {[
+                {
+                  icon: Lock,
+                  title: '双密钥零知识加密',
+                  desc: 'Master Password + Secret Key (NP3-...) 本地 60 万次 PBKDF2 派生，Per-Vault 独立密钥与 AAD 绑定，数据库失窃也不泄露明文。',
+                },
+                {
+                  icon: MailCheck,
+                  title: '邮箱验证码秒级提取',
+                  desc: '主力邮箱走 IMAP IDLE 长连接，自有域名走 Cloudflare Email Routing；X25519 公钥当场密封并通过 WebSocket 实时推送。',
+                },
+                {
+                  icon: Zap,
+                  title: '闭合 Shadow DOM 六宫格接力',
+                  desc: 'MV3 扩展隔离宿主网页 CSS 与脚本。第 1 步填入账密后记住目标条目，第 2 步自动弹出 2FA 与最新邮箱码一键填满 6 格输入框。',
+                },
+                {
+                  icon: Terminal,
+                  title: '原生跨平台 np 命令行',
+                  desc: '支持 np run 环境变量零落盘注入、Service Account 分库授权、Connect HTTP API，以及 np mail otp --wait 为脚本与 Agent 等码。',
+                },
+                {
+                  icon: Shield,
+                  title: '无限域名邮箱别名',
+                  desc: '注册页聚焦输入框一键为当前站点派生专属 Masked Email 与 20 位强密码，并支持按别名一键拒收骚扰邮件。',
+                },
+                {
+                  icon: Layers,
+                  title: '单文件轻量化自建',
+                  desc: '纯 Rust 核心（nonepwd-core）驱动全端 + 内置 Node SQLite 持久化。一条 npx @nonepwd/server 即可跑起来，永久 0 订阅费。',
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div key={item.title} className="bg-background p-6 md:p-8">
+                    <div className="flex items-center gap-2.5">
+                      <Icon className="size-4 text-muted-foreground" />
+                      <h3 className="text-sm font-medium text-foreground">{item.title}</h3>
+                    </div>
+                    <p className="mt-2.5 text-sm leading-relaxed text-muted-foreground">
+                      {item.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          {/* 3-Step Installation & Downloads */}
+          <section id="deploy" className="border-t border-border/70 px-5 py-16 md:px-10 md:py-20">
+            <div className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground/80 uppercase">
+              Get nonepwd
+            </div>
+            <h2 className="mt-3 text-2xl font-semibold tracking-tight">三步跑通你的私有密码库</h2>
+
+            <div className="mt-8 grid grid-cols-1 gap-px border border-border/70 bg-border/70 lg:grid-cols-3">
+              {/* 01 Server */}
+              <div className="flex flex-col justify-between bg-background p-6">
+                <div>
+                  <div className="flex items-center justify-between font-mono text-xs text-muted-foreground">
+                    <span>01 / SERVER</span>
+                    <Cpu className="size-4" />
+                  </div>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">启动私有零知识服务端</h3>
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    免克隆零配置启动本地 SQLite 服务端，也支持 Docker Compose 部署配合隧道接入公网。
+                  </p>
+                </div>
+
+                <div className="mt-5 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 font-mono text-xs text-foreground">
+                    <span className="truncate">npx @nonepwd/server</span>
+                    <CopyButton value="npx @nonepwd/server" variant="minimal" />
+                  </div>
                   <button
                     type="button"
                     onClick={onOpenVault}
-                    className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-indigo-500"
+                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/85"
                   >
                     <span>{primaryCtaLabel}</span>
-                    <ArrowRight className="h-3.5 w-3.5" />
+                    <ArrowRight className="size-3.5" />
                   </button>
+                </div>
+              </div>
+
+              {/* 02 Browser Extension */}
+              <div id="extension" className="flex flex-col justify-between bg-background p-6">
+                <div>
+                  <div className="flex items-center justify-between font-mono text-xs text-muted-foreground">
+                    <span>02 / EXTENSION</span>
+                    <KeyRound className="size-4" />
+                  </div>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">加载 Chrome / Arc MV3 插件</h3>
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    下载插件包并解压，打开 <code className="text-foreground">chrome://extensions</code>{' '}
+                    开启开发者模式后选择解压文件夹即可。
+                  </p>
+                </div>
+
+                <div className="mt-5 space-y-2">
+                  <a
+                    href="/downloads/nonepwd-extension.zip"
+                    download="nonepwd-extension.zip"
+                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground hover:bg-muted/60"
+                  >
+                    <Download className="size-3.5" />
+                    <span>下载 nonepwd-extension.zip</span>
+                  </a>
                   <a
                     href="/demo-login"
-                    className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-[#0b0e14] px-4 py-2.5 text-xs font-medium text-slate-200 hover:border-indigo-500/50"
+                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-border/70 bg-muted/25 px-3 py-2 text-xs text-muted-foreground hover:text-foreground"
                   >
-                    体验自动填充沙盒
+                    <span>打开 6 宫格自动填充沙盒</span>
+                    <ArrowRight className="size-3.5" />
                   </a>
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-slate-800 bg-[#0b0e14] p-4 lg:col-span-6">
-                <div className="mb-2 flex items-center justify-between text-xs text-slate-400">
-                  <span>npm 一键启动 / Docker 常驻部署</span>
-                  <CopyButton value="npx @nonepwd/server" label="复制" />
+              {/* 03 Native CLI */}
+              <div id="cli" className="flex flex-col justify-between bg-background p-6">
+                <div>
+                  <div className="flex items-center justify-between font-mono text-xs text-muted-foreground">
+                    <span>03 / CLI</span>
+                    <Terminal className="size-4" />
+                  </div>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">安装原生 np 命令行</h3>
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    macOS 与 Linux 通用命令，支持加密会话登录、注入环境变量与实时接收邮件验证码。
+                  </p>
                 </div>
-                <pre className="overflow-x-auto font-mono text-xs leading-relaxed text-slate-200">{`# 方式 1：免克隆零配置直接启动本地私有 Vault（推荐快速体验）
-npx @nonepwd/server
-# 浏览器访问 http://127.0.0.1:8787/vault 初始化并保存 NP3-... Secret Key
 
-# 方式 2：全局安装 CLI 与服务端
-npm install -g @nonepwd/cli @nonepwd/server
+                <div className="mt-5 space-y-2">
+                  <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 font-mono text-xs text-foreground">
+                    <span className="truncate">curl -fsSL {origin}/install.sh | bash</span>
+                    <CopyButton value={`curl -fsSL ${origin}/install.sh | bash`} variant="minimal" />
+                  </div>
 
-# 方式 3：Docker Compose 常驻部署
-docker compose up -d --build
-
-# 命令行一键安装跨平台原生 Rust np CLI：
-curl -fsSL ${origin}/install.sh | bash`}</pre>
+                  {phase === 'standalone' ? (
+                    <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 font-mono text-xs text-foreground">
+                      <span className="truncate">npm install -g @nonepwd/cli</span>
+                      <CopyButton value="npm install -g @nonepwd/cli" variant="minimal" />
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-2">
+                      <a
+                        href="/downloads/np-darwin-arm64"
+                        download="np-darwin-arm64"
+                        className="inline-flex items-center justify-center gap-1 rounded-md border border-border px-2.5 py-2 font-mono text-[11px] text-foreground hover:bg-muted/60"
+                      >
+                        <Download className="size-3" />
+                        <span>macOS</span>
+                      </a>
+                      <a
+                        href="/downloads/np-linux-x86_64"
+                        download="np-linux-x86_64"
+                        className="inline-flex items-center justify-center gap-1 rounded-md border border-border px-2.5 py-2 font-mono text-[11px] text-foreground hover:bg-muted/60"
+                      >
+                        <Download className="size-3" />
+                        <span>Linux</span>
+                      </a>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
-        </div>
-      </section>
+          </section>
 
-      {/* Footer */}
-      <footer className="border-t border-slate-800/80 py-8 text-center text-xs text-slate-500">
-        <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 px-6 sm:flex-row">
+          {/* Minimal Accordion FAQ (Waku Style) */}
+          <section className="border-t border-border/70 px-5 py-16 md:px-10">
+            <div className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground/80 uppercase">
+              Questions
+            </div>
+
+            <div className="mt-6 flex w-full max-w-2xl flex-col">
+              {FAQ_ITEMS.map((item, idx) => {
+                const opened = openFaq === idx;
+                return (
+                  <div key={item.q} className="border-b border-border/70 last:border-b-0">
+                    <h3>
+                      <button
+                        type="button"
+                        aria-expanded={opened}
+                        onClick={() => setOpenFaq(opened ? null : idx)}
+                        className="flex w-full items-center justify-between gap-4 py-3.5 text-left text-[15px] font-medium text-foreground transition-colors hover:underline"
+                      >
+                        <span>{item.q}</span>
+                        <ChevronDown
+                          className={`size-4 shrink-0 text-muted-foreground transition-transform ${
+                            opened ? 'rotate-180' : ''
+                          }`}
+                        />
+                      </button>
+                    </h3>
+                    {opened && (
+                      <p className="pb-4 text-sm leading-relaxed text-muted-foreground">{item.a}</p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        </main>
+
+        {/* Footer */}
+        <footer className="flex flex-wrap items-center justify-between gap-4 border-t border-border/70 px-5 py-10 text-xs text-muted-foreground md:px-10">
           <div className="flex items-center gap-2">
-            <ShieldCheck className="h-4 w-4 text-indigo-400" />
-            <span>nonepwd Self-Hosted Zero-Knowledge Vault · Rust + WASM</span>
+            <BrandMark className="size-4 rounded-[4px] opacity-80 grayscale" />
+            <span>© 2026 nonepwd · Zero-Knowledge Self-Hosted Vault</span>
           </div>
-          <div className="flex items-center gap-5">
-            <button type="button" onClick={onOpenVault} className="hover:text-slate-300">
-              Web Vault (/vault)
+
+          <div className="flex items-center gap-5 font-mono text-[11px]">
+            <button type="button" onClick={onOpenVault} className="hover:text-foreground">
+              /vault
             </button>
-            <a href="/demo-login" className="hover:text-slate-300">
-              Autofill Playground (/demo-login)
+            <a href="/demo-login" className="hover:text-foreground">
+              /demo-login
             </a>
-            <a href="/install.sh" className="hover:text-slate-300">
-              CLI Installer (/install.sh)
+            <a href="/install.sh" className="hover:text-foreground">
+              /install.sh
             </a>
           </div>
-        </div>
-      </footer>
+        </footer>
+      </div>
     </div>
   );
 };

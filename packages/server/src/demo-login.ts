@@ -6,59 +6,79 @@ export const DEMO_LOGIN_HTML = `<!DOCTYPE html>
   <title>nonepwd 多步登录与 6 宫格验证码测试沙盒</title>
   <style>
     :root {
-      color-scheme: dark;
-      --bg: #0b0e14;
-      --card: #141925;
-      --border: #263044;
-      --accent: #6366f1;
-      --text: #eef2ff;
-      --muted: #94a3b8;
-      --ok: #10b981;
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --card: #ffffff;
+      --surface: #fafafa;
+      --border: #e5e5e5;
+      --primary: #171717;
+      --primary-fg: #fafafa;
+      --text: #171717;
+      --muted: #737373;
+      --ok-bg: #f5f5f5;
+      --ok-border: #d4d4d4;
+      --ok-text: #171717;
     }
-    * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Inter", sans-serif; }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0a0a0a;
+        --card: #0a0a0a;
+        --surface: #171717;
+        --border: rgba(255, 255, 255, 0.12);
+        --primary: #ededed;
+        --primary-fg: #171717;
+        --text: #fafafa;
+        --muted: #a3a3a3;
+        --ok-bg: #171717;
+        --ok-border: rgba(255, 255, 255, 0.16);
+        --ok-text: #fafafa;
+      }
+    }
+    * { box-sizing: border-box; font-family: "Geist", -apple-system, BlinkMacSystemFont, "Inter", "PingFang SC", sans-serif; }
     body {
-      margin: 0; min-height: 100vh; background: radial-gradient(circle at top, #182036 0%, var(--bg) 60%);
+      margin: 0; min-height: 100vh; background: var(--bg);
       color: var(--text); display: flex; align-items: center; justify-content: center; padding: 24px;
     }
     .card {
       width: 100%; max-width: 440px; background: var(--card); border: 1px solid var(--border);
-      border-radius: 16px; padding: 28px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+      border-radius: 12px; padding: 28px;
     }
     .badge {
-      display: inline-block; font-size: 12px; padding: 4px 10px; border-radius: 999px;
-      background: rgba(99, 102, 241, 0.16); color: #a5b4fc; border: 1px solid rgba(99, 102, 241, 0.35);
-      margin-bottom: 12px;
+      display: inline-block; font-size: 11px; padding: 3px 9px; border-radius: 999px;
+      background: var(--surface); color: var(--muted); border: 1px solid var(--border);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-bottom: 14px;
     }
-    h1 { font-size: 20px; margin: 0 0 8px; }
-    p.sub { font-size: 13px; color: var(--muted); margin: 0 0 20px; line-height: 1.5; }
+    h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 8px; }
+    p.sub { font-size: 13px; color: var(--muted); margin: 0 0 20px; line-height: 1.55; }
     label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 500; }
     input[type="text"], input[type="email"], input[type="password"] {
-      width: 100%; padding: 11px 13px; border-radius: 10px; border: 1px solid var(--border);
-      background: #0d111a; color: var(--text); font-size: 14px; outline: none; margin-bottom: 14px;
+      width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--surface); color: var(--text); font-size: 14px; outline: none; margin-bottom: 14px;
     }
-    input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2); }
+    input:focus { border-color: var(--muted); box-shadow: 0 0 0 2px var(--border); }
     .btn {
-      width: 100%; padding: 11px 16px; border: 0; border-radius: 10px; background: var(--accent);
-      color: white; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 6px;
+      width: 100%; padding: 10px 16px; border: 0; border-radius: 8px; background: var(--primary);
+      color: var(--primary-fg); font-size: 14px; font-weight: 500; cursor: pointer; margin-top: 6px;
     }
-    .btn:hover { background: #5558e6; }
+    .btn:hover { opacity: 0.88; }
     .btn.secondary {
       background: transparent; border: 1px solid var(--border); color: var(--muted); margin-top: 10px;
     }
+    .btn.secondary:hover { color: var(--text); opacity: 1; }
     .otp-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin: 14px 0 18px; }
     .otp-box {
-      height: 52px; text-align: center; font-size: 22px; font-weight: 700; letter-spacing: 1px;
-      border-radius: 10px; border: 1px solid var(--border); background: #0d111a; color: var(--text);
+      height: 52px; text-align: center; font-size: 22px; font-weight: 600; letter-spacing: 1px;
+      border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text);
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace; outline: none;
     }
-    .otp-box:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2); }
+    .otp-box:focus { border-color: var(--muted); box-shadow: 0 0 0 2px var(--border); }
     .hidden { display: none; }
     .success-box {
-      padding: 16px; border-radius: 12px; background: rgba(16, 185, 129, 0.12);
-      border: 1px solid rgba(16, 185, 129, 0.35); color: #6ee7b7; font-size: 14px; line-height: 1.5;
+      padding: 14px 16px; border-radius: 8px; background: var(--ok-bg);
+      border: 1px solid var(--ok-border); color: var(--ok-text); font-size: 14px; line-height: 1.5;
     }
-    .hint { font-size: 12px; color: var(--muted); margin-top: 16px; border-top: 1px solid var(--border); padding-top: 14px; }
-    code { background: #0d111a; padding: 2px 6px; border-radius: 6px; color: #c7d2fe; }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 18px; border-top: 1px solid var(--border); padding-top: 14px; }
+    code { background: var(--surface); border: 1px solid var(--border); padding: 1px 5px; border-radius: 4px; color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
   </style>
 </head>
 <body>

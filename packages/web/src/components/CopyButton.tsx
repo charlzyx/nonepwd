@@ -5,9 +5,15 @@ interface CopyButtonProps {
   value: string;
   label?: string;
   className?: string;
+  variant?: 'default' | 'minimal';
 }
 
-export const CopyButton: React.FC<CopyButtonProps> = ({ value, label, className = '' }) => {
+export const CopyButton: React.FC<CopyButtonProps> = ({
+  value,
+  label,
+  className = '',
+  variant = 'default',
+}) => {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async (e: React.MouseEvent) => {
@@ -20,6 +26,28 @@ export const CopyButton: React.FC<CopyButtonProps> = ({ value, label, className 
       // ignore clipboard restrictions
     }
   };
+
+  if (variant === 'minimal') {
+    return (
+      <button
+        type="button"
+        onClick={handleCopy}
+        className={`inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground ${className}`}
+      >
+        {copied ? (
+          <>
+            <Check className="h-3.5 w-3.5 text-foreground" />
+            <span className="text-foreground">已复制</span>
+          </>
+        ) : (
+          <>
+            <Copy className="h-3.5 w-3.5" />
+            {label ? <span>{label}</span> : null}
+          </>
+        )}
+      </button>
+    );
+  }
 
   return (
     <button
