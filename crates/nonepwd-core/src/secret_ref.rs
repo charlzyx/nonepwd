@@ -81,7 +81,12 @@ pub fn parse_secret_ref(uri: &str) -> Result<ParsedSecretRef, String> {
 pub fn resolve_item_field(item: &VaultItemPayload, field_name: &str) -> Option<String> {
     let key = field_name.trim().to_lowercase();
     match key.as_str() {
-        "username" | "user" | "email" => item.username.clone().or_else(|| item.email_alias.clone()),
+        "username" | "user" => item.username.clone().or_else(|| item.email_alias.clone()),
+        "email" => item
+            .username
+            .clone()
+            .or_else(|| item.email_alias.clone())
+            .or_else(|| item.identity.as_ref().and_then(|id| id.email.clone())),
         "password" | "pass" | "secret" => item.password.clone(),
         "totp" | "otp" | "2fa" => item.totp.clone(),
         "url" | "website" => item.urls.first().cloned(),
@@ -93,6 +98,39 @@ pub fn resolve_item_field(item: &VaultItemPayload, field_name: &str) -> Option<S
                 .chars()
                 .filter(|c| !c.is_whitespace() && *c != '_' && *c != '-')
                 .collect();
+            if let Some(card) = &item.card {
+                let card_val = match norm_key.as_str() {
+                    "cardholdername" | "cardholder" => card.cardholder_name.clone(),
+                    "number" | "cardnumber" => card.number.clone(),
+                    "expmonth" => card.exp_month.clone(),
+                    "expyear" => card.exp_year.clone(),
+                    "cvv" | "cvc" | "csc" => card.cvv.clone(),
+                    "brand" => card.brand.clone(),
+                    _ => None,
+                };
+                if card_val.is_some() {
+                    return card_val;
+                }
+            }
+            if let Some(ident) = &item.identity {
+                let id_val = match norm_key.as_str() {
+                    "fullname" | "name" => ident.full_name.clone(),
+                    "firstname" | "givenname" => ident.first_name.clone(),
+                    "lastname" | "familyname" => ident.last_name.clone(),
+                    "phone" | "tel" => ident.phone.clone(),
+                    "company" | "organization" => ident.company.clone(),
+                    "address1" | "streetaddress" => ident.address1.clone(),
+                    "address2" => ident.address2.clone(),
+                    "city" => ident.city.clone(),
+                    "state" | "province" => ident.state.clone(),
+                    "postalcode" | "zip" | "zipcode" => ident.postal_code.clone(),
+                    "country" => ident.country.clone(),
+                    _ => None,
+                };
+                if id_val.is_some() {
+                    return id_val;
+                }
+            }
             item.custom_fields
                 .iter()
                 .find(|cf| {

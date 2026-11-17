@@ -1,10 +1,12 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import {
+  detectImportFormat,
   injectSecretRefs,
   parseDotEnv,
   randomBytes,
   toBase64Url,
+  type ImportFormat,
   type ItemCategory,
 } from '@nonepwd/core';
 import { NonePwdCliClient } from './client.js';
@@ -85,25 +87,53 @@ function hasFlag(parsed: ParsedArgs, name: string): boolean {
   return parsed.booleans.has(name) || (parsed.flags[name]?.length ?? 0) > 0;
 }
 
+function resolveRequestedImportFormat(
+  rawFlag: string | undefined,
+  content: string
+): ImportFormat {
+  const trimmed = rawFlag?.trim().toLowerCase();
+  if (!trimmed || trimmed === 'auto') {
+    return detectImportFormat(content);
+  }
+  if (trimmed === 'csv') return 'csv';
+  if (trimmed === 'totp' || trimmed === '2fa' || trimmed === 'authenticator') return 'totp';
+  throw new Error(`Unsupported --format "${rawFlag}" (expected csv or totp)`);
+}
+
 async function runImportCommand(
   client: NonePwdCliClient,
   parsed: ParsedArgs,
-  csvPositional: string | undefined,
+  filePositional: string | undefined,
   asJson: boolean,
   io: CliIo
 ): Promise<number> {
-  const csvPath = csvPositional ?? firstFlag(parsed, 'file') ?? firstFlag(parsed, 'in');
-  if (!csvPath) throw new Error('import requires <csvFile>');
-  const csvText = fs.readFileSync(csvPath, 'utf8');
-  const summary = await client.importCsv({
-    csvText,
+  const filePath = filePositional ?? firstFlag(parsed, 'file') ?? firstFlag(parsed, 'in');
+  if (!filePath) throw new Error('import requires <file>');
+  const rawText = fs.readFileSync(filePath, 'utf8');
+  const format = resolveRequestedImportFormat(firstFlag(parsed, 'format'), rawText);
+
+  if (format === 'csv') {
+    const summary = await client.importCsv({
+      csvText: rawText,
+      vaultNameOrId: firstFlag(parsed, 'vault'),
+      skipDuplicates: !hasFlag(parsed, 'no-dedupe'),
+    });
+    io.stdout(
+      asJson
+        ? JSON.stringify(summary, null, 2)
+        : `Imported ${summary.imported} items into [${summary.vaultName}] (parsed: ${summary.total}, skipped duplicates: ${summary.skipped})`
+    );
+    return 0;
+  }
+
+  const summary = await client.importTotp({
+    exportText: rawText,
     vaultNameOrId: firstFlag(parsed, 'vault'),
-    skipDuplicates: !hasFlag(parsed, 'no-dedupe'),
   });
   io.stdout(
     asJson
       ? JSON.stringify(summary, null, 2)
-      : `Imported ${summary.imported} items into [${summary.vaultName}] (parsed: ${summary.total}, skipped duplicates: ${summary.skipped})`
+      : `Imported ${summary.imported} TOTP entries into [${summary.vaultName}] (attached: ${summary.attached}, created: ${summary.created}, skipped: ${summary.skipped})`
   );
   return 0;
 }
@@ -120,7 +150,7 @@ Usage:
   np item create --vault <v> --title <t> [--category <c>] [--url <u>] [--username <u>]
                  [--password <p> | --generate] [--totp <secret>] [--auto-alias]
                  [--field key=value ...] [--json]
-  np import <csvFile> [--vault Personal] [--no-dedupe] [--json]
+  np import <file> [--format csv|totp] [--vault Personal] [--no-dedupe] [--json]
   np item delete <item> [--vault <v>]
   np read <np://vault/item/field>
   np otp <item> [--vault <v>] [--json]

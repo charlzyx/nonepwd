@@ -16,3 +16,6 @@ serde_json = "1"
 tungstenite = { version = "0.26", default-features = false, features = ["handshake", "url"] }
 url = "2"
 webpki-roots = "0.26"
+
+[target.'cfg(not(target_env = "musl"))'.dependencies]
+nonepwd-server = { path = "../nonepwd-server" }

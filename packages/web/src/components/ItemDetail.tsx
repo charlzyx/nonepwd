@@ -7,10 +7,9 @@ import {
   MailCheck,
   ShieldCheck,
   Star,
-  Terminal,
   Trash2,
 } from 'lucide-react';
-import { domainsMatch, generateTotp, type VaultItemPayload } from '@nonepwd/core';
+import { domainsMatch, generateTotp, type IdentityDetails, type VaultItemPayload } from '@nonepwd/core';
 import { useVault } from '../state/VaultContext';
 import { CopyButton } from './CopyButton';
 
@@ -19,9 +18,42 @@ interface ItemDetailProps {
   onEdit: (item: VaultItemPayload) => void;
 }
 
+function maskCardNumber(raw: string): string {
+  const digits = raw.replace(/\s+/g, '');
+  if (digits.length <= 4) return '••••';
+  return `•••• •••• •••• ${digits.slice(-4)}`;
+}
+
+function formatExpiry(expMonth?: string, expYear?: string): string {
+  if (!expMonth && !expYear) return '';
+  return [expMonth, expYear].filter(Boolean).join(' / ');
+}
+
+function formatFullAddress(id: IdentityDetails): string {
+  return [id.address1, id.address2, id.city, id.state, id.postalCode, id.country]
+    .filter(Boolean)
+    .join(', ');
+}
+
+const IDENTITY_FIELD_ROWS: Array<{ key: keyof IdentityDetails; label: string }> = [
+  { key: 'fullName', label: '姓名' },
+  { key: 'firstName', label: '名' },
+  { key: 'lastName', label: '姓' },
+  { key: 'email', label: '邮箱' },
+  { key: 'phone', label: '电话' },
+  { key: 'company', label: '公司' },
+  { key: 'address1', label: '地址 1' },
+  { key: 'address2', label: '地址 2' },
+  { key: 'city', label: '城市' },
+  { key: 'state', label: '省 / 州' },
+  { key: 'postalCode', label: '邮编' },
+  { key: 'country', label: '国家 / 地区' },
+];
+
 export const ItemDetail: React.FC<ItemDetailProps> = ({ item, onEdit }) => {
   const { vaults, emails, deleteItem, saveItem } = useVault();
   const [revealPassword, setRevealPassword] = useState(false);
+  const [revealCard, setRevealCard] = useState(false);
   const [totpState, setTotpState] = useState<{
     code: string;
     remaining: number;
@@ -30,6 +62,7 @@ export const ItemDetail: React.FC<ItemDetailProps> = ({ item, onEdit }) => {
 
   useEffect(() => {
     setRevealPassword(false);
+    setRevealCard(false);
   }, [item?.id]);
 
   useEffect(() => {
@@ -79,16 +112,11 @@ export const ItemDetail: React.FC<ItemDetailProps> = ({ item, onEdit }) => {
   if (!item) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center bg-background p-8 text-center text-muted-foreground">
-        <ShieldCheck className="mb-3 h-10 w-10 text-muted-foreground/50" />
-        <p className="text-sm font-medium text-foreground">从左侧选择一个凭据查看详情</p>
-        <p className="mt-1 text-xs text-muted-foreground">
-          支持实时 2FA 动态码、邮箱验证码关联和 np:// 引用复制
-        </p>
+        <ShieldCheck className="mb-3 h-9 w-9 text-muted-foreground/40" />
+        <p className="text-sm font-medium text-foreground">从左侧选择一个条目查看详情</p>
       </div>
     );
   }
-
-  const secretRefBase = `np://${vaultName}/${item.title}`;
 
   const handleToggleFavorite = async () => {
     await saveItem({ ...item, favorite: !item.favorite }, false);
@@ -98,6 +126,20 @@ export const ItemDetail: React.FC<ItemDetailProps> = ({ item, onEdit }) => {
     if (!confirm(`确定删除 "${item.title}"？此操作不可撤销。`)) return;
     await deleteItem(item.vaultId, item.id);
   };
+
+  const hasCredentialRows = Boolean(
+    item.username || item.password || totpState || item.emailAlias || item.urls.length > 0
+  );
+  const card = item.card;
+  const expiryStr = card ? formatExpiry(card.expMonth, card.expYear) : '';
+  const hasCardRows = Boolean(
+    card && (card.cardholderName || card.number || expiryStr || card.cvv || card.brand)
+  );
+  const identity = item.identity;
+  const fullAddress = identity ? formatFullAddress(identity) : '';
+  const visibleIdentityRows = identity
+    ? IDENTITY_FIELD_ROWS.filter((row) => Boolean(identity[row.key]))
+    : [];
 
   return (
     <div className="flex-1 overflow-y-auto bg-background p-6 text-foreground">
@@ -169,135 +211,262 @@ export const ItemDetail: React.FC<ItemDetailProps> = ({ item, onEdit }) => {
         )}
 
         {/* Primary Credentials Card */}
-        <div className="divide-y divide-border rounded-xl border border-border bg-card">
-          {item.username && (
-            <div className="flex items-center justify-between gap-4 p-4">
-              <div className="min-w-0">
-                <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
-                  用户名 / 邮箱
+        {hasCredentialRows && (
+          <div className="divide-y divide-border rounded-xl border border-border bg-card">
+            {item.username && (
+              <div className="flex items-center justify-between gap-4 p-4">
+                <div className="min-w-0">
+                  <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
+                    用户名 / 邮箱
+                  </div>
+                  <div className="mt-1 truncate text-sm text-foreground select-all">
+                    {item.username}
+                  </div>
                 </div>
-                <div className="mt-1 truncate text-sm text-foreground select-all">
-                  {item.username}
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <CopyButton value={`${secretRefBase}/username`} label="np://" />
                 <CopyButton value={item.username} label="复制" />
               </div>
-            </div>
-          )}
+            )}
 
-          {item.password && (
-            <div className="flex items-center justify-between gap-4 p-4">
-              <div className="min-w-0 flex-1">
-                <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
-                  密码 / 密钥
-                </div>
-                <div className="mt-1 truncate font-mono text-sm text-foreground select-all">
-                  {revealPassword ? item.password : '••••••••••••••••••••'}
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setRevealPassword((v) => !v)}
-                  className="rounded-md border border-border bg-background p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                  title={revealPassword ? '隐藏' : '显示'}
-                >
-                  {revealPassword ? (
-                    <EyeOff className="h-3.5 w-3.5" />
-                  ) : (
-                    <Eye className="h-3.5 w-3.5" />
-                  )}
-                </button>
-                <CopyButton value={`${secretRefBase}/password`} label="np://" />
-                <CopyButton value={item.password} label="复制" />
-              </div>
-            </div>
-          )}
-
-          {totpState && (
-            <div className="flex items-center justify-between gap-4 p-4">
-              <div className="flex items-center gap-3">
-                <svg className="h-9 w-9 -rotate-90" viewBox="0 0 36 36">
-                  <circle
-                    cx="18"
-                    cy="18"
-                    r="15"
-                    fill="none"
-                    stroke="currentColor"
-                    className="text-border"
-                    strokeWidth="3"
-                  />
-                  <circle
-                    cx="18"
-                    cy="18"
-                    r="15"
-                    fill="none"
-                    stroke={totpState.remaining <= 5 ? '#e11d48' : 'currentColor'}
-                    className={totpState.remaining <= 5 ? '' : 'text-foreground'}
-                    strokeWidth="3"
-                    strokeDasharray="94.25"
-                    strokeDashoffset={
-                      94.25 * (1 - totpState.remaining / Math.max(1, totpState.period))
-                    }
-                    strokeLinecap="round"
-                  />
-                </svg>
-                <div>
+            {item.password && (
+              <div className="flex items-center justify-between gap-4 p-4">
+                <div className="min-w-0 flex-1">
                   <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
-                    一次性动态码 (2FA TOTP · {totpState.remaining}s)
+                    密码 / 密钥
                   </div>
-                  <div className="mt-0.5 font-mono text-xl font-bold tracking-wider text-foreground">
-                    {totpState.code.length === 6
-                      ? `${totpState.code.slice(0, 3)} ${totpState.code.slice(3)}`
-                      : totpState.code}
+                  <div className="mt-1 truncate font-mono text-sm text-foreground select-all">
+                    {revealPassword ? item.password : '••••••••••••••••••••'}
                   </div>
                 </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <CopyButton value={`${secretRefBase}/totp`} label="np://" />
-                <CopyButton value={totpState.code} label="复制 2FA" />
-              </div>
-            </div>
-          )}
-
-          {item.emailAlias && (
-            <div className="flex items-center justify-between gap-4 p-4">
-              <div className="min-w-0">
-                <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
-                  绑定邮箱别名 (Masked Email)
-                </div>
-                <div className="mt-1 truncate font-mono text-sm text-foreground">
-                  {item.emailAlias}
-                </div>
-              </div>
-              <CopyButton value={item.emailAlias} label="复制别名" />
-            </div>
-          )}
-
-          {item.urls.length > 0 && (
-            <div className="space-y-2 p-4">
-              <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
-                关联网址
-              </div>
-              {item.urls.map((u, idx) => (
-                <div key={idx} className="flex items-center justify-between gap-2">
-                  <a
-                    href={u}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1.5 truncate text-sm text-foreground underline underline-offset-4 hover:opacity-75"
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRevealPassword((v) => !v)}
+                    className="rounded-md border border-border bg-background p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    title={revealPassword ? '隐藏' : '显示'}
                   >
-                    <span className="truncate">{u}</span>
-                    <ExternalLink className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                  </a>
-                  <CopyButton value={u} />
+                    {revealPassword ? (
+                      <EyeOff className="h-3.5 w-3.5" />
+                    ) : (
+                      <Eye className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                  <CopyButton value={item.password} label="复制" />
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
+              </div>
+            )}
+
+            {totpState && (
+              <div className="flex items-center justify-between gap-4 p-4">
+                <div className="flex items-center gap-3">
+                  <svg className="h-9 w-9 -rotate-90" viewBox="0 0 36 36">
+                    <circle
+                      cx="18"
+                      cy="18"
+                      r="15"
+                      fill="none"
+                      stroke="currentColor"
+                      className="text-border"
+                      strokeWidth="3"
+                    />
+                    <circle
+                      cx="18"
+                      cy="18"
+                      r="15"
+                      fill="none"
+                      stroke={totpState.remaining <= 5 ? '#e11d48' : 'currentColor'}
+                      className={totpState.remaining <= 5 ? '' : 'text-foreground'}
+                      strokeWidth="3"
+                      strokeDasharray="94.25"
+                      strokeDashoffset={
+                        94.25 * (1 - totpState.remaining / Math.max(1, totpState.period))
+                      }
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                  <div>
+                    <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
+                      2FA 动态码 · {totpState.remaining}s
+                    </div>
+                    <div className="mt-0.5 font-mono text-xl font-bold tracking-wider text-foreground">
+                      {totpState.code.length === 6
+                        ? `${totpState.code.slice(0, 3)} ${totpState.code.slice(3)}`
+                        : totpState.code}
+                    </div>
+                  </div>
+                </div>
+                <CopyButton value={totpState.code} label="复制" />
+              </div>
+            )}
+
+            {item.emailAlias && (
+              <div className="flex items-center justify-between gap-4 p-4">
+                <div className="min-w-0">
+                  <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
+                    邮箱别名
+                  </div>
+                  <div className="mt-1 truncate font-mono text-sm text-foreground">
+                    {item.emailAlias}
+                  </div>
+                </div>
+                <CopyButton value={item.emailAlias} label="复制" />
+              </div>
+            )}
+
+            {item.urls.length > 0 && (
+              <div className="space-y-2 p-4">
+                <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
+                  关联网址
+                </div>
+                {item.urls.map((u, idx) => (
+                  <div key={idx} className="flex items-center justify-between gap-2">
+                    <a
+                      href={u}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 truncate text-sm text-foreground underline underline-offset-4 hover:opacity-75"
+                    >
+                      <span className="truncate">{u}</span>
+                      <ExternalLink className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    </a>
+                    <CopyButton value={u} />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Card Details */}
+        {hasCardRows && card && (
+          <div className="divide-y divide-border rounded-xl border border-border bg-card">
+            {card.brand && (
+              <div className="flex items-center justify-between gap-4 p-4">
+                <div className="min-w-0">
+                  <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
+                    发卡组织 / 品牌
+                  </div>
+                  <div className="mt-1 text-sm text-foreground">{card.brand}</div>
+                </div>
+                <CopyButton value={card.brand} label="复制" />
+              </div>
+            )}
+
+            {card.cardholderName && (
+              <div className="flex items-center justify-between gap-4 p-4">
+                <div className="min-w-0">
+                  <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
+                    持卡人
+                  </div>
+                  <div className="mt-1 text-sm text-foreground select-all">
+                    {card.cardholderName}
+                  </div>
+                </div>
+                <CopyButton value={card.cardholderName} label="复制" />
+              </div>
+            )}
+
+            {card.number && (
+              <div className="flex items-center justify-between gap-4 p-4">
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
+                    卡号
+                  </div>
+                  <div className="mt-1 font-mono text-sm text-foreground select-all">
+                    {revealCard ? card.number : maskCardNumber(card.number)}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRevealCard((v) => !v)}
+                    className="rounded-md border border-border bg-background p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    title={revealCard ? '隐藏卡号与 CVV' : '显示卡号与 CVV'}
+                  >
+                    {revealCard ? (
+                      <EyeOff className="h-3.5 w-3.5" />
+                    ) : (
+                      <Eye className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                  <CopyButton value={card.number} label="复制" />
+                </div>
+              </div>
+            )}
+
+            {expiryStr && (
+              <div className="flex items-center justify-between gap-4 p-4">
+                <div className="min-w-0">
+                  <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
+                    有效期
+                  </div>
+                  <div className="mt-1 font-mono text-sm text-foreground">{expiryStr}</div>
+                </div>
+                <CopyButton value={expiryStr} label="复制" />
+              </div>
+            )}
+
+            {card.cvv && (
+              <div className="flex items-center justify-between gap-4 p-4">
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
+                    安全码 (CVV)
+                  </div>
+                  <div className="mt-1 font-mono text-sm text-foreground select-all">
+                    {revealCard ? card.cvv : '•••'}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {!card.number && (
+                    <button
+                      type="button"
+                      onClick={() => setRevealCard((v) => !v)}
+                      className="rounded-md border border-border bg-background p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                      title={revealCard ? '隐藏' : '显示'}
+                    >
+                      {revealCard ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  )}
+                  <CopyButton value={card.cvv} label="复制" />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Identity Details */}
+        {visibleIdentityRows.length > 0 && identity && (
+          <div className="divide-y divide-border rounded-xl border border-border bg-card">
+            {fullAddress && (
+              <div className="flex items-center justify-between gap-4 p-4">
+                <div className="min-w-0">
+                  <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
+                    完整地址
+                  </div>
+                  <div className="mt-1 text-sm text-foreground">{fullAddress}</div>
+                </div>
+                <CopyButton value={fullAddress} label="复制地址" />
+              </div>
+            )}
+            {visibleIdentityRows.map((row) => {
+              const val = identity[row.key] ?? '';
+              return (
+                <div key={row.key} className="flex items-center justify-between gap-4 p-4">
+                  <div className="min-w-0">
+                    <div className="font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase">
+                      {row.label}
+                    </div>
+                    <div className="mt-1 truncate text-sm text-foreground select-all">{val}</div>
+                  </div>
+                  <CopyButton value={val} label="复制" />
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* Custom Fields */}
         {item.customFields.length > 0 && (
@@ -312,10 +481,7 @@ export const ItemDetail: React.FC<ItemDetailProps> = ({ item, onEdit }) => {
                     {cf.type === 'concealed' && !revealPassword ? '••••••••••••' : cf.value}
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <CopyButton value={`${secretRefBase}/${cf.label}`} label="np://" />
-                  <CopyButton value={cf.value} label="复制" />
-                </div>
+                <CopyButton value={cf.value} label="复制" />
               </div>
             ))}
           </div>
@@ -332,17 +498,6 @@ export const ItemDetail: React.FC<ItemDetailProps> = ({ item, onEdit }) => {
             </pre>
           </div>
         )}
-
-        {/* CLI Secret Reference Hint */}
-        <div className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-4 py-3 text-xs text-muted-foreground">
-          <span className="flex items-center gap-2 truncate">
-            <Terminal className="h-3.5 w-3.5 shrink-0 text-foreground" />
-            <code className="truncate font-mono text-foreground">
-              np read "{secretRefBase}/password"
-            </code>
-          </span>
-          <CopyButton value={`np read "${secretRefBase}/password"`} label="复制命令" />
-        </div>
       </div>
     </div>
   );

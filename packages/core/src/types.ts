@@ -7,7 +7,37 @@ export interface VaultMetadata {
   color?: string;
 }
 
-export type ItemCategory = 'login' | 'api_credential' | 'secure_note' | 'ssh_key' | 'card';
+export type ItemCategory =
+  | 'login'
+  | 'api_credential'
+  | 'secure_note'
+  | 'ssh_key'
+  | 'card'
+  | 'identity';
+
+export interface CardDetails {
+  cardholderName?: string;
+  number?: string;
+  expMonth?: string;
+  expYear?: string;
+  cvv?: string;
+  brand?: string;
+}
+
+export interface IdentityDetails {
+  fullName?: string;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  phone?: string;
+  company?: string;
+  address1?: string;
+  address2?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  country?: string;
+}
 
 export interface CustomField {
   id: string;
@@ -29,6 +59,8 @@ export interface VaultItemPayload {
   totp?: string;
   emailAlias?: string;
   notes?: string;
+  card?: CardDetails;
+  identity?: IdentityDetails;
   customFields: CustomField[];
   createdAt: string;
   updatedAt: string;

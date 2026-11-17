@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Code2, Globe, Key, Plus, Search, Star, StickyNote, Upload } from 'lucide-react';
+import { Code2, CreditCard, Globe, Key, Plus, Search, Star, StickyNote, Upload, User } from 'lucide-react';
 import { extractRegistrableDomain, type VaultItemPayload } from '@nonepwd/core';
 
 interface ItemListProps {
@@ -20,9 +20,32 @@ function categoryIcon(cat: VaultItemPayload['category']) {
       return <StickyNote className="h-4 w-4 text-muted-foreground" />;
     case 'ssh_key':
       return <Key className="h-4 w-4 text-muted-foreground" />;
+    case 'card':
+      return <CreditCard className="h-4 w-4 text-muted-foreground" />;
+    case 'identity':
+      return <User className="h-4 w-4 text-muted-foreground" />;
     default:
       return <Globe className="h-4 w-4 text-muted-foreground" />;
   }
+}
+
+function itemSubtitle(item: VaultItemPayload): string {
+  if (item.category === 'card') {
+    const digits = (item.card?.number ?? '').replace(/\s+/g, '');
+    const last4 = digits.length >= 4 ? `•••• ${digits.slice(-4)}` : '';
+    return [item.card?.brand, last4, item.card?.cardholderName].filter(Boolean).join(' · ') || '银行卡';
+  }
+  if (item.category === 'identity') {
+    const fullName =
+      item.identity?.fullName ||
+      [item.identity?.firstName, item.identity?.lastName].filter(Boolean).join(' ');
+    return [fullName, item.identity?.email || item.identity?.phone].filter(Boolean).join(' · ') || '地址身份';
+  }
+  return (
+    item.username ||
+    item.emailAlias ||
+    (item.urls[0] ? extractRegistrableDomain(item.urls[0]) : item.category)
+  );
 }
 
 export const ItemList: React.FC<ItemListProps> = ({
@@ -66,7 +89,7 @@ export const ItemList: React.FC<ItemListProps> = ({
             type="button"
             onClick={onOpenImportCsv}
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-background text-foreground transition-colors hover:bg-muted"
-            title="导入 CSV 密码"
+            title="导入 CSV / 2FA"
           >
             <Upload className="h-3.5 w-3.5" />
           </button>
@@ -100,7 +123,7 @@ export const ItemList: React.FC<ItemListProps> = ({
                   className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
                 >
                   <Upload className="h-3 w-3" />
-                  <span>导入 CSV</span>
+                  <span>导入 CSV / 2FA</span>
                 </button>
               )}
             </div>
@@ -109,10 +132,7 @@ export const ItemList: React.FC<ItemListProps> = ({
           <div className="space-y-1">
             {items.map((item) => {
               const active = item.id === selectedItemId;
-              const subtitle =
-                item.username ||
-                item.emailAlias ||
-                (item.urls[0] ? extractRegistrableDomain(item.urls[0]) : item.category);
+              const subtitle = itemSubtitle(item);
               return (
                 <button
                   key={item.id}

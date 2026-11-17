@@ -330,8 +330,139 @@ describe('Native Rust `np` CLI (macOS/Linux) + WASM Core Interoperability', () =
         skipped: number;
       };
       expect(sum2).toMatchObject({ total: 2, imported: 0, skipped: 2 });
+
+      // 10. Native Rust `np import` with synthetic authenticator export (auto-detect + idempotent)
+      const totpPath = path.join(workDir, 'synthetic-authenticator.txt');
+      fs.writeFileSync(
+        totpPath,
+        [
+          '# Synthetic 2FA export',
+          'otpauth://totp/Linear:dev%40example.com?secret=JBSWY3DPEHPK3PXQ&issuer=Linear',
+          'otpauth://totp/Vercel:dev%40example.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Vercel',
+          'otpauth://totp/Stripe:ops%40example.com?secret=MFRGGZDFMZTWQ2LK&issuer=Stripe',
+        ].join('\n'),
+        'utf8'
+      );
+
+      const totpImp1 = await runNativeCli(
+        ['import', totpPath, '--vault', 'Personal', '--json'],
+        configDir
+      );
+      const totpSum1 = JSON.parse(totpImp1.stdout) as {
+        format: string;
+        total: number;
+        imported: number;
+        attached: number;
+        created: number;
+        skipped: number;
+      };
+      expect(totpSum1).toMatchObject({
+        format: 'totp',
+        total: 3,
+        imported: 3,
+        attached: 2,
+        created: 1,
+        skipped: 0,
+      });
+
+      const linearOtp = await runNativeCli(['otp', 'Linear', '--vault', 'Personal'], configDir);
+      expect(linearOtp.stdout.trim()).toMatch(/^\d{6}$/);
+      const stripeOtp = await runNativeCli(['otp', 'Stripe', '--vault', 'Personal'], configDir);
+      expect(stripeOtp.stdout.trim()).toMatch(/^\d{6}$/);
+
+      const totpImp2 = await runNativeCli(
+        ['import', totpPath, '--format', 'totp', '--vault', 'Personal', '--json'],
+        configDir
+      );
+      const totpSum2 = JSON.parse(totpImp2.stdout) as {
+        total: number;
+        imported: number;
+        attached: number;
+        created: number;
+        skipped: number;
+      };
+      expect(totpSum2).toMatchObject({
+        total: 3,
+        imported: 0,
+        attached: 0,
+        created: 0,
+        skipped: 3,
+      });
+
+      // 11. Native Rust `np import` with Google Authenticator otpauth-migration:// protobuf
+      const migPath = path.join(workDir, 'google-migration-rust.txt');
+      const otpEntryBytes = Buffer.concat([
+        Buffer.from([0x0a, 10]),
+        Buffer.from('1234567890', 'utf8'),
+        Buffer.from([0x12, 22]),
+        Buffer.from('GitLab:dev@example.com', 'utf8'),
+        Buffer.from([0x1a, 6]),
+        Buffer.from('GitLab', 'utf8'),
+        Buffer.from([0x20, 1, 0x28, 1, 0x30, 2]),
+      ]);
+      const migPayload = Buffer.concat([
+        Buffer.from([0x0a, otpEntryBytes.length]),
+        otpEntryBytes,
+        Buffer.from([0x10, 1]),
+      ]);
+      fs.writeFileSync(
+        migPath,
+        `otpauth-migration://offline?data=${encodeURIComponent(migPayload.toString('base64'))}\n`,
+        'utf8'
+      );
+
+      const migImp1 = await runNativeCli(
+        ['import', migPath, '--vault', 'Personal', '--json'],
+        configDir
+      );
+      expect(JSON.parse(migImp1.stdout)).toMatchObject({
+        format: 'totp',
+        total: 1,
+        imported: 1,
+        created: 1,
+        skipped: 0,
+      });
+      const gitlabOtp = await runNativeCli(['otp', 'GitLab', '--vault', 'Personal'], configDir);
+      expect(gitlabOtp.stdout.trim()).toMatch(/^\d{6}$/);
     } finally {
       connectChild.kill('SIGTERM');
     }
+  });
+
+  it('launches embedded Rust server via `np server --port 0 --data-dir <tmp>`', async () => {
+    const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nonepwd-np-server-'));
+    const child = spawn(
+      nativeBin,
+      ['server', '--host', '127.0.0.1', '--port', '0', '--data-dir', tmpDataDir],
+      { stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+    cleanups.push({
+      close: async () => {
+        child.kill('SIGTERM');
+      },
+      dirs: [tmpDataDir],
+    });
+
+    const boundUrl = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('np server startup timeout')), 5000);
+      let buf = '';
+      child.stdout.on('data', (chunk) => {
+        buf += String(chunk);
+        const match = /nonepwd server listening on (http:\/\/[^\s]+)/.exec(buf);
+        if (match) {
+          clearTimeout(timer);
+          resolve(match[1]);
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error(`np server exited early with code ${code}`));
+      });
+    });
+
+    const res = await fetch(`${boundUrl}/api/auth/params`);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { initialized: boolean };
+    expect(json.initialized).toBe(false);
   });
 });

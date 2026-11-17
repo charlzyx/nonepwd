@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   Code2,
+  CreditCard,
   FolderLock,
   Globe,
   Lock,
@@ -14,6 +15,7 @@ import {
   Sun,
   Terminal,
   Upload,
+  User,
   Wifi,
   WifiOff,
 } from 'lucide-react';
@@ -41,7 +43,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   section,
   onSelectSection,
   onOpenImportCsv,
-  onBackHome,
 }) => {
   const { vaults, items, emails, wsConnected, lock, createVault, account } = useVault();
   const { isDark, toggleTheme } = useTheme();
@@ -213,6 +214,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </button>
           <button
             type="button"
+            onClick={() => onSelectSection({ kind: 'items', category: 'card' })}
+            className={navClass(section.kind === 'items' && section.category === 'card')}
+          >
+            <span className="flex items-center gap-2">
+              <CreditCard className="h-3.5 w-3.5 text-muted-foreground" />
+              银行卡
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onSelectSection({ kind: 'items', category: 'identity' })}
+            className={navClass(section.kind === 'items' && section.category === 'identity')}
+          >
+            <span className="flex items-center gap-2">
+              <User className="h-3.5 w-3.5 text-muted-foreground" />
+              地址身份
+            </span>
+          </button>
+          <button
+            type="button"
             onClick={() => onSelectSection({ kind: 'items', category: 'api_credential' })}
             className={navClass(section.kind === 'items' && section.category === 'api_credential')}
           >
@@ -237,7 +258,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       {/* Email OTP, Developer & Settings */}
       <div className="mb-4">
         <div className="mb-1.5 px-2 font-mono text-[10px] font-semibold tracking-wider text-muted-foreground uppercase">
-          引擎与配置
+          工具与设置
         </div>
         <div className="space-y-0.5">
           <button
@@ -247,7 +268,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           >
             <span className="flex items-center gap-2">
               <Mail className="h-3.5 w-3.5 text-muted-foreground" />
-              邮箱验证码 &amp; 别名
+              邮箱验证码
             </span>
             {otpEmailCount > 0 && (
               <span className="rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[10px] font-medium text-foreground">
@@ -263,7 +284,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           >
             <span className="flex items-center gap-2">
               <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
-              CLI &amp; Service Account
+              Service Account
             </span>
           </button>
 
@@ -274,7 +295,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           >
             <span className="flex items-center gap-2">
               <Settings className="h-3.5 w-3.5 text-muted-foreground" />
-              IMAP / Cloudflare 配置
+              设置
             </span>
           </button>
         </div>
@@ -288,16 +309,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted"
           >
             <Upload className="h-3.5 w-3.5" />
-            <span>导入浏览器 CSV</span>
-          </button>
-        )}
-        {onBackHome && (
-          <button
-            type="button"
-            onClick={onBackHome}
-            className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          >
-            ← 返回官网首页
+            <span>导入 CSV / 2FA</span>
           </button>
         )}
         <button
@@ -306,7 +318,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition-colors hover:border-rose-500/50 hover:text-rose-600 dark:hover:text-rose-400"
         >
           <Lock className="h-3.5 w-3.5" />
-          <span>立即锁定密码库</span>
+          <span>锁定密码库</span>
         </button>
       </div>
     </aside>

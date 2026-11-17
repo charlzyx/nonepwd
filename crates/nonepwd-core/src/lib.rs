@@ -1,14 +1,14 @@
 pub mod crypto;
 pub mod csv_import;
 pub mod encoding;
+pub mod ffi;
 pub mod generator;
 pub mod otp_extractor;
 pub mod random;
 pub mod secret_ref;
 pub mod totp;
+pub mod totp_import;
 pub mod types;
-
-#[cfg(target_arch = "wasm32")]
 pub mod wasm_ffi;
 
 #[cfg(test)]
@@ -20,6 +20,7 @@ mod tests {
     };
     use super::csv_import::{item_import_fingerprint, parse_password_csv};
     use super::encoding::{generate_secret_key, normalize_secret_key, to_base32, to_base64_url};
+    use super::ffi::{np_alloc, np_dealloc, np_free_result, np_invoke_native};
     use super::generator::{
         generate_email_alias, generate_passphrase, generate_password, PassphraseOptions,
         PasswordOptions,
@@ -30,8 +31,13 @@ mod tests {
     use super::random::random_bytes;
     use super::secret_ref::{parse_dot_env, parse_secret_ref, resolve_item_field};
     use super::totp::{build_otp_auth_uri, generate_totp, TotpAlgorithm};
+    use super::totp_import::{
+        detect_import_format, parse_authenticator_export, plan_totp_import, totp_import_match,
+        ImportFormat, TotpImportAction,
+    };
     use super::types::{
-        aad, CustomField, ItemCategory, ServiceAccountTokenPayload, VaultItemPayload,
+        aad, CardDetails, CustomField, IdentityDetails, ItemCategory, ServiceAccountTokenPayload,
+        VaultItemPayload,
     };
 
     #[test]
@@ -66,6 +72,8 @@ mod tests {
             totp: None,
             email_alias: None,
             notes: None,
+            card: None,
+            identity: None,
             custom_fields: vec![CustomField {
                 id: "f1".into(),
                 label: "API Key".into(),
@@ -180,6 +188,8 @@ mod tests {
             totp: None,
             email_alias: None,
             notes: None,
+            card: None,
+            identity: None,
             custom_fields: vec![CustomField {
                 id: "cf1".into(),
                 label: "API Key".into(),
@@ -250,5 +260,322 @@ GitHub,https://github.com/login,octocat,\"p@ss,with\"\"quote\"\"\",\"line 1\nlin
         assert_eq!(zh_entries[0].password.as_deref(), Some("cf-secret"));
 
         assert!(parse_password_csv("foo,bar,baz\n1,2,3\n").is_err());
+    }
+
+    fn pb_varint(mut v: u64, out: &mut Vec<u8>) {
+        loop {
+            let mut b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v != 0 {
+                b |= 0x80;
+            }
+            out.push(b);
+            if v == 0 {
+                break;
+            }
+        }
+    }
+
+    fn pb_len_field(field_num: u64, bytes: &[u8], out: &mut Vec<u8>) {
+        pb_varint((field_num << 3) | 2, out);
+        pb_varint(bytes.len() as u64, out);
+        out.extend_from_slice(bytes);
+    }
+
+    fn pb_varint_field(field_num: u64, val: u64, out: &mut Vec<u8>) {
+        pb_varint((field_num << 3) | 0, out);
+        pb_varint(val, out);
+    }
+
+    #[test]
+    fn card_identity_payload_backward_and_forward_compat() {
+        let legacy_json = r#"{
+            "id": "legacy-1",
+            "vaultId": "v1",
+            "category": "login",
+            "title": "Legacy Login",
+            "favorite": false,
+            "tags": [],
+            "urls": ["https://example.com"],
+            "username": "bob",
+            "customFields": [],
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z"
+        }"#;
+        let legacy: VaultItemPayload = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(legacy.card, None);
+        assert_eq!(legacy.identity, None);
+        let reserialized = serde_json::to_value(&legacy).unwrap();
+        assert!(reserialized.get("card").is_none());
+        assert!(reserialized.get("identity").is_none());
+
+        let card_item = VaultItemPayload {
+            id: "c1".into(),
+            vault_id: "v1".into(),
+            category: ItemCategory::Card,
+            title: "Personal Visa".into(),
+            favorite: false,
+            tags: vec![],
+            urls: vec![],
+            username: None,
+            password: None,
+            totp: None,
+            email_alias: None,
+            notes: None,
+            card: Some(CardDetails {
+                cardholder_name: Some("Alice Chen".into()),
+                number: Some("4242424242424242".into()),
+                exp_month: Some("09".into()),
+                exp_year: Some("2029".into()),
+                cvv: Some("123".into()),
+                brand: Some("visa".into()),
+            }),
+            identity: None,
+            custom_fields: vec![],
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            last_used_at: None,
+        };
+        let card_json = serde_json::to_value(&card_item).unwrap();
+        assert_eq!(card_json["category"], "card");
+        assert_eq!(card_json["card"]["cardholderName"], "Alice Chen");
+        assert_eq!(card_json["card"]["expMonth"], "09");
+        assert_eq!(resolve_item_field(&card_item, "cvv").as_deref(), Some("123"));
+
+        let id_item = VaultItemPayload {
+            id: "id1".into(),
+            vault_id: "v1".into(),
+            category: ItemCategory::Identity,
+            title: "Home Address".into(),
+            favorite: false,
+            tags: vec![],
+            urls: vec![],
+            username: None,
+            password: None,
+            totp: None,
+            email_alias: None,
+            notes: None,
+            card: None,
+            identity: Some(IdentityDetails {
+                full_name: Some("Alice Chen".into()),
+                first_name: Some("Alice".into()),
+                last_name: Some("Chen".into()),
+                email: Some("alice@example.com".into()),
+                phone: Some("+1-555-0100".into()),
+                company: Some("Acme Corp".into()),
+                address1: Some("100 Market St".into()),
+                address2: Some("Suite 200".into()),
+                city: Some("San Francisco".into()),
+                state: Some("CA".into()),
+                postal_code: Some("94105".into()),
+                country: Some("US".into()),
+            }),
+            custom_fields: vec![],
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            last_used_at: None,
+        };
+        let id_json = serde_json::to_value(&id_item).unwrap();
+        assert_eq!(id_json["category"], "identity");
+        assert_eq!(id_json["identity"]["address1"], "100 Market St");
+        assert_eq!(id_json["identity"]["postalCode"], "94105");
+        assert_eq!(resolve_item_field(&id_item, "email").as_deref(), Some("alice@example.com"));
+        assert_eq!(resolve_item_field(&id_item, "postalCode").as_deref(), Some("94105"));
+    }
+
+    #[test]
+    fn authenticator_export_parser_and_matching() {
+        // 1. otpauth://totp lines with comments & blank lines
+        let lines_export = "\
+            # Exported TOTP URIs\n\
+            \n\
+            otpauth://totp/GitHub:octocat@github.com?secret=JBSWY3DPEHPK3PXP&issuer=GitHub\n\
+            otpauth://hotp/Legacy:old?secret=JBSWY3DPEHPK3PXP&counter=1\n\
+            otpauth://totp/Cloudflare:ops%40example.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Cloudflare&digits=8&period=60&algorithm=SHA256\n";
+
+        assert_eq!(detect_import_format(lines_export), ImportFormat::Totp);
+        assert_eq!(
+            detect_import_format("name,url,username,password\nGitHub,https://github.com,a,b\n"),
+            ImportFormat::Csv
+        );
+
+        let parsed_lines = parse_authenticator_export(lines_export).unwrap();
+        assert_eq!(parsed_lines.len(), 2);
+        assert_eq!(parsed_lines[0].issuer.as_deref(), Some("GitHub"));
+        assert_eq!(parsed_lines[0].account.as_deref(), Some("octocat@github.com"));
+        assert_eq!(parsed_lines[0].secret, "JBSWY3DPEHPK3PXP");
+        assert_eq!(parsed_lines[0].digits, 6);
+        assert_eq!(parsed_lines[0].period, 30);
+        assert_eq!(parsed_lines[0].algorithm, TotpAlgorithm::SHA1);
+
+        assert_eq!(parsed_lines[1].issuer.as_deref(), Some("Cloudflare"));
+        assert_eq!(parsed_lines[1].account.as_deref(), Some("ops@example.com"));
+        assert_eq!(parsed_lines[1].digits, 8);
+        assert_eq!(parsed_lines[1].period, 60);
+        assert_eq!(parsed_lines[1].algorithm, TotpAlgorithm::SHA256);
+
+        // 2. Google Authenticator otpauth-migration://offline?data=<url-encoded base64 protobuf>
+        let mut entry1 = Vec::new();
+        pb_len_field(1, b"12345678901234567890", &mut entry1);
+        pb_len_field(2, b"Google:alice@gmail.com", &mut entry1);
+        pb_len_field(3, b"Google", &mut entry1);
+        pb_varint_field(4, 1, &mut entry1); // SHA1
+        pb_varint_field(5, 1, &mut entry1); // 6 digits
+        pb_varint_field(6, 2, &mut entry1); // TOTP
+
+        let mut entry2_hotp = Vec::new();
+        pb_len_field(1, b"hotpsecret", &mut entry2_hotp);
+        pb_len_field(2, b"SkipMe", &mut entry2_hotp);
+        pb_varint_field(6, 1, &mut entry2_hotp); // HOTP -> skipped
+
+        let mut entry3 = Vec::new();
+        // Raw bytes chosen to produce '+' and '/' in standard base64 when combined
+        pb_len_field(1, &[0xfb, 0xff, 0xbf, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77], &mut entry3);
+        pb_len_field(2, b"dev@stripe.com", &mut entry3);
+        pb_len_field(3, b"Stripe", &mut entry3);
+        pb_varint_field(4, 2, &mut entry3); // SHA256
+        pb_varint_field(5, 2, &mut entry3); // 8 digits
+        pb_varint_field(6, 2, &mut entry3); // TOTP
+
+        let mut migration = Vec::new();
+        pb_len_field(1, &entry1, &mut migration);
+        pb_len_field(1, &entry2_hotp, &mut migration);
+        pb_len_field(1, &entry3, &mut migration);
+        pb_varint_field(2, 1, &mut migration); // version = 1
+        pb_varint_field(3, 1, &mut migration); // batch_size = 1
+
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        let std_b64 = STANDARD.encode(&migration);
+        let url_encoded_b64 = std_b64
+            .replace('+', "%2B")
+            .replace('/', "%2F")
+            .replace('=', "%3D");
+        let migration_uri = format!("otpauth-migration://offline?data={url_encoded_b64}");
+        let mig_entries = parse_authenticator_export(&migration_uri).unwrap();
+        assert_eq!(mig_entries.len(), 2);
+        assert_eq!(mig_entries[0].issuer.as_deref(), Some("Google"));
+        assert_eq!(mig_entries[0].account.as_deref(), Some("alice@gmail.com"));
+        assert_eq!(mig_entries[0].secret, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+        assert_eq!(generate_totp(&mig_entries[0].otpauth_uri, 59_000).unwrap().code, "287082");
+
+        assert_eq!(mig_entries[1].issuer.as_deref(), Some("Stripe"));
+        assert_eq!(mig_entries[1].account.as_deref(), Some("dev@stripe.com"));
+        assert_eq!(mig_entries[1].digits, 8);
+        assert_eq!(mig_entries[1].algorithm, TotpAlgorithm::SHA256);
+
+        // 3. Aegis plain JSON & 2FAS JSON
+        let aegis_json = r#"{
+            "version": 1,
+            "header": { "slots": null, "params": null },
+            "db": {
+                "version": 2,
+                "entries": [
+                    {
+                        "type": "totp",
+                        "name": "octocat@github.com",
+                        "issuer": "GitHub",
+                        "info": { "secret": "JBSWY3DPEHPK3PXP", "algo": "SHA1", "digits": 6, "period": 30 }
+                    }
+                ]
+            }
+        }"#;
+        let aegis_entries = parse_authenticator_export(aegis_json).unwrap();
+        assert_eq!(aegis_entries.len(), 1);
+        assert_eq!(aegis_entries[0].issuer.as_deref(), Some("GitHub"));
+
+        let twofas_json = r#"{
+            "schemaVersion": 4,
+            "services": [
+                {
+                    "name": "Discord",
+                    "secret": "JBSWY3DPEHPK3PXP",
+                    "otp": { "account": "gamer@example.com", "issuer": "Discord", "digits": 6, "period": 30, "algorithm": "SHA1", "tokenType": "TOTP" }
+                }
+            ]
+        }"#;
+        let twofas_entries = parse_authenticator_export(twofas_json).unwrap();
+        assert_eq!(twofas_entries.len(), 1);
+        assert_eq!(twofas_entries[0].issuer.as_deref(), Some("Discord"));
+        assert_eq!(twofas_entries[0].account.as_deref(), Some("gamer@example.com"));
+
+        // 4. Matching & duplicate secret skipping
+        let existing = vec![
+            VaultItemPayload {
+                id: "item-google".into(),
+                vault_id: "v1".into(),
+                category: ItemCategory::Login,
+                title: "google.com".into(),
+                favorite: false,
+                tags: vec![],
+                urls: vec!["https://accounts.google.com/v3/signin".into()],
+                username: Some("alice@gmail.com".into()),
+                password: Some("pw".into()),
+                totp: None,
+                email_alias: None,
+                notes: None,
+                card: None,
+                identity: None,
+                custom_fields: vec![],
+                created_at: "".into(),
+                updated_at: "".into(),
+                last_used_at: None,
+            },
+            VaultItemPayload {
+                id: "item-existing-totp".into(),
+                vault_id: "v1".into(),
+                category: ItemCategory::Login,
+                title: "GitHub".into(),
+                favorite: false,
+                tags: vec![],
+                urls: vec!["https://github.com".into()],
+                username: Some("octocat@github.com".into()),
+                password: Some("pw".into()),
+                totp: Some("JBSWY3DPEHPK3PXP".into()),
+                email_alias: None,
+                notes: None,
+                card: None,
+                identity: None,
+                custom_fields: vec![],
+                created_at: "".into(),
+                updated_at: "".into(),
+                last_used_at: None,
+            },
+        ];
+
+        assert!(matches!(
+            totp_import_match(&existing, &parsed_lines[0]),
+            TotpImportAction::SkipDuplicate { .. }
+        ));
+        let plan = plan_totp_import(&existing, &mig_entries);
+        assert_eq!(plan.len(), 2);
+        assert!(matches!(
+            &plan[0].decision,
+            TotpImportAction::Attach { item_id, .. } if item_id == "item-google"
+        ));
+        assert!(matches!(
+            &plan[1].decision,
+            TotpImportAction::Create { title, username, .. }
+                if title == "Stripe" && username.as_deref() == Some("dev@stripe.com")
+        ));
+    }
+
+    #[test]
+    fn native_c_abi_roundtrip() {
+        let req = br#"{"op":"generate_secret_key","args":{}}"#;
+        let in_ptr = np_alloc(req.len());
+        let mut out_len: usize = 0;
+        let out_ptr = unsafe {
+            std::ptr::copy_nonoverlapping(req.as_ptr(), in_ptr, req.len());
+            np_invoke_native(in_ptr, req.len(), &mut out_len)
+        };
+        np_dealloc(in_ptr, req.len());
+        assert!(!out_ptr.is_null());
+        assert!(out_len > 0);
+        let resp_bytes = unsafe { std::slice::from_raw_parts(out_ptr, out_len) };
+        let resp: serde_json::Value = serde_json::from_slice(resp_bytes).unwrap();
+        np_free_result(out_ptr, out_len);
+        assert_eq!(resp["ok"], true);
+        assert!(resp["result"].as_str().unwrap().starts_with("NP3-"));
     }
 }

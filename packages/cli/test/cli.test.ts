@@ -261,6 +261,113 @@ describe('@nonepwd/cli & Connect API', () => {
         skipped: number;
       };
       expect(summary2).toMatchObject({ total: 2, imported: 0, skipped: 2 });
+
+      // 9. Authenticator 2FA export import (auto-detected + idempotent re-run)
+      const totpExportPath = path.join(workDir, 'authenticator-synthetic.txt');
+      fs.writeFileSync(
+        totpExportPath,
+        [
+          '# Synthetic authenticator export',
+          'otpauth://totp/Notion:alice%40example.com?secret=JBSWY3DPEHPK3PXQ&issuer=Notion',
+          'otpauth://totp/Cloudflare:cf%40example.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Cloudflare',
+          'otpauth://totp/Stripe:ops%40example.com?secret=MFRGGZDFMZTWQ2LK&issuer=Stripe',
+        ].join('\n'),
+        'utf8'
+      );
+
+      const totpImp1 = await execCli(
+        ['import', totpExportPath, '--vault', 'Personal', '--json'],
+        configDir
+      );
+      expect(totpImp1.code).toBe(0);
+      const totpSum1 = JSON.parse(totpImp1.stdout) as {
+        format: string;
+        total: number;
+        imported: number;
+        attached: number;
+        created: number;
+        skipped: number;
+      };
+      expect(totpSum1).toMatchObject({
+        format: 'totp',
+        total: 3,
+        imported: 3,
+        attached: 2,
+        created: 1,
+        skipped: 0,
+      });
+
+      // Attached Notion item preserves original password and now produces TOTP codes
+      const readNotionPass = await execCli(['read', 'np://Personal/Notion/password'], configDir);
+      expect(readNotionPass.stdout.trim()).toBe('notion,pass#1');
+      const notionOtp = await execCli(['otp', 'Notion', '--vault', 'Personal'], configDir);
+      expect(notionOtp.code).toBe(0);
+      expect(notionOtp.stdout.trim()).toMatch(/^\d{6}$/);
+
+      // Newly created Stripe login item produces TOTP codes
+      const stripeOtp = await execCli(['otp', 'Stripe', '--vault', 'Personal'], configDir);
+      expect(stripeOtp.code).toBe(0);
+      expect(stripeOtp.stdout.trim()).toMatch(/^\d{6}$/);
+
+      // Idempotent second run skips all 3 secrets
+      const totpImp2 = await execCli(
+        ['import', totpExportPath, '--format', 'totp', '--vault', 'Personal', '--json'],
+        configDir
+      );
+      expect(totpImp2.code).toBe(0);
+      const totpSum2 = JSON.parse(totpImp2.stdout) as {
+        total: number;
+        imported: number;
+        attached: number;
+        created: number;
+        skipped: number;
+      };
+      expect(totpSum2).toMatchObject({
+        total: 3,
+        imported: 0,
+        attached: 0,
+        created: 0,
+        skipped: 3,
+      });
+
+      // 10. Google Authenticator otpauth-migration:// protobuf import via CLI
+      const migPath = path.join(workDir, 'google-migration-synthetic.txt');
+      // Protobuf OtpParameters: field 1 secret="1234567890" (10 bytes), field 2 name="GitLab:ops@example.com", field 3 issuer="GitLab", field 4 alg=1(SHA1), field 5 digits=1(6), field 6 type=2(TOTP)
+      const otpEntryBytes = Buffer.concat([
+        Buffer.from([0x0a, 10]),
+        Buffer.from('1234567890', 'utf8'),
+        Buffer.from([0x12, 22]),
+        Buffer.from('GitLab:ops@example.com', 'utf8'),
+        Buffer.from([0x1a, 6]),
+        Buffer.from('GitLab', 'utf8'),
+        Buffer.from([0x20, 1, 0x28, 1, 0x30, 2]),
+      ]);
+      const migPayload = Buffer.concat([
+        Buffer.from([0x0a, otpEntryBytes.length]),
+        otpEntryBytes,
+        Buffer.from([0x10, 1]),
+      ]);
+      fs.writeFileSync(
+        migPath,
+        `otpauth-migration://offline?data=${encodeURIComponent(migPayload.toString('base64'))}\n`,
+        'utf8'
+      );
+
+      const migImp1 = await execCli(
+        ['import', migPath, '--vault', 'Personal', '--json'],
+        configDir
+      );
+      expect(migImp1.code).toBe(0);
+      expect(JSON.parse(migImp1.stdout)).toMatchObject({
+        format: 'totp',
+        total: 1,
+        imported: 1,
+        attached: 0,
+        created: 1,
+        skipped: 0,
+      });
+      const gitlabOtp = await execCli(['otp', 'GitLab', '--vault', 'Personal'], configDir);
+      expect(gitlabOtp.stdout.trim()).toMatch(/^\d{6}$/);
     } finally {
       await connectSrv.close();
     }

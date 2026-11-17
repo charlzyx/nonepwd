@@ -65,12 +65,12 @@ const StandaloneVaultGuide: React.FC<{ onBackHome: () => void }> = ({ onBackHome
               <div className="bg-background p-5">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="font-mono text-xs font-medium text-foreground">
-                    01 · 启动私有零知识服务端
+                    01 · 启动 Rust 单二进制零知识服务端
                   </span>
-                  <CopyButton value="npx @nonepwd/server" label="复制" variant="minimal" />
+                  <CopyButton value="np server" label="复制" variant="minimal" />
                 </div>
                 <pre className="overflow-x-auto rounded-md border border-border bg-muted/30 px-3 py-2 font-mono text-xs text-foreground">
-                  npx @nonepwd/server
+                  np server
                 </pre>
                 <p className="mt-2 text-xs text-muted-foreground">
                   默认在 127.0.0.1:8787 托管本地 SQLite 密文库、Web 管理台与 WebSocket 实时推送。
@@ -141,6 +141,13 @@ const WorkspaceApp: React.FC<{ onNavigateHome: () => void }> = ({ onNavigateHome
           i.title.toLowerCase().includes(q) ||
           (i.username ?? '').toLowerCase().includes(q) ||
           (i.emailAlias ?? '').toLowerCase().includes(q) ||
+          (i.card?.brand ?? '').toLowerCase().includes(q) ||
+          (i.card?.cardholderName ?? '').toLowerCase().includes(q) ||
+          (i.identity?.fullName ?? '').toLowerCase().includes(q) ||
+          (i.identity?.email ?? '').toLowerCase().includes(q) ||
+          (i.identity?.phone ?? '').toLowerCase().includes(q) ||
+          (i.identity?.company ?? '').toLowerCase().includes(q) ||
+          (i.identity?.city ?? '').toLowerCase().includes(q) ||
           i.urls.some((u) => u.toLowerCase().includes(q)) ||
           i.tags.some((t) => t.toLowerCase().includes(q))
       );
@@ -185,7 +192,6 @@ const WorkspaceApp: React.FC<{ onNavigateHome: () => void }> = ({ onNavigateHome
         section={section}
         onSelectSection={setSection}
         onOpenImportCsv={() => setImportModalOpen(true)}
-        onBackHome={onNavigateHome}
       />
 
       {section.kind === 'items' && (

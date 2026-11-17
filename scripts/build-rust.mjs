@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
 const binDir = path.join(rootDir, 'dist', 'bin');
+const libDir = path.join(rootDir, 'dist', 'lib');
 
 function runCargo(args) {
   execFileSync('cargo', args, { cwd: rootDir, stdio: 'inherit' });
@@ -24,6 +25,7 @@ function getInstalledTargets() {
 }
 
 fs.mkdirSync(binDir, { recursive: true });
+fs.mkdirSync(libDir, { recursive: true });
 
 // 1. Build nonepwd-core WASM module
 console.log('[build-rust] Building nonepwd-core (wasm32-unknown-unknown)...');
@@ -48,7 +50,26 @@ console.log(
   `[build-rust] Embedded nonepwd_core.wasm (${(wasmBytes.length / 1024).toFixed(1)} KiB) -> packages/core/src/wasm-embedded.ts`
 );
 
-// 2. Build native host CLI binary (`np`)
+// 2. Build native nonepwd-core cdylib/staticlib for desktop C ABI consumers
+console.log(`[build-rust] Building native nonepwd-core C ABI (${process.platform}/${process.arch})...`);
+runCargo(['build', '-p', 'nonepwd-core', '--release']);
+const dylibName =
+  process.platform === 'darwin'
+    ? 'libnonepwd_core.dylib'
+    : process.platform === 'win32'
+      ? 'nonepwd_core.dll'
+      : 'libnonepwd_core.so';
+const staticlibName = process.platform === 'win32' ? 'nonepwd_core.lib' : 'libnonepwd_core.a';
+for (const artifact of [dylibName, staticlibName]) {
+  const src = path.join(rootDir, 'target', 'release', artifact);
+  if (fs.existsSync(src)) {
+    const dst = path.join(libDir, artifact);
+    fs.copyFileSync(src, dst);
+    console.log(`[build-rust] Built native library -> ${path.relative(rootDir, dst)}`);
+  }
+}
+
+// 3. Build native host CLI binary (`np`)
 console.log(`[build-rust] Building native nonepwd-cli (${process.platform}/${process.arch})...`);
 runCargo(['build', '-p', 'nonepwd-cli', '--release']);
 const hostExt = process.platform === 'win32' ? '.exe' : '';
@@ -68,7 +89,7 @@ console.log(`[build-rust] Built host binary -> ${path.relative(rootDir, hostTarg
 // 3. Cross-compile Linux musl static binary when installed (e.g. from macOS)
 const installedTargets = getInstalledTargets();
 if (installedTargets.has('x86_64-unknown-linux-musl')) {
-  console.log('[build-rust] Cross-compiling static Linux x86_64 binary (x86_64-unknown-linux-musl)...');
+  console.log('[build-rust] Cross-compiling static Linux x86_64 client binary (x86_64-unknown-linux-musl; omits embedded np server)...');
   runCargo(['build', '-p', 'nonepwd-cli', '--target', 'x86_64-unknown-linux-musl', '--release']);
   const linuxSrc = path.join(rootDir, 'target', 'x86_64-unknown-linux-musl', 'release', 'np');
   const linuxDst = path.join(binDir, 'np-linux-x86_64');
@@ -78,7 +99,7 @@ if (installedTargets.has('x86_64-unknown-linux-musl')) {
 }
 
 if (installedTargets.has('aarch64-unknown-linux-musl')) {
-  console.log('[build-rust] Cross-compiling static Linux arm64 binary (aarch64-unknown-linux-musl)...');
+  console.log('[build-rust] Cross-compiling static Linux arm64 client binary (aarch64-unknown-linux-musl; omits embedded np server)...');
   runCargo(['build', '-p', 'nonepwd-cli', '--target', 'aarch64-unknown-linux-musl', '--release']);
   const linuxArmSrc = path.join(rootDir, 'target', 'aarch64-unknown-linux-musl', 'release', 'np');
   const linuxArmDst = path.join(binDir, 'np-linux-arm64');

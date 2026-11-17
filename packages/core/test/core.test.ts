@@ -5,6 +5,7 @@ import {
   decodeServiceAccountToken,
   decryptJson,
   deriveAccountKeys,
+  detectImportFormat,
   domainsMatch,
   encodeServiceAccountToken,
   encryptJson,
@@ -17,18 +18,23 @@ import {
   generateRawAesKey,
   generateSecretKey,
   generateTotp,
+  hasSameTotpSecret,
   injectSecretRefs,
   itemImportFingerprint,
   normalizeSecretKey,
   openSealedJson,
+  parseAuthenticatorExport,
   parseDotEnv,
   parsePasswordCsv,
   parseSecretRef,
+  planTotpImport,
   randomBytes,
   resolveItemField,
   sealJsonForPublicKey,
   toBase32,
   toBase64Url,
+  totpImportMatch,
+  totpIssuerMatchesItem,
   utf8Encode,
   type VaultItemPayload,
 } from '../src/index.js';
@@ -293,5 +299,206 @@ describe('@nonepwd/core Secret References & Generators', () => {
     expect(zhEntries[0].password).toBe('cf-secret');
 
     expect(() => parsePasswordCsv('colA,colB,colC\n1,2,3\n')).toThrow();
+  });
+
+  it('supports Card and Identity VaultItemPayloads and preserves legacy payload compatibility', async () => {
+    const key = generateRawAesKey();
+    const cardItem: VaultItemPayload = {
+      id: 'card-1',
+      vaultId: 'v1',
+      category: 'card',
+      title: 'Personal Visa',
+      favorite: false,
+      tags: [],
+      urls: [],
+      card: {
+        cardholderName: 'Alice Chen',
+        number: '4242424242424242',
+        expMonth: '08',
+        expYear: '2029',
+        cvv: '999',
+        brand: 'visa',
+      },
+      customFields: [],
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    };
+    const identityItem: VaultItemPayload = {
+      id: 'ident-1',
+      vaultId: 'v1',
+      category: 'identity',
+      title: 'Home Address',
+      favorite: false,
+      tags: [],
+      urls: [],
+      identity: {
+        fullName: 'Alice Chen',
+        firstName: 'Alice',
+        lastName: 'Chen',
+        email: 'alice@example.com',
+        phone: '+1-555-0100',
+        company: 'Example Labs',
+        address1: '123 Main St',
+        address2: 'Apt 4B',
+        city: 'San Francisco',
+        state: 'CA',
+        postalCode: '94105',
+        country: 'US',
+      },
+      customFields: [],
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    };
+
+    const encCard = await encryptJson(key, cardItem, AAD.vaultItem('v1', 'card-1'));
+    const decCard = await decryptJson<VaultItemPayload>(key, encCard, AAD.vaultItem('v1', 'card-1'));
+    expect(decCard).toEqual(cardItem);
+    expect(resolveItemField(decCard, 'cvv')).toBe('999');
+
+    const encIdent = await encryptJson(key, identityItem, AAD.vaultItem('v1', 'ident-1'));
+    const decIdent = await decryptJson<VaultItemPayload>(key, encIdent, AAD.vaultItem('v1', 'ident-1'));
+    expect(decIdent).toEqual(identityItem);
+    expect(resolveItemField(decIdent, 'postalCode')).toBe('94105');
+    expect(resolveItemField(decIdent, 'email')).toBe('alice@example.com');
+  });
+
+  it('parses otpauth lines, Google Authenticator migration protobuf, and Aegis/2FAS JSON via WASM', async () => {
+    const pbVarint = (val: number): number[] => {
+      const out: number[] = [];
+      let v = val >>> 0;
+      while (true) {
+        let b = v & 0x7f;
+        v >>>= 7;
+        if (v !== 0) b |= 0x80;
+        out.push(b);
+        if (v === 0) break;
+      }
+      return out;
+    };
+    const pbBytes = (field: number, data: Uint8Array): number[] => [
+      ...pbVarint((field << 3) | 2),
+      ...pbVarint(data.length),
+      ...data,
+    ];
+    const pbUint = (field: number, val: number): number[] => [
+      ...pbVarint((field << 3) | 0),
+      ...pbVarint(val),
+    ];
+
+    const otp1 = new Uint8Array([
+      ...pbBytes(1, utf8Encode('12345678901234567890')),
+      ...pbBytes(2, utf8Encode('Google:alice@gmail.com')),
+      ...pbBytes(3, utf8Encode('Google')),
+      ...pbUint(4, 1), // SHA1
+      ...pbUint(5, 1), // 6 digits
+      ...pbUint(6, 2), // TOTP
+    ]);
+    const otp2 = new Uint8Array([
+      ...pbBytes(1, new Uint8Array([0xfb, 0xff, 0xbf, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70])),
+      ...pbBytes(2, utf8Encode('Stripe:billing@example.com')),
+      ...pbBytes(3, utf8Encode('Stripe')),
+      ...pbUint(4, 2), // SHA256
+      ...pbUint(5, 2), // 8 digits
+      ...pbUint(6, 2), // TOTP
+    ]);
+    const migrationPayload = new Uint8Array([
+      ...pbBytes(1, otp1),
+      ...pbBytes(1, otp2),
+      ...pbUint(2, 1),
+    ]);
+    const stdB64 = Buffer.from(migrationPayload).toString('base64');
+    const migrationUri = `otpauth-migration://offline?data=${encodeURIComponent(stdB64)}`;
+
+    expect(detectImportFormat(migrationUri)).toBe('totp');
+    const migParsed = parseAuthenticatorExport(migrationUri);
+    expect(migParsed).toHaveLength(2);
+    expect(migParsed[0]).toMatchObject({
+      issuer: 'Google',
+      account: 'alice@gmail.com',
+      secret: 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ',
+      digits: 6,
+      period: 30,
+      algorithm: 'SHA1',
+    });
+    const codeAt59 = await generateTotp(migParsed[0].otpauthUri, 59_000);
+    expect(codeAt59.code).toBe('287082');
+
+    expect(migParsed[1]).toMatchObject({
+      issuer: 'Stripe',
+      account: 'billing@example.com',
+      digits: 8,
+      algorithm: 'SHA256',
+    });
+
+    const linesExport = [
+      '# Backup file',
+      '',
+      'otpauth://totp/GitHub:octocat?secret=JBSWY3DPEHPK3PXP&issuer=GitHub',
+      'otpauth://totp/Linear:dev%40example.com?secret=JBSWY3DPEHPK3PXQ&issuer=Linear',
+    ].join('\n');
+    const linesParsed = parseAuthenticatorExport(linesExport);
+    expect(linesParsed).toHaveLength(2);
+    expect(linesParsed[1].account).toBe('dev@example.com');
+
+    const aegisParsed = parseAuthenticatorExport(
+      JSON.stringify({
+        version: 1,
+        db: {
+          entries: [
+            {
+              type: 'totp',
+              name: 'alice@example.com',
+              issuer: 'Notion',
+              info: { secret: 'JBSWY3DPEHPK3PXP', algo: 'SHA1', digits: 6, period: 30 },
+            },
+          ],
+        },
+      })
+    );
+    expect(aegisParsed).toHaveLength(1);
+    expect(aegisParsed[0].issuer).toBe('Notion');
+
+    const existingItems: VaultItemPayload[] = [
+      {
+        id: 'existing-google',
+        vaultId: 'v1',
+        category: 'login',
+        title: 'google.com',
+        favorite: false,
+        tags: [],
+        urls: ['https://accounts.google.com/signin'],
+        username: 'alice@gmail.com',
+        password: 'pw',
+        customFields: [],
+        createdAt: '',
+        updatedAt: '',
+      },
+      {
+        id: 'existing-gh',
+        vaultId: 'v1',
+        category: 'login',
+        title: 'GitHub',
+        favorite: false,
+        tags: [],
+        urls: ['https://github.com'],
+        username: 'octocat',
+        totp: 'JBSWY3DPEHPK3PXP',
+        customFields: [],
+        createdAt: '',
+        updatedAt: '',
+      },
+    ];
+
+    expect(hasSameTotpSecret(existingItems[1].totp, 'jbsw y3dp ehpk 3pxp')).toBe(true);
+    expect(totpIssuerMatchesItem('Google', existingItems[0])).toBe(true);
+    expect(totpImportMatch(existingItems, linesParsed[0]).action).toBe('skip_duplicate');
+
+    const plan = planTotpImport(existingItems, migParsed);
+    expect(plan[0]).toMatchObject({ action: 'attach', itemId: 'existing-google' });
+    expect(plan[1]).toMatchObject({
+      action: 'create',
+      title: 'Stripe',
+      username: 'billing@example.com',
+    });
   });
 });

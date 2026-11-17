@@ -22,7 +22,9 @@ import {
   generateSecretKey,
   itemImportFingerprint,
   openSealedJson,
+  parseAuthenticatorExport,
   parsePasswordCsv,
+  planTotpImport,
   randomBytes,
   randomId,
   toBase64Url,
@@ -57,6 +59,23 @@ export interface AccountInfo {
   emailPublicKey: string;
   cfWebhookSecret: string;
   aliasDomain: string;
+}
+
+export type EmailFilterMode = 'allow' | 'deny';
+export type EmailFilterField = 'from' | 'to' | 'subject' | 'body';
+
+export interface EmailFilterRule {
+  id: string;
+  field: EmailFilterField;
+  pattern: string;
+  enabled: boolean;
+}
+
+export interface EmailFilterConfig {
+  enabled: boolean;
+  otpOnly: boolean;
+  mode: EmailFilterMode;
+  rules: EmailFilterRule[];
 }
 
 export type AuthPhase = 'loading' | 'uninitialized' | 'locked' | 'unlocked' | 'standalone';
@@ -122,6 +141,10 @@ interface VaultContextValue {
     csvText: string;
     skipDuplicates?: boolean;
   }): Promise<{ total: number; imported: number; skipped: number }>;
+  importTotpItems(params: {
+    vaultId: string;
+    text: string;
+  }): Promise<{ total: number; attached: number; created: number; skipped: number }>;
   deleteItem(vaultId: string, itemId: string): Promise<void>;
   createAlias(params: {
     siteDomain: string;
@@ -153,6 +176,8 @@ interface VaultContextValue {
     username: string;
     password?: string;
   }): Promise<{ ok: boolean; messages?: number; error?: string }>;
+  getEmailFilter(): Promise<EmailFilterConfig>;
+  saveEmailFilter(config: EmailFilterConfig): Promise<EmailFilterConfig>;
   generateNewSecretKey(): string;
 }
 
@@ -661,6 +686,98 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [apiFetch, items]
   );
 
+  const importTotpItems = useCallback<VaultContextValue['importTotpItems']>(
+    async ({ vaultId, text }) => {
+      const vk = vaultKeysRef.current.get(vaultId);
+      if (!vk) throw new Error('密码库已锁定或未找到密钥');
+
+      const entries = parseAuthenticatorExport(text);
+      const vaultItems = items.filter((i) => i.vaultId === vaultId);
+      const plan = planTotpImport(vaultItems, entries);
+
+      const now = new Date().toISOString();
+      const updatedMap = new Map<string, VaultItemPayload>();
+      const batch: Array<{ id: string; encryptedData: string }> = [];
+      const createdPayloads: VaultItemPayload[] = [];
+      let attached = 0;
+      let skipped = 0;
+
+      for (const step of plan) {
+        if (step.action === 'skip_duplicate') {
+          skipped++;
+          continue;
+        }
+        if (step.action === 'attach') {
+          const existing =
+            updatedMap.get(step.itemId) ?? vaultItems.find((i) => i.id === step.itemId);
+          if (!existing) {
+            skipped++;
+            continue;
+          }
+          const updated: VaultItemPayload = {
+            ...existing,
+            totp: step.otpauthUri,
+            updatedAt: now,
+          };
+          const encryptedData = await encryptJson(
+            vk,
+            updated,
+            AAD.vaultItem(vaultId, updated.id)
+          );
+          await apiFetch(`/api/vaults/${vaultId}/items/${updated.id}`, {
+            method: 'PUT',
+            body: JSON.stringify({ encryptedData }),
+          });
+          updatedMap.set(updated.id, updated);
+          attached++;
+          continue;
+        }
+        if (step.action === 'create') {
+          const id = randomId();
+          const payload: VaultItemPayload = {
+            id,
+            vaultId,
+            category: 'login',
+            title: step.title,
+            favorite: false,
+            tags: [],
+            urls: [],
+            username: step.username,
+            totp: step.totp,
+            customFields: [],
+            createdAt: now,
+            updatedAt: now,
+          };
+          const encryptedData = await encryptJson(vk, payload, AAD.vaultItem(vaultId, id));
+          batch.push({ id, encryptedData });
+          createdPayloads.push(payload);
+        }
+      }
+
+      if (batch.length > 0) {
+        await apiFetch(`/api/vaults/${vaultId}/items/batch`, {
+          method: 'POST',
+          body: JSON.stringify({ items: batch }),
+        });
+      }
+
+      if (updatedMap.size > 0 || createdPayloads.length > 0) {
+        setItems((prev) => [
+          ...createdPayloads,
+          ...prev.map((it) => updatedMap.get(it.id) ?? it),
+        ]);
+      }
+
+      return {
+        total: entries.length,
+        attached,
+        created: createdPayloads.length,
+        skipped,
+      };
+    },
+    [apiFetch, items]
+  );
+
   const deleteItem = useCallback<VaultContextValue['deleteItem']>(
     async (vaultId, itemId) => {
       await apiFetch(`/api/vaults/${vaultId}/items/${itemId}`, { method: 'DELETE' });
@@ -785,6 +902,20 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [apiFetch]
   );
 
+  const getEmailFilter = useCallback<VaultContextValue['getEmailFilter']>(async () => {
+    return apiFetch<EmailFilterConfig>('/api/email-filter');
+  }, [apiFetch]);
+
+  const saveEmailFilter = useCallback<VaultContextValue['saveEmailFilter']>(
+    async (config) => {
+      return apiFetch<EmailFilterConfig>('/api/email-filter', {
+        method: 'PUT',
+        body: JSON.stringify(config),
+      });
+    },
+    [apiFetch]
+  );
+
   const value = useMemo<VaultContextValue>(
     () => ({
       phase,
@@ -808,6 +939,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       createVault,
       saveItem,
       importCsvItems,
+      importTotpItems,
       deleteItem,
       createAlias,
       toggleAlias,
@@ -818,6 +950,8 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       updateSettings,
       saveImapConfig,
       testImapConfig,
+      getEmailFilter,
+      saveEmailFilter,
       generateNewSecretKey: generateSecretKey,
     }),
     [
@@ -841,6 +975,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       createVault,
       saveItem,
       importCsvItems,
+      importTotpItems,
       deleteItem,
       createAlias,
       toggleAlias,
@@ -851,6 +986,8 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       updateSettings,
       saveImapConfig,
       testImapConfig,
+      getEmailFilter,
+      saveEmailFilter,
     ]
   );
 

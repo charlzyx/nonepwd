@@ -1,0 +1,14 @@
+{
+  "name": "nonepwd-core",
+  "libraries": [
+    {
+      "name": "nonepwd_core",
+      "version": "0.1.0",
+      "files": {
+        "darwin": {
+          "name": "libnonepwd_core.dylib"
+        }
+      }
+    }
+  ]
+}

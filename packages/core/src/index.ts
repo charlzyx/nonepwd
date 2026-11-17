@@ -7,3 +7,4 @@ export * from './otp-extractor.js';
 export * from './secret-ref.js';
 export * from './password-generator.js';
 export * from './csv-import.js';
+export * from './totp-import.js';

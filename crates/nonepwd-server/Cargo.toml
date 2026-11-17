@@ -1,0 +1,30 @@
+[package]
+name = "nonepwd-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "original-uri", "query", "tokio", "ws"] }
+base64 = "0.22"
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+encoding_rs = "0.8"
+futures-util = "0.3"
+hex = "0.4"
+hmac = "0.12"
+http = "1"
+nonepwd-core = { path = "../nonepwd-core" }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+percent-encoding = "2"
+regex = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = "0.0.2-alpha"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
+tokio-tungstenite = "0.29"
+webpki-roots = "0.26"

@@ -23,11 +23,8 @@ export const EmailOtpView: React.FC = () => {
       <div className="mx-auto max-w-5xl space-y-6">
         <div>
           <h2 className="text-xl font-semibold tracking-tight text-foreground">
-            邮箱验证码实时中心 &amp; 域名别名
+            邮箱验证码与别名
           </h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            来自 IMAP IDLE 或 Cloudflare Email Worker 的验证码邮件经 X25519 公钥密封存储，仅在本地内存解密展示。
-          </p>
         </div>
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -43,7 +40,7 @@ export const EmailOtpView: React.FC = () => {
 
               {emails.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-border bg-background p-8 text-center text-xs text-muted-foreground">
-                  暂无验证码邮件。在「IMAP / Cloudflare 配置」中启用收信通道后，新到达的验证码将自动经 X25519 密封展示于此。
+                  暂无验证码邮件。在「设置」中启用 IMAP 或 Cloudflare 收信后，新验证码将自动展示于此。
                 </div>
               ) : (
                 <div className="space-y-3">

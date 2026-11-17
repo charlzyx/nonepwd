@@ -127,10 +127,10 @@ export const SetupWizard: React.FC<{ onBackHome?: () => void }> = ({ onBackHome 
           </div>
           <div>
             <h1 className="text-xl font-semibold tracking-tight text-foreground">
-              初始化 nonepwd 零知识密码库
+              初始化密码库
             </h1>
             <p className="text-xs text-muted-foreground">
-              双密钥零知识架构 · 单人私有化自建 · 端到端加密
+              创建管理员账号与本地加密密钥
             </p>
           </div>
         </div>

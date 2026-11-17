@@ -59,9 +59,9 @@ export const UnlockScreen: React.FC<{ onBackHome?: () => void }> = ({ onBackHome
           <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-background text-foreground">
             <Shield className="h-6 w-6" />
           </div>
-          <h1 className="text-xl font-semibold tracking-tight text-foreground">解锁 nonepwd</h1>
+          <h1 className="text-xl font-semibold tracking-tight text-foreground">解锁密码库</h1>
           <p className="mt-1 text-xs text-muted-foreground">
-            {knownEmail ? `账户：${knownEmail}` : '零知识端到端加密密码库'}
+            {knownEmail ? knownEmail : '输入主密码解锁'}
           </p>
         </div>
 

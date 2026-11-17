@@ -16,3 +16,4 @@ packages/server/bin-dist
 site/public
 site/.cloudflare
 site/dist
+apps/desktop/npcore/build/

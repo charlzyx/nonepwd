@@ -13,6 +13,9 @@ use nonepwd_core::otp_extractor::domains_match;
 use nonepwd_core::random::{random_bytes, random_id};
 use nonepwd_core::secret_ref::{parse_secret_ref, resolve_item_field};
 use nonepwd_core::totp::{generate_totp, TotpResult};
+use nonepwd_core::totp_import::{
+    parse_authenticator_export, plan_totp_import, TotpImportAction,
+};
 use nonepwd_core::types::{
     aad, CustomField, DecryptedEmailPayload, ItemCategory, RootKeysetPayload, SealedEnvelope,
     ServiceAccountTokenPayload, VaultItemPayload, VaultMetadata, DEFAULT_KDF_ITERATIONS,
@@ -92,10 +95,24 @@ pub struct DecryptedItem {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CsvImportSummary {
+    pub format: String,
     pub vault_id: String,
     pub vault_name: String,
     pub total: usize,
     pub imported: usize,
+    pub skipped: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TotpImportSummary {
+    pub format: String,
+    pub vault_id: String,
+    pub vault_name: String,
+    pub total: usize,
+    pub imported: usize,
+    pub attached: usize,
+    pub created: usize,
     pub skipped: usize,
 }
 
@@ -707,6 +724,8 @@ impl NonePwdClient {
             totp,
             email_alias: final_alias,
             notes,
+            card: None,
+            identity: None,
             custom_fields: cf_list,
             created_at: now.clone(),
             updated_at: now,
@@ -799,6 +818,8 @@ impl NonePwdClient {
                 totp: entry.totp,
                 email_alias: None,
                 notes: entry.notes,
+                card: None,
+                identity: None,
                 custom_fields: Vec::new(),
                 created_at: now.clone(),
                 updated_at: now.clone(),
@@ -834,10 +855,153 @@ impl NonePwdClient {
         }
 
         Ok(CsvImportSummary {
+            format: "csv".into(),
             vault_id: vault.id,
             vault_name: vault.metadata.name,
             total,
             imported,
+            skipped,
+        })
+    }
+
+    pub fn import_totp(
+        &mut self,
+        export_text: &str,
+        vault_name_or_id: Option<&str>,
+    ) -> Result<TotpImportSummary, String> {
+        self.sync()?;
+        if self.active_mode != "owner" {
+            return Err("Only owner session can import TOTP entries".into());
+        }
+
+        let vault = match vault_name_or_id {
+            Some(v) => self.find_vault(v)?.clone(),
+            None => self
+                .vaults
+                .iter()
+                .find(|v| v.metadata.name.eq_ignore_ascii_case("Personal"))
+                .or_else(|| self.vaults.first())
+                .cloned()
+                .ok_or_else(|| "No vault found on account".to_string())?,
+        };
+
+        let entries = parse_authenticator_export(export_text)?;
+        let total = entries.len();
+        let existing_payloads: Vec<VaultItemPayload> = self
+            .items
+            .iter()
+            .filter(|it| it.vault_id == vault.id)
+            .map(|it| it.payload.clone())
+            .collect();
+
+        let plan = plan_totp_import(&existing_payloads, &entries);
+        let now = now_iso_utc();
+        let mut attached = 0usize;
+        let mut created = 0usize;
+        let mut skipped = 0usize;
+        let mut batch_req = Vec::new();
+        let mut created_items = Vec::new();
+
+        for step in plan {
+            match step.decision {
+                TotpImportAction::SkipDuplicate { .. } => {
+                    skipped += 1;
+                }
+                TotpImportAction::Attach {
+                    item_id,
+                    otpauth_uri,
+                } => {
+                    if let Some(idx) = self
+                        .items
+                        .iter()
+                        .position(|it| it.vault_id == vault.id && it.id == item_id)
+                    {
+                        let mut updated = self.items[idx].payload.clone();
+                        updated.totp = Some(otpauth_uri);
+                        updated.updated_at = now.clone();
+                        let encrypted_data = encrypt_json(
+                            &vault.key_bytes,
+                            &updated,
+                            Some(&aad::vault_item(&vault.id, &item_id)),
+                        )?;
+                        let path = format!("/api/vaults/{}/items/{}", vault.id, item_id);
+                        let _: serde_json::Value = self.request_json(
+                            "PUT",
+                            &path,
+                            Some(&serde_json::json!({ "encryptedData": encrypted_data })),
+                            false,
+                        )?;
+                        self.items[idx].payload = updated;
+                        attached += 1;
+                    }
+                }
+                TotpImportAction::Create {
+                    title,
+                    username,
+                    totp,
+                } => {
+                    let id = random_id()?;
+                    let payload = VaultItemPayload {
+                        id: id.clone(),
+                        vault_id: vault.id.clone(),
+                        category: ItemCategory::Login,
+                        title,
+                        favorite: false,
+                        tags: Vec::new(),
+                        urls: Vec::new(),
+                        username,
+                        password: None,
+                        totp: Some(totp),
+                        email_alias: None,
+                        notes: None,
+                        card: None,
+                        identity: None,
+                        custom_fields: Vec::new(),
+                        created_at: now.clone(),
+                        updated_at: now.clone(),
+                        last_used_at: None,
+                    };
+                    let encrypted_data = encrypt_json(
+                        &vault.key_bytes,
+                        &payload,
+                        Some(&aad::vault_item(&vault.id, &id)),
+                    )?;
+                    batch_req.push(serde_json::json!({
+                        "id": id,
+                        "encryptedData": encrypted_data,
+                    }));
+                    created_items.push(DecryptedItem {
+                        id,
+                        vault_id: vault.id.clone(),
+                        vault_name: vault.metadata.name.clone(),
+                        payload,
+                    });
+                    created += 1;
+                }
+            }
+        }
+
+        if !batch_req.is_empty() {
+            let path = format!("/api/vaults/{}/items/batch", vault.id);
+            let _: serde_json::Value = self.request_json(
+                "POST",
+                &path,
+                Some(&serde_json::json!({ "items": batch_req })),
+                false,
+            )?;
+            for item in created_items.into_iter().rev() {
+                self.items.insert(0, item);
+            }
+        }
+
+        Ok(TotpImportSummary {
+            format: "totp".into(),
+            vault_id: vault.id,
+            vault_name: vault.metadata.name,
+            total,
+            imported: attached + created,
+            attached,
+            created,
             skipped,
         })
     }

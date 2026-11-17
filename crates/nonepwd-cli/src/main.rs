@@ -12,6 +12,7 @@ use std::process::{exit, Command};
 use nonepwd_core::encoding::to_base64_url;
 use nonepwd_core::random::random_bytes;
 use nonepwd_core::secret_ref::{find_secret_refs, parse_dot_env, replace_secret_refs};
+use nonepwd_core::totp_import::{detect_import_format, ImportFormat};
 use nonepwd_core::types::ItemCategory;
 
 use crate::client::NonePwdClient;
@@ -100,6 +101,7 @@ fn parse_category(raw: Option<&str>) -> ItemCategory {
         "secure_note" => ItemCategory::SecureNote,
         "ssh_key" => ItemCategory::SshKey,
         "card" => ItemCategory::Card,
+        "identity" => ItemCategory::Identity,
         _ => ItemCategory::Login,
     }
 }
@@ -117,33 +119,75 @@ fn inject_template(client: &mut NonePwdClient, template: &str) -> Result<String,
     Ok(replace_secret_refs(template, &map))
 }
 
+fn resolve_requested_import_format(
+    raw_flag: Option<&str>,
+    content: &str,
+) -> Result<ImportFormat, String> {
+    match raw_flag.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(detect_import_format(content)),
+        Some(f) if f.eq_ignore_ascii_case("auto") => Ok(detect_import_format(content)),
+        Some(f) if f.eq_ignore_ascii_case("csv") => Ok(ImportFormat::Csv),
+        Some(f)
+            if f.eq_ignore_ascii_case("totp")
+                || f.eq_ignore_ascii_case("2fa")
+                || f.eq_ignore_ascii_case("authenticator") =>
+        {
+            Ok(ImportFormat::Totp)
+        }
+        Some(other) => Err(format!(
+            "Unsupported --format \"{other}\" (expected csv or totp)"
+        )),
+    }
+}
+
 fn run_import_command(
     client: &mut NonePwdClient,
     parsed: &ParsedArgs,
     positional_idx: usize,
     as_json: bool,
 ) -> Result<i32, String> {
-    let csv_path = parsed
+    let file_path = parsed
         .positionals
         .get(positional_idx)
         .map(String::as_str)
         .or_else(|| first_flag(parsed, "file"))
         .or_else(|| first_flag(parsed, "in"))
-        .ok_or("import requires <csvFile>")?;
-    let csv_text = fs::read_to_string(csv_path)
-        .map_err(|e| format!("Failed reading CSV file {csv_path}: {e}"))?;
-    let summary = client.import_csv(
-        &csv_text,
-        first_flag(parsed, "vault"),
-        !has_flag(parsed, "no-dedupe"),
-    )?;
-    if as_json {
-        println!("{}", serde_json::to_string_pretty(&summary).unwrap());
-    } else {
-        println!(
-            "Imported {} items into [{}] (parsed: {}, skipped duplicates: {})",
-            summary.imported, summary.vault_name, summary.total, summary.skipped
-        );
+        .ok_or("import requires <file>")?;
+    let raw_text = fs::read_to_string(file_path)
+        .map_err(|e| format!("Failed reading import file {file_path}: {e}"))?;
+
+    let format = resolve_requested_import_format(first_flag(parsed, "format"), &raw_text)?;
+    match format {
+        ImportFormat::Csv => {
+            let summary = client.import_csv(
+                &raw_text,
+                first_flag(parsed, "vault"),
+                !has_flag(parsed, "no-dedupe"),
+            )?;
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+            } else {
+                println!(
+                    "Imported {} items into [{}] (parsed: {}, skipped duplicates: {})",
+                    summary.imported, summary.vault_name, summary.total, summary.skipped
+                );
+            }
+        }
+        ImportFormat::Totp => {
+            let summary = client.import_totp(&raw_text, first_flag(parsed, "vault"))?;
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+            } else {
+                println!(
+                    "Imported {} TOTP entries into [{}] (attached: {}, created: {}, skipped: {})",
+                    summary.imported,
+                    summary.vault_name,
+                    summary.attached,
+                    summary.created,
+                    summary.skipped
+                );
+            }
+        }
     }
     Ok(0)
 }
@@ -160,7 +204,7 @@ Usage:
   np item create --vault <v> --title <t> [--category <c>] [--url <u>] [--username <u>]
                  [--password <p> | --generate] [--totp <secret>] [--auto-alias]
                  [--field key=value ...] [--json]
-  np import <csvFile> [--vault Personal] [--no-dedupe] [--json]
+  np import <file> [--format csv|totp] [--vault Personal] [--no-dedupe] [--json]
   np item delete <item> [--vault <v>]
   np read <np://vault/item/field>
   np otp <item> [--vault <v>] [--json]
@@ -169,6 +213,8 @@ Usage:
   np alias list [--json] | np alias create --for <domain> [--json] | np alias toggle <alias>
   np mail list [--json] | np mail otp [--domain <d>] [--alias <a>] [--wait <sec>] [--json]
   np service-account list | create <name> --vault <v1> [--vault <v2>] [--json] | revoke <id>
+  np server [--host 127.0.0.1] [--port 8787] [--data-dir ~/.nonepwd/data] [--web-dist DIR]
+            (native host builds; cross-compiled static musl client binaries omit embedded server)
   np serve --connect [--host 127.0.0.1] [--port 8788] [--token <tok>]";
 
 fn run() -> Result<i32, String> {
@@ -674,6 +720,41 @@ fn run() -> Result<i32, String> {
                     Ok(0)
                 }
                 other => Err(format!("Unknown service-account subcommand: {other}")),
+            }
+        }
+
+        "server" => {
+            #[cfg(not(target_env = "musl"))]
+            {
+                let mut opts = nonepwd_server::ServerOptions::default();
+                let env_host = env::var("NONEPWD_HOST").ok().filter(|s| !s.is_empty());
+                if let Some(h) = first_flag(&parsed, "host").or(env_host.as_deref()) {
+                    opts.host = h.to_string();
+                }
+                let env_port = env::var("NONEPWD_PORT")
+                    .ok()
+                    .or_else(|| env::var("PORT").ok())
+                    .filter(|s| !s.is_empty());
+                if let Some(p_raw) = first_flag(&parsed, "port").or(env_port.as_deref()) {
+                    opts.port = p_raw
+                        .parse::<u16>()
+                        .map_err(|_| format!("Invalid --port value: \"{p_raw}\""))?;
+                }
+                if let Some(dd) = first_flag(&parsed, "data-dir") {
+                    opts.data_dir = Some(std::path::PathBuf::from(dd));
+                }
+                if let Some(wd) = first_flag(&parsed, "web-dist") {
+                    opts.web_dist = Some(std::path::PathBuf::from(wd));
+                }
+                if let Some(bd) = first_flag(&parsed, "bin-dist") {
+                    opts.bin_dist = Some(std::path::PathBuf::from(bd));
+                }
+                nonepwd_server::run_blocking(opts)?;
+                Ok(0)
+            }
+            #[cfg(target_env = "musl")]
+            {
+                Err("`np server` is not bundled in cross-compiled musl client binaries; build natively for host".into())
             }
         }
 

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { KeyRound, Plus, Terminal, Trash2 } from 'lucide-react';
+import { KeyRound, Plus, Trash2 } from 'lucide-react';
 import { useVault } from '../state/VaultContext';
 import { CopyButton } from './CopyButton';
 
@@ -35,11 +35,9 @@ export const DeveloperView: React.FC = () => {
     <div className="flex-1 overflow-y-auto bg-background p-6 text-foreground">
       <div className="mx-auto max-w-4xl space-y-6">
         <div>
-          <h2 className="text-xl font-semibold tracking-tight text-foreground">
-            开发者工具：np CLI、Service Account 与 Connect API
-          </h2>
+          <h2 className="text-xl font-semibold tracking-tight text-foreground">Service Account</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            为 CI/CD、本地开发与 AI Agent 设计的零知识密钥注入与本地 Connect HTTP 解密网关。每个 Token 仅封装所选 Vault 的子密钥，客户端本地解密，服务端全程零明文。
+            签发仅授权指定密码库的访问令牌，供 CLI 与自动化脚本使用。
           </p>
         </div>
 
@@ -141,27 +139,6 @@ export const DeveloperView: React.FC = () => {
               )}
             </div>
           </div>
-        </div>
-
-        {/* CLI & Connect API Cheat Sheet */}
-        <div className="rounded-xl border border-border bg-card p-5">
-          <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-foreground">
-            <Terminal className="h-4 w-4 text-muted-foreground" />
-            常用 CLI 与本地 Connect HTTP API 示例
-          </h3>
-          <pre className="overflow-x-auto rounded-lg border border-border bg-background p-4 font-mono text-xs leading-relaxed text-foreground">{`# 1. 读取字段与动态 2FA 验证码
-np read "np://DevOps/OpenAI/password"
-np otp "GitHub" --vault Personal
-
-# 2. 内存注入环境变量启动（硬盘永不落盘明文 .env）
-np run --env-file .env.tpl -- npm run dev
-
-# 3. 阻塞等待新邮件验证码到达（适合自动化脚本与 AI Agent 登录）
-np mail otp --domain github.com --wait 30s
-
-# 4. 启动本地解密 REST 网关（Connect HTTP API）
-np serve --connect --port 8788 --token my-local-token
-curl -H "Authorization: Bearer my-local-token" "http://127.0.0.1:8788/v1/resolve?ref=np://DevOps/OpenAI/password"`}</pre>
         </div>
       </div>
     </div>

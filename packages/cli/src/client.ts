@@ -18,8 +18,10 @@ import {
   generateTotp,
   itemImportFingerprint,
   openSealedJson,
+  parseAuthenticatorExport,
   parsePasswordCsv,
   parseSecretRef,
+  planTotpImport,
   randomBytes,
   randomId,
   resolveItemField,
@@ -564,6 +566,7 @@ export class NonePwdCliClient {
     vaultNameOrId?: string;
     skipDuplicates?: boolean;
   }): Promise<{
+    format: 'csv';
     vaultId: string;
     vaultName: string;
     total: number;
@@ -642,10 +645,126 @@ export class NonePwdCliClient {
     }
 
     return {
+      format: 'csv',
       vaultId: vault.id,
       vaultName: vault.metadata.name,
       total: entries.length,
       imported: batchReq.length,
+      skipped,
+    };
+  }
+
+  async importTotp(params: {
+    exportText: string;
+    vaultNameOrId?: string;
+  }): Promise<{
+    format: 'totp';
+    vaultId: string;
+    vaultName: string;
+    total: number;
+    imported: number;
+    attached: number;
+    created: number;
+    skipped: number;
+  }> {
+    await this.sync();
+    if (this.activeMode !== 'owner') {
+      throw new Error('Only owner session can import TOTP entries');
+    }
+
+    const vault = params.vaultNameOrId
+      ? this.findVault(params.vaultNameOrId)
+      : this.vaults.find((v) => v.metadata.name.toLowerCase() === 'personal') ?? this.vaults[0];
+    if (!vault) {
+      throw new Error('No vault found on account');
+    }
+
+    const entries = parseAuthenticatorExport(params.exportText);
+    const existingPayloads = this.items
+      .filter((it) => it.vaultId === vault.id)
+      .map((it) => it.payload);
+
+    const plan = planTotpImport(existingPayloads, entries);
+    const now = new Date().toISOString();
+    let attached = 0;
+    let created = 0;
+    let skipped = 0;
+    const batchReq: Array<{ id: string; encryptedData: string }> = [];
+    const createdItems: DecryptedItem[] = [];
+
+    for (const step of plan) {
+      if (step.action === 'skip_duplicate') {
+        skipped++;
+        continue;
+      }
+
+      if (step.action === 'attach') {
+        const existing = this.items.find(
+          (it) => it.vaultId === vault.id && it.id === step.itemId
+        );
+        if (existing) {
+          const updated: VaultItemPayload = {
+            ...existing.payload,
+            totp: step.otpauthUri,
+            updatedAt: now,
+          };
+          const encryptedData = await encryptJson(
+            vault.keyBytes,
+            updated,
+            AAD.vaultItem(vault.id, step.itemId)
+          );
+          await this.requestJson(`/api/vaults/${vault.id}/items/${step.itemId}`, {
+            method: 'PUT',
+            body: JSON.stringify({ encryptedData }),
+          });
+          existing.payload = updated;
+          attached++;
+        }
+        continue;
+      }
+
+      const id = randomId();
+      const payload: VaultItemPayload = {
+        id,
+        vaultId: vault.id,
+        category: 'login',
+        title: step.title,
+        favorite: false,
+        tags: [],
+        urls: [],
+        username: step.username,
+        totp: step.totp,
+        customFields: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+      const encryptedData = await encryptJson(vault.keyBytes, payload, AAD.vaultItem(vault.id, id));
+      batchReq.push({ id, encryptedData });
+      createdItems.push({
+        id,
+        vaultId: vault.id,
+        vaultName: vault.metadata.name,
+        payload,
+      });
+      created++;
+    }
+
+    if (batchReq.length > 0) {
+      await this.requestJson(`/api/vaults/${vault.id}/items/batch`, {
+        method: 'POST',
+        body: JSON.stringify({ items: batchReq }),
+      });
+      this.items.unshift(...createdItems);
+    }
+
+    return {
+      format: 'totp',
+      vaultId: vault.id,
+      vaultName: vault.metadata.name,
+      total: entries.length,
+      imported: attached + created,
+      attached,
+      created,
       skipped,
     };
   }

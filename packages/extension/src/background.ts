@@ -22,6 +22,8 @@ import {
   type VaultMetadata,
 } from '@nonepwd/core';
 
+import type { ExtendedVaultItem } from './types.js';
+
 interface LocalPrefs {
   serverUrl?: string;
   email?: string;
@@ -224,7 +226,7 @@ function connectWs(session: SessionCache): void {
 
           if (emailItem.otpCode) {
             await chrome.action.setBadgeText({ text: 'OTP' });
-            await chrome.action.setBadgeBackgroundColor({ color: '#10b981' });
+            await chrome.action.setBadgeBackgroundColor({ color: '#171717' });
           }
 
           // Broadcast live OTP to open tabs
@@ -282,19 +284,41 @@ function connectWs(session: SessionCache): void {
 async function queryForTabUrl(tabUrl: string, tabId?: number) {
   const session = await getSession();
   if (!session) {
-    return { unlocked: false, logins: [], pendingItem: null, latestOtpEmail: null };
+    return {
+      unlocked: false,
+      logins: [],
+      cards: [],
+      identities: [],
+      pendingItem: null,
+      latestOtpEmail: null,
+    };
   }
 
   const now = Date.now();
   const pending = tabId ? session.pendingByTab[tabId] : undefined;
   const activePending = pending && pending.expiresAt > now ? pending : undefined;
 
-  const matchedItems = session.items.filter(
+  const allItems = session.items as ExtendedVaultItem[];
+
+  const matchedItems = allItems.filter(
     (item) =>
       item.category === 'login' &&
       (item.urls.some((u) => urlsMatchWithLocalhost(tabUrl, u)) ||
         (activePending && item.id === activePending.itemId))
   );
+
+  const sortByRelevance = (a: ExtendedVaultItem, b: ExtendedVaultItem) => {
+    const aMatch = a.urls.some((u) => urlsMatchWithLocalhost(tabUrl, u)) ? 1 : 0;
+    const bMatch = b.urls.some((u) => urlsMatchWithLocalhost(tabUrl, u)) ? 1 : 0;
+    if (aMatch !== bMatch) return bMatch - aMatch;
+    if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
+    return 0;
+  };
+
+  const cards = allItems.filter((item) => item.category === 'card' && item.card).sort(sortByRelevance);
+  const identities = allItems
+    .filter((item) => item.category === 'identity' && item.identity)
+    .sort(sortByRelevance);
 
   const loginsWithTotp = await Promise.all(
     matchedItems.map(async (item) => {
@@ -335,6 +359,8 @@ async function queryForTabUrl(tabUrl: string, tabId?: number) {
     unlocked: true,
     aliasDomain: session.aliasDomain,
     logins: loginsWithTotp,
+    cards,
+    identities,
     pendingItem: pendingEntry,
     latestOtpEmail,
   };

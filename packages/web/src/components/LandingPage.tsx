@@ -72,8 +72,8 @@ const FAQ_ITEMS = [
     a: '完全同源。核心密码学、RFC 6238 TOTP、邮件验证码清洗与 np:// 引用解析全部由 crates/nonepwd-core 用纯 Rust 编写：同一份代码编译为 nonepwd_core.wasm 驱动 Web 与浏览器插件，同时静态链接产出 macOS arm64 / Linux x86_64 原生 np 单二进制。',
   },
   {
-    q: '自建需要重型数据库或外部依赖吗？',
-    a: '不需要。@nonepwd/server 内置 Node SQLite 持久化数据库，一条 npx @nonepwd/server 即可在本机运行，也提供轻量单容器 Docker 镜像（配合 Cloudflare Tunnel 或 Caddy 即可安全接入公网多端同步）。',
+    q: '自建需要重型数据库或 Node 运行时吗？',
+    a: '不需要。服务端已完全使用纯 Rust 重写并集成到单二进制 np server 中，内置 SQLite 持久化。一条 np server 即可在本机运行，也支持配合 Cloudflare Tunnel 或 Caddy 安全接入公网多端同步。',
   },
   {
     q: '和商业云密码管理器有什么区别？',
@@ -181,10 +181,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               一个私有实例，接管你的全部密码与验证码。
             </h1>
 
-            <p className="mt-5 max-w-[38rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
-              双密钥零知识加密（<code className="font-mono text-[15px] text-foreground">NP3-...</code>）、实时邮箱验证码提取、2FA
-              动态口令、MV3 浏览器自动填充与原生 Rust <code className="font-mono text-[15px] text-foreground">np</code> CLI —
-              完全运行在你自己的机器上。
+            <p className="mt-5 max-w-[40rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
+              双密钥零知识加密（<code className="font-mono text-[15px] text-foreground">NP3-...</code>）、Rust 单二进制服务端{' '}
+              <code className="font-mono text-[15px] text-foreground">np server</code>、macOS 原生桌面客户端（Asuka）、密码 / 银行卡 / 地址填充、2FA 导入与邮件正则过滤 — 完全运行在你自己的设备上。
             </p>
 
             <div className="mt-8 flex flex-wrap items-center gap-x-3.5 gap-y-3">
@@ -207,8 +206,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               </a>
 
               <div className="inline-flex h-10 items-center gap-2.5 rounded-lg border border-border bg-muted/40 px-3 font-mono text-xs text-muted-foreground">
-                <span>npx @nonepwd/server</span>
-                <CopyButton value="npx @nonepwd/server" variant="minimal" />
+                <span>np server</span>
+                <CopyButton value="np server" variant="minimal" />
               </div>
             </div>
 
@@ -217,13 +216,13 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 Built on one pure-Rust core across every surface
               </div>
               <div className="mt-4 flex flex-wrap items-center gap-x-7 gap-y-2.5 font-mono text-xs text-muted-foreground">
-                <span>Rust + WASM</span>
+                <span>Rust + WASM + C ABI</span>
+                <span>np server (SQLite)</span>
+                <span>macOS Native (Asuka)</span>
                 <span>AES-256-GCM</span>
                 <span>X25519 Sealed Box</span>
-                <span>Chrome / Arc / Edge MV3</span>
-                <span>IMAP IDLE</span>
-                <span>Cloudflare Workers</span>
-                <span>macOS &amp; Linux CLI</span>
+                <span>Chrome / Arc MV3</span>
+                <span>IMAP IDLE + Regex Filter</span>
               </div>
             </div>
           </section>
@@ -281,8 +280,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 </div>
                 {[
                   { title: 'GitHub', sub: 'github.a8f2@mail.domain', tag: '2FA · OTP', active: true },
+                  { title: '招商银行 Visa', sub: '•••• 4242 · 08/28', tag: '银行卡', active: false },
                   { title: 'OpenAI Platform', sub: 'sk-proj-••••••••••••', tag: 'np://', active: false },
-                  { title: 'Cloudflare', sub: 'ops@mail.domain', tag: '2FA', active: false },
                 ].map((row) => (
                   <div
                     key={row.title}
@@ -364,18 +363,18 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 },
                 {
                   icon: MailCheck,
-                  title: '邮箱验证码秒级提取',
-                  desc: '主力邮箱走 IMAP IDLE 长连接，自有域名走 Cloudflare Email Routing；X25519 公钥当场密封并通过 WebSocket 实时推送。',
+                  title: '邮箱验证码提取 & 正则过滤',
+                  desc: '支持 IMAP IDLE 与 Cloudflare Email Routing；内置 Allow/Deny 多字段正则过滤与仅保留验证码模式，X25519 密封后经 WebSocket 秒级推送。',
                 },
                 {
                   icon: Zap,
-                  title: '闭合 Shadow DOM 六宫格接力',
-                  desc: 'MV3 扩展隔离宿主网页 CSS 与脚本。第 1 步填入账密后记住目标条目，第 2 步自动弹出 2FA 与最新邮箱码一键填满验证码输入框。',
+                  title: '账密、银行卡、地址与 2FA 填充',
+                  desc: 'MV3 扩展通过闭合 Shadow DOM 自动填充账密、2FA、银行卡与地址身份（CVV 仅点击时填充）；支持浏览器 CSV 与 2FA 验证器导出导入。',
                 },
                 {
                   icon: Terminal,
-                  title: '原生跨平台 np 命令行',
-                  desc: '支持 np run 环境变量零落盘注入、Service Account 分库授权、Connect HTTP API，以及 np mail otp --wait 为脚本与 Agent 等码。',
+                  title: 'macOS 原生客户端 & np CLI',
+                  desc: '基于 Asuka 打造的 macOS 原生桌面客户端（自动清剪贴板、实时 2FA/邮箱码），配合 np run 零落盘注入与 Service Account 隔离。',
                 },
                 {
                   icon: Shield,
@@ -384,8 +383,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 },
                 {
                   icon: Layers,
-                  title: '单文件轻量化自建',
-                  desc: '纯 Rust 核心（nonepwd-core）驱动全端 + 内置 Node SQLite 持久化。一条 npx @nonepwd/server 即可跑起来，永久 0 订阅费。',
+                  title: 'Rust 单二进制零依赖自建',
+                  desc: '核心密码学、CLI 与 HTTP/WS 服务端（np server）全部由纯 Rust 编写并内置 SQLite，告别 Node 运行时，永久 0 订阅费。',
                 },
               ].map((item) => {
                 const Icon = item.icon;
@@ -427,7 +426,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                     onClick={() => setCliTab(key)}
                     className={`flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-xs font-medium transition-colors ${
                       cliTab === key
-                        ? 'border-foreground bg-primary text-primary-foreground'
+                        ? 'border-foreground/30 bg-muted text-foreground'
                         : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground'
                     }`}
                   >
@@ -466,16 +465,16 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                     <span>01 / SERVER</span>
                     <Cpu className="size-4" />
                   </div>
-                  <h3 className="mt-3 text-sm font-medium text-foreground">启动私有零知识服务端</h3>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">启动 Rust 单二进制服务端</h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    免克隆零配置启动本地 SQLite 服务端，也支持 Docker Compose 部署配合隧道接入公网。
+                    一条 <code className="text-foreground">np server</code> 启动内置 SQLite 的纯 Rust 零知识服务端与 Web 管理台，也支持配合隧道接入公网。
                   </p>
                 </div>
 
                 <div className="mt-5 space-y-2.5">
                   <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 font-mono text-xs text-foreground">
-                    <span className="truncate">npx @nonepwd/server</span>
-                    <CopyButton value="npx @nonepwd/server" variant="minimal" />
+                    <span className="truncate">np server</span>
+                    <CopyButton value="np server" variant="minimal" />
                   </div>
                   <button
                     type="button"
@@ -488,17 +487,16 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 </div>
               </div>
 
-              {/* 02 Browser Extension */}
+              {/* 02 Desktop & Browser Extension */}
               <div id="extension" className="flex flex-col justify-between bg-background p-6">
                 <div>
                   <div className="flex items-center justify-between font-mono text-xs text-muted-foreground">
-                    <span>02 / EXTENSION</span>
+                    <span>02 / DESKTOP &amp; EXTENSION</span>
                     <KeyRound className="size-4" />
                   </div>
-                  <h3 className="mt-3 text-sm font-medium text-foreground">加载 Chrome / Arc MV3 插件</h3>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">macOS 原生客户端 &amp; MV3 插件</h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    下载插件包并解压，打开 <code className="text-foreground">chrome://extensions</code>{' '}
-                    开启开发者模式后选择解压文件夹即可连接自动填充。
+                    使用 Asuka 构建的原生 macOS 桌面应用（直连 Rust 核心），搭配 Chrome / Arc MV3 插件自动填充账密、银行卡、地址与 2FA。
                   </p>
                 </div>
 
@@ -521,9 +519,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                     <span>03 / CLI</span>
                     <Terminal className="size-4" />
                   </div>
-                  <h3 className="mt-3 text-sm font-medium text-foreground">安装原生 np 命令行</h3>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">安装原生 np 单二进制</h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    macOS 与 Linux 通用命令，支持加密会话登录、注入环境变量与实时接收邮件验证码。
+                    集成 <code className="text-foreground">np server</code>、CSV/2FA 导入、环境变量注入与实时接收邮件验证码。
                   </p>
                 </div>
 

@@ -29,6 +29,7 @@ export function useTheme() {
     const dark = mode === 'dark';
     if (typeof document !== 'undefined') {
       document.documentElement.classList.toggle('dark', dark);
+      document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
     }
     try {
       localStorage.setItem(THEME_STORAGE_KEY, mode);
