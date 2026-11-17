@@ -472,7 +472,7 @@ export async function syncImapInbox(
       await client.login(row.host, row.username, password);
       await client.selectInbox();
 
-      const sinceDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const sinceDate = new Date(Date.now() - 36 * 60 * 60 * 1000);
       const searchLines = await client.runCommand(
         `UID SEARCH SINCE ${formatImapDateUtc(sinceDate)}`
       );
@@ -502,6 +502,14 @@ export async function syncImapInbox(
           highestUid = maxFound;
         } else {
           targetUids = uniqueSorted.filter((u) => u > row.last_uid).slice(-15);
+          if (options?.force) {
+            const countRow = await env.DB.prepare(
+              'SELECT COUNT(*) AS cnt FROM encrypted_emails'
+            ).first<{ cnt: number }>();
+            if (Number(countRow?.cnt ?? 0) === 0) {
+              targetUids = uniqueSorted.slice(-10);
+            }
+          }
           if (maxFound > highestUid) {
             highestUid = maxFound;
           }

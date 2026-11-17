@@ -91,6 +91,7 @@ export interface R2BackupMeta {
 export type AuthPhase = 'loading' | 'uninitialized' | 'locked' | 'unlocked' | 'standalone';
 
 const TRUSTED_DEVICE_KEY = 'nonepwd.trusted_device.v1';
+const CUSTOM_GROUPS_KEY = 'nonepwd.custom_groups.v1';
 
 interface TrustedDevicePrefs {
   email: string;
@@ -115,6 +116,26 @@ function saveTrustedDevice(prefs: TrustedDevicePrefs | null): void {
   }
 }
 
+function loadCustomGroups(): string[] {
+  try {
+    const raw = localStorage.getItem(CUSTOM_GROUPS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x): x is string => typeof x === 'string' && x.trim().length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function saveCustomGroups(groups: string[]): void {
+  try {
+    localStorage.setItem(CUSTOM_GROUPS_KEY, JSON.stringify(groups));
+  } catch {
+    // ignore storage failures
+  }
+}
+
 interface VaultContextValue {
   phase: AuthPhase;
   wsConnected: boolean;
@@ -127,6 +148,9 @@ interface VaultContextValue {
   emails: DecryptedEmailItem[];
   serviceAccounts: ServiceAccountRecord[];
   imapConfig: ImapConfigPublic | null;
+  customGroups: string[];
+  allGroups: string[];
+  securityIssues: Record<string, string>;
   error: string | null;
   clearError(): void;
   setupAccount(params: {
@@ -186,6 +210,10 @@ interface VaultContextValue {
     username: string;
     password?: string;
   }): Promise<{ ok: boolean; messages?: number; error?: string }>;
+  syncImapNow(): Promise<{ ok: boolean; synced?: number; error?: string | null }>;
+  addGroup(name: string): void;
+  removeGroup(name: string): Promise<void>;
+  toggleItemGroup(item: VaultItemPayload, group: string): Promise<void>;
   getEmailFilter(): Promise<EmailFilterConfig>;
   saveEmailFilter(config: EmailFilterConfig): Promise<EmailFilterConfig>;
   listBackups(): Promise<{ enabled: boolean; backups: R2BackupMeta[] }>;
@@ -217,6 +245,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [emails, setEmails] = useState<DecryptedEmailItem[]>([]);
   const [serviceAccounts, setServiceAccounts] = useState<ServiceAccountRecord[]>([]);
   const [imapConfig, setImapConfig] = useState<ImapConfigPublic | null>(null);
+  const [customGroups, setCustomGroups] = useState<string[]>(() => loadCustomGroups());
   const [error, setError] = useState<string | null>(null);
 
   const sessionTokenRef = useRef<string | null>(null);
@@ -916,6 +945,120 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [apiFetch]
   );
 
+  const syncImapNow = useCallback<VaultContextValue['syncImapNow']>(async () => {
+    try {
+      const res = await apiFetch<{
+        ok: boolean;
+        synced?: number;
+        error?: string | null;
+        imap?: ImapConfigPublic;
+      }>('/api/imap/sync', { method: 'POST' });
+      if (res.imap) {
+        setImapConfig(res.imap);
+      }
+      await refreshAll();
+      return {
+        ok: Boolean(res.ok),
+        synced: res.synced,
+        error: res.error ?? null,
+      };
+    } catch (err) {
+      try {
+        await refreshAll();
+      } catch {
+        // ignore refresh errors when surfacing sync failure
+      }
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : 'IMAP 同步失败',
+      };
+    }
+  }, [apiFetch, refreshAll]);
+
+  const addGroup = useCallback<VaultContextValue['addGroup']>((name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setCustomGroups((prev) => {
+      if (prev.some((g) => g.trim().toLowerCase() === trimmed.toLowerCase())) {
+        return prev;
+      }
+      const next = [...prev, trimmed];
+      saveCustomGroups(next);
+      return next;
+    });
+  }, []);
+
+  const removeGroup = useCallback<VaultContextValue['removeGroup']>(
+    async (name) => {
+      const target = name.trim().toLowerCase();
+      if (!target) return;
+      setCustomGroups((prev) => {
+        const next = prev.filter((g) => g.trim().toLowerCase() !== target);
+        saveCustomGroups(next);
+        return next;
+      });
+      const affected = items.filter((item) =>
+        item.tags.some((t) => t.trim().toLowerCase() === target)
+      );
+      for (const item of affected) {
+        const nextTags = item.tags.filter((t) => t.trim().toLowerCase() !== target);
+        try {
+          await saveItem({ ...item, tags: nextTags }, false);
+        } catch {
+          // continue removing group from remaining items
+        }
+      }
+    },
+    [items, saveItem]
+  );
+
+  const toggleItemGroup = useCallback<VaultContextValue['toggleItemGroup']>(
+    async (item, group) => {
+      const trimmed = group.trim();
+      if (!trimmed) return;
+      addGroup(trimmed);
+      const target = trimmed.toLowerCase();
+      const exists = item.tags.some((t) => t.trim().toLowerCase() === target);
+      const nextTags = exists
+        ? item.tags.filter((t) => t.trim().toLowerCase() !== target)
+        : [...item.tags, trimmed];
+      await saveItem({ ...item, tags: nextTags }, false);
+    },
+    [addGroup, saveItem]
+  );
+
+  const allGroups = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const raw of [...customGroups, ...items.flatMap((i) => i.tags)]) {
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      const key = trimmed.toLowerCase();
+      if (!seen.has(key)) {
+        seen.set(key, trimmed);
+      }
+    }
+    return Array.from(seen.values()).sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+  }, [customGroups, items]);
+
+  const securityIssues = useMemo<Record<string, string>>(() => {
+    const counts = new Map<string, number>();
+    for (const item of items) {
+      if (item.category === 'login' && item.password) {
+        counts.set(item.password, (counts.get(item.password) ?? 0) + 1);
+      }
+    }
+    const issues: Record<string, string> = {};
+    for (const item of items) {
+      if (item.category !== 'login' || !item.password) continue;
+      if ((counts.get(item.password) ?? 0) > 1) {
+        issues[item.id] = '重复使用密码';
+      } else if (item.password.length < 10) {
+        issues[item.id] = '弱密码（少于 10 位）';
+      }
+    }
+    return issues;
+  }, [items]);
+
   const getEmailFilter = useCallback<VaultContextValue['getEmailFilter']>(async () => {
     return apiFetch<EmailFilterConfig>('/api/email-filter');
   }, [apiFetch]);
@@ -981,6 +1124,9 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       emails,
       serviceAccounts,
       imapConfig,
+      customGroups,
+      allGroups,
+      securityIssues,
       error,
       clearError: () => setError(null),
       setupAccount,
@@ -1002,6 +1148,10 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       updateSettings,
       saveImapConfig,
       testImapConfig,
+      syncImapNow,
+      addGroup,
+      removeGroup,
+      toggleItemGroup,
       getEmailFilter,
       saveEmailFilter,
       listBackups,
@@ -1022,6 +1172,9 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       emails,
       serviceAccounts,
       imapConfig,
+      customGroups,
+      allGroups,
+      securityIssues,
       error,
       setupAccount,
       unlock,
@@ -1042,6 +1195,10 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       updateSettings,
       saveImapConfig,
       testImapConfig,
+      syncImapNow,
+      addGroup,
+      removeGroup,
+      toggleItemGroup,
       getEmailFilter,
       saveEmailFilter,
       listBackups,

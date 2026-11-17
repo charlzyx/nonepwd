@@ -263,7 +263,7 @@ impl ImapClient {
         }
     }
 
-    async fn login(&mut self, username: &str, password: &str) -> Result<(), String> {
+    async fn login(&mut self, host: &str, username: &str, password: &str) -> Result<(), String> {
         if username.contains(['\r', '\n']) || password.contains(['\r', '\n']) {
             return Err("IMAP credentials must not contain CR/LF".to_string());
         }
@@ -272,7 +272,19 @@ impl ImapClient {
             imap_quote_string(username),
             imap_quote_string(password)
         );
-        self.run_command(&cmd).await.map(|_| ())
+        self.run_command(&cmd).await?;
+
+        let lower_host = host.to_ascii_lowercase();
+        if lower_host.contains("163.com")
+            || lower_host.contains("126.com")
+            || lower_host.contains("yeah.net")
+        {
+            // NetEase mail servers (163/126/yeah.net) require RFC 2971 ID before SELECT/STATUS
+            let _ = self
+                .run_command(r#"ID ("name" "nonepwd" "version" "0.1.0")"#)
+                .await;
+        }
+        Ok(())
     }
 
     async fn status_messages(&mut self, mailbox: &str) -> Result<u32, String> {
@@ -368,33 +380,44 @@ async fn fetch_recent_messages(
     ws_hub: &WsHub,
 ) -> Result<(), String> {
     let row = read_imap_row(db);
-    let since_dt = Utc::now() - chrono::Duration::minutes(10);
-    let search_cmd = format!("UID SEARCH UNSEEN SINCE {}", format_imap_date(since_dt));
+    let since_dt = Utc::now() - chrono::Duration::hours(36);
+    let search_cmd = format!("UID SEARCH SINCE {}", format_imap_date(since_dt));
     let search_res = client.run_command(&search_cmd).await?;
 
-    let mut uids: Vec<u32> = Vec::new();
+    let mut all_uids: Vec<u32> = Vec::new();
     for (line, _) in search_res {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("* SEARCH") {
-            for tok in rest.split_whitespace() {
+        if trimmed.len() >= 8 && trimmed[..8].eq_ignore_ascii_case("* SEARCH") {
+            for tok in trimmed[8..].split_whitespace() {
                 if let Ok(uid) = tok.parse::<u32>() {
-                    if uid > row.last_uid {
-                        uids.push(uid);
-                    }
+                    all_uids.push(uid);
                 }
             }
         }
     }
 
-    if uids.is_empty() {
+    if all_uids.is_empty() {
         return Ok(());
     }
 
-    uids.sort_unstable();
-    uids.dedup();
+    all_uids.sort_unstable();
+    all_uids.dedup();
 
+    let max_found = *all_uids.last().unwrap();
     let mut highest_uid = row.last_uid;
-    for uid in uids {
+    let target_uids: Vec<u32> = if row.last_uid == 0 {
+        // On initial sync, only process up to the 5 newest messages to avoid historical flood
+        highest_uid = max_found;
+        let start = all_uids.len().saturating_sub(5);
+        all_uids[start..].to_vec()
+    } else {
+        all_uids
+            .into_iter()
+            .filter(|&uid| uid > row.last_uid)
+            .collect()
+    };
+
+    for uid in target_uids {
         let fetch_cmd = format!("UID FETCH {uid} (UID BODY.PEEK[])");
         let fetched = client.run_command(&fetch_cmd).await?;
         for (_, raw_mime) in fetched {
@@ -423,6 +446,7 @@ pub struct ImapWorker {
     ws_hub: Arc<WsHub>,
     stopped: Arc<AtomicBool>,
     reload_notify: Arc<Notify>,
+    sync_notify: Arc<Notify>,
 }
 
 impl ImapWorker {
@@ -432,6 +456,7 @@ impl ImapWorker {
             ws_hub,
             stopped: Arc::new(AtomicBool::new(false)),
             reload_notify: Arc::new(Notify::new()),
+            sync_notify: Arc::new(Notify::new()),
         });
         Self::spawn_loop(worker.clone());
         worker
@@ -468,9 +493,21 @@ impl ImapWorker {
         self.reload_notify.notify_one();
     }
 
+    pub fn trigger_sync(&self) {
+        let row = read_imap_row(&self.db);
+        if !row.enabled || row.host.is_empty() || row.username.is_empty() {
+            return;
+        }
+        if self.db.decrypt_local_secret(&row.password_enc).is_empty() {
+            return;
+        }
+        self.sync_notify.notify_one();
+    }
+
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
         self.reload_notify.notify_waiters();
+        self.sync_notify.notify_waiters();
     }
 
     pub async fn test_connection(
@@ -487,7 +524,7 @@ impl ImapWorker {
 
         let fut = async move {
             let mut client = ImapClient::connect(&host, port, tls).await?;
-            client.login(&username, &password).await?;
+            client.login(&host, &username, &password).await?;
             let messages = client.status_messages("INBOX").await?;
             client.logout().await;
             Ok::<u32, String>(messages)
@@ -548,7 +585,9 @@ impl ImapWorker {
                 if let Err(err) = session_res {
                     update_imap_status(&self_arc.db, &self_arc.ws_hub, "error", Some(&err));
                     tokio::select! {
+                        biased;
                         _ = self_arc.reload_notify.notified() => {}
+                        _ = self_arc.sync_notify.notified() => {}
                         _ = tokio::time::sleep(Duration::from_secs(10)) => {}
                     }
                 }
@@ -558,7 +597,7 @@ impl ImapWorker {
 
     async fn run_single_session(&self, row: &ImapRow, password: &str) -> Result<(), String> {
         let mut client = ImapClient::connect(&row.host, row.port, row.tls).await?;
-        client.login(&row.username, password).await?;
+        client.login(&row.host, &row.username, password).await?;
         client.run_command("SELECT \"INBOX\"").await?;
 
         update_imap_status(&self.db, &self.ws_hub, "listening", None);
@@ -589,9 +628,14 @@ impl ImapWorker {
             if !cont_line.starts_with('+') {
                 // Server does not support IDLE; fall back to periodic polling
                 tokio::select! {
+                    biased;
                     _ = self.reload_notify.notified() => {
                         client.logout().await;
                         return Ok(());
+                    }
+                    _ = self.sync_notify.notified() => {
+                        fetch_recent_messages(&mut client, &self.db, &self.ws_hub).await?;
+                        continue;
                     }
                     _ = tokio::time::sleep(Duration::from_secs(15)) => {
                         fetch_recent_messages(&mut client, &self.db, &self.ws_hub).await?;
@@ -606,8 +650,12 @@ impl ImapWorker {
             loop {
                 idle_line.clear();
                 tokio::select! {
+                    biased;
                     _ = self.reload_notify.notified() => {
                         should_reload = true;
+                        break;
+                    }
+                    _ = self.sync_notify.notified() => {
                         break;
                     }
                     _ = tokio::time::sleep(Duration::from_secs(14 * 60)) => {

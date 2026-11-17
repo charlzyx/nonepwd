@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Dices, MailPlus, Plus, Trash2, X } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { Check, Dices, MailPlus, Plus, Trash2, X } from 'lucide-react';
 import {
   generatePassphrase,
   generatePassword,
@@ -15,6 +15,8 @@ import { useVault } from '../state/VaultContext';
 interface ItemModalProps {
   initialItem: VaultItemPayload | null;
   defaultVaultId: string;
+  defaultCategory?: ItemCategory;
+  defaultTags?: string[];
   onClose: () => void;
   onSaved: (item: VaultItemPayload) => void;
 }
@@ -52,24 +54,57 @@ function cleanIdentity(identity: IdentityDetails): IdentityDetails | undefined {
 export const ItemModal: React.FC<ItemModalProps> = ({
   initialItem,
   defaultVaultId,
+  defaultCategory,
+  defaultTags,
   onClose,
   onSaved,
 }) => {
-  const { vaults, account, saveItem, createAlias } = useVault();
+  const { vaults, account, allGroups, addGroup, saveItem, createAlias } = useVault();
   const isNew = !initialItem;
 
   const [vaultId, setVaultId] = useState(
     initialItem?.vaultId ?? (defaultVaultId !== 'all' ? defaultVaultId : vaults[0]?.id ?? '')
   );
-  const [category, setCategory] = useState<ItemCategory>(initialItem?.category ?? 'login');
+  const [category, setCategory] = useState<ItemCategory>(
+    initialItem?.category ?? defaultCategory ?? 'login'
+  );
   const [title, setTitle] = useState(initialItem?.title ?? '');
+  const [selectedTags, setSelectedTags] = useState<string[]>(
+    () => initialItem?.tags ?? defaultTags ?? []
+  );
+  const [inlineGroupInput, setInlineGroupInput] = useState('');
+
   const [urlText, setUrlText] = useState(initialItem?.urls.join('\n') ?? '');
   const [username, setUsername] = useState(initialItem?.username ?? '');
   const [password, setPassword] = useState(initialItem?.password ?? '');
   const [totp, setTotp] = useState(initialItem?.totp ?? '');
   const [emailAlias, setEmailAlias] = useState(initialItem?.emailAlias ?? '');
   const [notes, setNotes] = useState(initialItem?.notes ?? '');
-  const [customFields, setCustomFields] = useState<CustomField[]>(initialItem?.customFields ?? []);
+
+  const [sshPublicKey, setSshPublicKey] = useState(() => {
+    if (initialItem?.category !== 'ssh_key') return '';
+    return (
+      initialItem.customFields.find((f) => f.label.trim().toLowerCase() === 'public_key')?.value ??
+      ''
+    );
+  });
+  const [sshPassphrase, setSshPassphrase] = useState(() => {
+    if (initialItem?.category !== 'ssh_key') return '';
+    return (
+      initialItem.customFields.find((f) => f.label.trim().toLowerCase() === 'passphrase')?.value ??
+      ''
+    );
+  });
+  const [customFields, setCustomFields] = useState<CustomField[]>(() => {
+    const fields = initialItem?.customFields ?? [];
+    if (initialItem?.category === 'ssh_key') {
+      return fields.filter((f) => {
+        const key = f.label.trim().toLowerCase();
+        return key !== 'public_key' && key !== 'passphrase';
+      });
+    }
+    return fields;
+  });
 
   const [card, setCard] = useState<CardDetails>(() => ({
     cardholderName: initialItem?.card?.cardholderName ?? '',
@@ -97,6 +132,36 @@ export const ItemModal: React.FC<ItemModalProps> = ({
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const candidateGroups = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const raw of [...allGroups, ...selectedTags]) {
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      const key = trimmed.toLowerCase();
+      if (!seen.has(key)) seen.set(key, trimmed);
+    }
+    return Array.from(seen.values()).sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+  }, [allGroups, selectedTags]);
+
+  const toggleTag = (groupName: string) => {
+    const lower = groupName.trim().toLowerCase();
+    setSelectedTags((prev) =>
+      prev.some((t) => t.trim().toLowerCase() === lower)
+        ? prev.filter((t) => t.trim().toLowerCase() !== lower)
+        : [...prev, groupName.trim()]
+    );
+  };
+
+  const addInlineGroup = () => {
+    const trimmed = inlineGroupInput.trim();
+    if (!trimmed) return;
+    setInlineGroupInput('');
+    addGroup(trimmed);
+    setSelectedTags((prev) =>
+      prev.some((t) => t.trim().toLowerCase() === trimmed.toLowerCase()) ? prev : [...prev, trimmed]
+    );
+  };
 
   const handleGenerateAlias = async () => {
     setErr(null);
@@ -129,6 +194,45 @@ export const ItemModal: React.FC<ItemModalProps> = ({
       const now = new Date().toISOString();
       const isCard = category === 'card';
       const isIdentity = category === 'identity';
+      const isSshKey = category === 'ssh_key';
+
+      for (const g of selectedTags) {
+        addGroup(g);
+      }
+
+      let finalCustomFields = customFields
+        .map((f) => ({ ...f, label: f.label.trim() }))
+        .filter((f) => f.label);
+
+      if (isSshKey) {
+        finalCustomFields = finalCustomFields.filter((f) => {
+          const key = f.label.toLowerCase();
+          return key !== 'public_key' && key !== 'passphrase';
+        });
+        if (sshPublicKey.trim()) {
+          finalCustomFields.push({
+            id: randomId(),
+            label: 'public_key',
+            value: sshPublicKey.trim(),
+            type: 'text',
+          });
+        }
+        if (sshPassphrase.trim()) {
+          finalCustomFields.push({
+            id: randomId(),
+            label: 'passphrase',
+            value: sshPassphrase,
+            type: 'concealed',
+          });
+        }
+      }
+
+      const parsedUrls =
+        isCard || isIdentity
+          ? []
+          : (isSshKey ? urlText.split(/[\n,]+/) : urlText.split('\n'))
+              .map((s) => s.trim())
+              .filter(Boolean);
 
       const payload: VaultItemPayload = {
         id: initialItem?.id ?? randomId(),
@@ -136,14 +240,8 @@ export const ItemModal: React.FC<ItemModalProps> = ({
         category,
         title: title.trim(),
         favorite: initialItem?.favorite ?? false,
-        tags: initialItem?.tags ?? [],
-        urls:
-          isCard || isIdentity
-            ? []
-            : urlText
-                .split('\n')
-                .map((s) => s.trim())
-                .filter(Boolean),
+        tags: selectedTags,
+        urls: parsedUrls,
         username: isCard || isIdentity ? undefined : username.trim() || undefined,
         password: isCard || isIdentity ? undefined : password || undefined,
         totp: isCard || isIdentity ? undefined : totp.trim() || undefined,
@@ -151,7 +249,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
         notes: notes.trim() || undefined,
         card: isCard ? cleanCard(card) : undefined,
         identity: isIdentity ? cleanIdentity(identity) : undefined,
-        customFields: customFields.filter((f) => f.label.trim()),
+        customFields: finalCustomFields,
         createdAt: initialItem?.createdAt ?? now,
         updatedAt: now,
       };
@@ -220,11 +318,11 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs text-foreground outline-none focus:border-ring"
               >
                 <option value="login">网站登录 (Login)</option>
+                <option value="api_credential">API 密钥 (API Credential)</option>
+                <option value="ssh_key">SSH 密钥 (SSH Key)</option>
                 <option value="card">银行卡 (Card)</option>
                 <option value="identity">地址身份 (Identity)</option>
-                <option value="api_credential">API 密钥 (API Credential)</option>
                 <option value="secure_note">安全笔记 (Secure Note)</option>
-                <option value="ssh_key">SSH 密钥</option>
               </select>
             </div>
           </div>
@@ -241,10 +339,74 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                   ? '例如 招商银行 Visa'
                   : category === 'identity'
                     ? '例如 家庭收货地址 / 公司信息'
-                    : '例如 GitHub / OpenAI / Postgres'
+                    : category === 'ssh_key'
+                      ? '例如 生产服务器 / GitHub Deploy Key'
+                      : category === 'api_credential'
+                        ? '例如 OpenAI / Cloudflare API'
+                        : '例如 GitHub / Google / Postgres'
               }
               className="w-full rounded-md border border-input bg-background px-3.5 py-2 text-sm text-foreground outline-none focus:border-ring"
             />
+          </div>
+
+          {/* Multi-group selection */}
+          <div className="space-y-2 rounded-lg border border-border bg-background/60 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-medium text-muted-foreground">分组（可多选）</span>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={inlineGroupInput}
+                  onChange={(e) => setInlineGroupInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      addInlineGroup();
+                    }
+                  }}
+                  placeholder="新建分组..."
+                  className="w-28 rounded-md border border-input bg-background px-2.5 py-1 text-xs text-foreground outline-none focus:border-ring"
+                />
+                <button
+                  type="button"
+                  onClick={addInlineGroup}
+                  disabled={!inlineGroupInput.trim()}
+                  className="inline-flex h-6 items-center gap-1 rounded-md border border-border bg-background px-2 text-[11px] font-medium text-foreground hover:bg-muted disabled:opacity-40"
+                >
+                  <Plus className="h-3 w-3" />
+                  <span>添加</span>
+                </button>
+              </div>
+            </div>
+
+            {candidateGroups.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {candidateGroups.map((groupName) => {
+                  const active = selectedTags.some(
+                    (t) => t.trim().toLowerCase() === groupName.toLowerCase()
+                  );
+                  return (
+                    <button
+                      key={groupName}
+                      type="button"
+                      onClick={() => toggleTag(groupName)}
+                      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                        active
+                          ? 'bg-primary text-primary-foreground'
+                          : 'border border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground'
+                      }`}
+                    >
+                      {active && <Check className="h-3 w-3" />}
+                      <span>{groupName}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">
+                输入分组名并点击添加，可将此条目归入多个分组。
+              </p>
+            )}
           </div>
 
           {category === 'card' ? (
@@ -453,18 +615,77 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                 </div>
               </div>
             </div>
+          ) : category === 'ssh_key' ? (
+            <div className="space-y-3 rounded-lg border border-border bg-background/60 p-3.5">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                  公钥 (Public Key)
+                </label>
+                <input
+                  type="text"
+                  value={sshPublicKey}
+                  onChange={(e) => setSshPublicKey(e.target.value)}
+                  placeholder="ssh-ed25519 AAAA..."
+                  className={`${inputClass} font-mono`}
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                  私钥 (Private Key)
+                </label>
+                <textarea
+                  rows={4}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground outline-none focus:border-ring"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                    私钥口令 (Passphrase)
+                  </label>
+                  <input
+                    type="password"
+                    value={sshPassphrase}
+                    onChange={(e) => setSshPassphrase(e.target.value)}
+                    placeholder="选填 Passphrase"
+                    className={`${inputClass} font-mono`}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                    主机 / Git
+                  </label>
+                  <input
+                    type="text"
+                    value={urlText}
+                    onChange={(e) => setUrlText(e.target.value)}
+                    placeholder="github.com / ssh://root@host"
+                    className={inputClass}
+                  />
+                </div>
+              </div>
+            </div>
           ) : (
             <>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                    用户名 / 邮箱
+                    {category === 'api_credential' ? '凭证标识' : '用户名 / 邮箱'}
                   </label>
                   <input
                     type="text"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    placeholder="alex@example.com"
+                    placeholder={
+                      category === 'api_credential'
+                        ? 'org-xxx / AccessKey ID / 账号'
+                        : 'alex@example.com'
+                    }
                     className="w-full rounded-md border border-input bg-background px-3.5 py-2 text-sm text-foreground outline-none focus:border-ring"
                   />
                 </div>
@@ -495,11 +716,23 @@ export const ItemModal: React.FC<ItemModalProps> = ({
 
               <div>
                 <div className="mb-1 flex items-center justify-between">
-                  <label className="text-xs font-medium text-muted-foreground">密码 / 密钥</label>
+                  <label className="text-xs font-medium text-muted-foreground">
+                    {category === 'api_credential'
+                      ? 'API Key'
+                      : category === 'secure_note'
+                        ? '密钥 / 密文'
+                        : '密码 / 密钥'}
+                  </label>
                   <div className="flex items-center gap-3">
                     <button
                       type="button"
-                      onClick={() => setPassword(generatePassword({ length: 20 }))}
+                      onClick={() =>
+                        setPassword(
+                          generatePassword({
+                            length: category === 'api_credential' ? 32 : 20,
+                          })
+                        )
+                      }
                       className="inline-flex items-center gap-1 text-[11px] font-medium text-foreground underline underline-offset-4 hover:opacity-75"
                     >
                       <Dices className="h-3 w-3" /> 随机强密码
@@ -537,13 +770,19 @@ export const ItemModal: React.FC<ItemModalProps> = ({
 
               <div>
                 <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                  网址 URL（每行一个，用于站点匹配）
+                  {category === 'api_credential'
+                    ? 'Endpoint（每行一个）'
+                    : '网址 URL（每行一个，用于站点匹配）'}
                 </label>
                 <textarea
                   rows={2}
                   value={urlText}
                   onChange={(e) => setUrlText(e.target.value)}
-                  placeholder="https://github.com/login"
+                  placeholder={
+                    category === 'api_credential'
+                      ? 'https://api.openai.com/v1'
+                      : 'https://github.com/login'
+                  }
                   className="w-full rounded-md border border-input bg-background px-3.5 py-2 text-xs text-foreground outline-none focus:border-ring"
                 />
               </div>
@@ -553,7 +792,9 @@ export const ItemModal: React.FC<ItemModalProps> = ({
           {/* Custom Fields */}
           <div>
             <div className="mb-1.5 flex items-center justify-between">
-              <label className="text-xs font-medium text-muted-foreground">自定义字段</label>
+              <label className="text-xs font-medium text-muted-foreground">
+                {category === 'api_credential' ? '扩展键值字段' : '自定义字段'}
+              </label>
               <button
                 type="button"
                 onClick={handleAddField}

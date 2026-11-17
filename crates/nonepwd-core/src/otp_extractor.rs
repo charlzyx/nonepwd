@@ -252,17 +252,31 @@ const STRONG_OTP_KEYWORDS: &[&str] = &[
     "signin code",
     "one-time password",
     "one-time code",
+    "one-time pin",
     "one time password",
     "one time code",
+    "one time pin",
     "passcode",
     "confirm code",
     "confirmation code",
     "auth code",
     "authentication code",
+    "access code",
+    "temporary code",
+    "single-use code",
+    "use the following code",
+    "enter this code",
+    "enter the code",
+    "your code is",
+    "finish logging in",
+    "cloudflare access",
     "2fa code",
     "otp",
     "pin code",
     "验证码",
+    "登录验证码",
+    "邮箱验证码",
+    "身份验证",
     "校验码",
     "动态码",
     "安全码",
@@ -340,8 +354,9 @@ fn score_candidates_in_text(text: &str, base_score: i32) -> Vec<(String, i32)> {
     static UNIT_AFTER_RE: OnceLock<Regex> = OnceLock::new();
     static FOOTER_RE: OnceLock<Regex> = OnceLock::new();
 
-    let candidate_re = CANDIDATE_RE
-        .get_or_init(|| Regex::new(r"(?:\d{3}[-\s]\d{3}|\d{4,8}|[A-Z0-9]{5,8})").unwrap());
+    let candidate_re = CANDIDATE_RE.get_or_init(|| {
+        Regex::new(r"(?:\d{3}(?:[-\s]\d{3}){1,2}|\d{4,9}|[A-Z0-9]{5,8})").unwrap()
+    });
     let imm_label_re = IMM_LABEL_RE.get_or_init(|| {
         Regex::new(r"(?i)(?:code|otp|pin|passcode|验证码|校验码|动态码|安全码|登录码|确认码)\s*(?:is|为)?\s*[:：]?\s*$").unwrap()
     });
@@ -391,7 +406,7 @@ fn score_candidates_in_text(text: &str, base_score: i32) -> Vec<(String, i32)> {
             if !normalized.bytes().any(|b| b.is_ascii_digit()) {
                 continue;
             }
-            if normalized.len() < 4 || normalized.len() > 8 {
+            if normalized.len() < 4 || normalized.len() > 9 {
                 continue;
             }
 
@@ -451,12 +466,12 @@ fn score_candidates_in_text(text: &str, base_score: i32) -> Vec<(String, i32)> {
 
             let mut score = base_score;
             if is_pure_digits {
-                score += if normalized.len() == 6 {
-                    20
-                } else if normalized.len() >= 5 {
-                    12
-                } else {
-                    6
+                score += match normalized.len() {
+                    6 => 20,
+                    7 | 8 => 16,
+                    5 => 12,
+                    9 => 10,
+                    _ => 6,
                 };
             } else {
                 score += 10;
@@ -569,7 +584,24 @@ pub fn extract_email_otp(input: &EmailOtpExtractionInput) -> EmailOtpExtractionR
         .map(strip_html_to_clean_text)
         .unwrap_or_default();
 
-    let clean_text = if plain_from_text.chars().count() >= 10 {
+    let subject_candidates = score_candidates_in_text(&input.subject, 45);
+    let text_candidates = if plain_from_text.is_empty() {
+        Vec::new()
+    } else {
+        score_candidates_in_text(&plain_from_text, 10)
+    };
+    let html_candidates = if plain_from_html.is_empty() {
+        Vec::new()
+    } else {
+        score_candidates_in_text(&plain_from_html, 10)
+    };
+
+    let text_has_winner = text_candidates.iter().any(|(_, s)| *s >= 55);
+    let html_has_winner = html_candidates.iter().any(|(_, s)| *s >= 55);
+
+    let clean_text = if !plain_from_html.is_empty() && !text_has_winner && html_has_winner {
+        plain_from_html
+    } else if plain_from_text.chars().count() >= 10 {
         plain_from_text
     } else if !plain_from_html.is_empty() {
         plain_from_html
@@ -577,8 +609,20 @@ pub fn extract_email_otp(input: &EmailOtpExtractionInput) -> EmailOtpExtractionR
         plain_from_text
     };
 
-    let mut all_candidates = score_candidates_in_text(&input.subject, 45);
-    all_candidates.extend(score_candidates_in_text(&clean_text, 10));
+    let mut all_candidates: Vec<(String, i32)> = Vec::new();
+    for (code, score) in subject_candidates
+        .into_iter()
+        .chain(text_candidates)
+        .chain(html_candidates)
+    {
+        if let Some(existing) = all_candidates.iter_mut().find(|(c, _)| *c == code) {
+            if score > existing.1 {
+                existing.1 = score;
+            }
+        } else {
+            all_candidates.push((code, score));
+        }
+    }
     all_candidates.sort_by(|a, b| b.1.cmp(&a.1));
 
     let mut otp_code = None;
@@ -610,5 +654,142 @@ pub fn extract_email_otp(input: &EmailOtpExtractionInput) -> EmailOtpExtractionR
         sender_domain,
         snippet,
         clean_text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloudflare_access_one_time_pin_plain_and_html_table() {
+        let plain = "\
+To finish logging in, please enter the following one-time PIN:
+
+482910
+
+This temporary code will expire in 10 minutes.
+
+Cloudflare, Inc.
+101 Townsend St, San Francisco, CA 94107";
+
+        let html = r#"
+        <html><body>
+          <table role="presentation" width="100%">
+            <tr><td><h2>Cloudflare Access</h2></td></tr>
+            <tr><td>To finish logging in, enter this code:</td></tr>
+            <tr><td style="font-size:32px;font-weight:bold;letter-spacing:4px;">482910</td></tr>
+            <tr><td>Cloudflare, Inc. 101 Townsend St, San Francisco, CA 94107</td></tr>
+          </table>
+        </body></html>
+        "#;
+
+        let res = extract_email_otp(&EmailOtpExtractionInput {
+            from: "Cloudflare <no-reply@notify.cloudflare.com>".into(),
+            to: "user@example.com".into(),
+            subject: "Your Cloudflare Access one-time PIN".into(),
+            text: Some(plain.into()),
+            html: Some(html.into()),
+        });
+
+        assert_eq!(res.otp_code.as_deref(), Some("482910"));
+        assert!(res.confidence > 0.5, "expected confidence > 0.5, got {}", res.confidence);
+        assert_eq!(res.sender_domain, "cloudflare.com");
+    }
+
+    #[test]
+    fn cloudflare_access_prefers_html_when_plain_text_has_no_winner() {
+        let plain = "Please view this message in an HTML-capable email client. Cloudflare, Inc. 101 Townsend St, San Francisco, CA 94107";
+        let html = r#"
+        <html><body>
+          <table>
+            <tr><td>Your Cloudflare Access one-time PIN</td></tr>
+            <tr><td>Use the following code to finish logging in:</td></tr>
+            <tr><td>628491</td></tr>
+            <tr><td>101 Townsend St, San Francisco, CA 94107</td></tr>
+          </table>
+        </body></html>
+        "#;
+
+        let res = extract_email_otp(&EmailOtpExtractionInput {
+            from: "Cloudflare <no-reply@notify.cloudflare.com>".into(),
+            to: "user@example.com".into(),
+            subject: "Your one-time PIN".into(),
+            text: Some(plain.into()),
+            html: Some(html.into()),
+        });
+
+        assert_eq!(res.otp_code.as_deref(), Some("628491"));
+        assert!(res.confidence > 0.5, "expected confidence > 0.5, got {}", res.confidence);
+        assert!(res.clean_text.contains("628491"));
+        assert!(res.snippet.contains("628491"));
+    }
+
+    #[test]
+    fn cloudflare_access_inline_and_zh_phrases_score_above_threshold() {
+        let inline_en = extract_email_otp(&EmailOtpExtractionInput {
+            from: "Cloudflare <no-reply@notify.cloudflare.com>".into(),
+            to: "user@example.com".into(),
+            subject: "Access request".into(),
+            text: Some(
+                "Use the following code 739154 to finish logging in. Cloudflare, Inc. San Francisco, CA 94107"
+                    .into(),
+            ),
+            html: None,
+        });
+        assert_eq!(inline_en.otp_code.as_deref(), Some("739154"));
+        assert!(inline_en.confidence > 0.5);
+
+        let inline_zh = extract_email_otp(&EmailOtpExtractionInput {
+            from: "Service <noreply@example.com>".into(),
+            to: "user@example.com".into(),
+            subject: "身份验证".into(),
+            text: Some("您的邮箱验证码 524819 请在5分钟内输入。".into()),
+            html: None,
+        });
+        assert_eq!(inline_zh.otp_code.as_deref(), Some("524819"));
+        assert!(inline_zh.confidence > 0.5);
+    }
+
+    #[test]
+    fn supports_four_to_nine_digit_and_grouped_codes_without_zip_false_positive() {
+        let grouped9 = extract_email_otp(&EmailOtpExtractionInput {
+            from: "Auth <noreply@example.com>".into(),
+            to: "user@example.com".into(),
+            subject: "Temporary code".into(),
+            text: Some("Enter the code to finish logging in: 123-456-789".into()),
+            html: None,
+        });
+        assert_eq!(grouped9.otp_code.as_deref(), Some("123456789"));
+        assert!(grouped9.confidence > 0.5);
+
+        let eight_digit = extract_email_otp(&EmailOtpExtractionInput {
+            from: "Auth <noreply@example.com>".into(),
+            to: "user@example.com".into(),
+            subject: "Access code".into(),
+            text: Some("Your single-use code is 84920173.".into()),
+            html: None,
+        });
+        assert_eq!(eight_digit.otp_code.as_deref(), Some("84920173"));
+        assert!(eight_digit.confidence > 0.5);
+
+        let four_digit = extract_email_otp(&EmailOtpExtractionInput {
+            from: "Auth <noreply@example.com>".into(),
+            to: "user@example.com".into(),
+            subject: "Access code".into(),
+            text: Some("Your temporary code is 4829.".into()),
+            html: None,
+        });
+        assert_eq!(four_digit.otp_code.as_deref(), Some("4829"));
+        assert!(four_digit.confidence > 0.5);
+
+        let footer_only = extract_email_otp(&EmailOtpExtractionInput {
+            from: "Newsletter <news@example.com>".into(),
+            to: "user@example.com".into(),
+            subject: "Monthly update".into(),
+            text: Some("Cloudflare, Inc. 101 Townsend St, San Francisco, CA 94107".into()),
+            html: None,
+        });
+        assert_eq!(footer_only.otp_code, None);
     }
 }

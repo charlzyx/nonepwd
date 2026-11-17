@@ -1,13 +1,45 @@
 import React, { useState } from 'react';
-import { ExternalLink, Mail, MailPlus, Power, Trash2 } from 'lucide-react';
+import {
+  AlertCircle,
+  ExternalLink,
+  Filter,
+  Inbox,
+  Mail,
+  MailPlus,
+  Power,
+  RefreshCw,
+  Trash2,
+} from 'lucide-react';
 import { useVault } from '../state/VaultContext';
 import { CopyButton } from './CopyButton';
 
-export const EmailOtpView: React.FC = () => {
-  const { account, emails, aliases, createAlias, toggleAlias, deleteAlias, deleteEmail } =
-    useVault();
+interface EmailOtpViewProps {
+  onOpenImapSettings?: () => void;
+  onOpenFilterSettings?: () => void;
+}
+
+export const EmailOtpView: React.FC<EmailOtpViewProps> = ({
+  onOpenImapSettings,
+  onOpenFilterSettings,
+}) => {
+  const {
+    account,
+    emails,
+    aliases,
+    imapConfig,
+    syncImapNow,
+    createAlias,
+    toggleAlias,
+    deleteAlias,
+    deleteEmail,
+  } = useVault();
   const [siteInput, setSiteInput] = useState('github.com');
   const [explicitAddr, setExplicitAddr] = useState('');
+  const [syncing, setSyncing] = useState(false);
+  const [syncFeedback, setSyncFeedback] = useState<{
+    kind: 'ok' | 'error';
+    message: string;
+  } | null>(null);
 
   const handleCreateAlias = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -18,14 +50,121 @@ export const EmailOtpView: React.FC = () => {
     setExplicitAddr('');
   };
 
+  const handleSyncNow = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    setSyncFeedback(null);
+    try {
+      const res = await syncImapNow();
+      if (res.ok) {
+        setSyncFeedback({
+          kind: 'ok',
+          message:
+            res.synced && res.synced > 0
+              ? `同步完成，拉取到 ${res.synced} 封新邮件`
+              : '同步完成，当前已是最新收件列表',
+        });
+      } else if (res.error?.includes('404')) {
+        setSyncFeedback({
+          kind: 'ok',
+          message: '已刷新收件列表（本地服务端由 IMAP IDLE 实时推送）',
+        });
+      } else {
+        setSyncFeedback({
+          kind: 'error',
+          message: res.error || '同步收信失败',
+        });
+      }
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   return (
     <div className="flex-1 overflow-y-auto bg-background p-6 text-foreground">
-      <div className="mx-auto max-w-5xl space-y-6">
-        <div>
-          <h2 className="text-xl font-semibold tracking-tight text-foreground">
-            邮箱验证码与别名
-          </h2>
+      <div className="mx-auto max-w-5xl space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-xl font-semibold tracking-tight text-foreground">
+              邮箱验证码与别名
+            </h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              实时提取 IMAP 与 Cloudflare 域名路由邮件中的一次性验证码及登录链接。
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={syncing}
+              onClick={() => void handleSyncNow()}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/85 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${syncing ? 'animate-spin' : ''}`} />
+              <span>{syncing ? '同步中...' : '立即同步收信'}</span>
+            </button>
+
+            {onOpenFilterSettings && (
+              <button
+                type="button"
+                onClick={onOpenFilterSettings}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+              >
+                <Filter className="h-3.5 w-3.5 text-muted-foreground" />
+                <span>过滤规则</span>
+              </button>
+            )}
+
+            {onOpenImapSettings && (
+              <button
+                type="button"
+                onClick={onOpenImapSettings}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+              >
+                <Inbox className="h-3.5 w-3.5 text-muted-foreground" />
+                <span>配置 IMAP</span>
+              </button>
+            )}
+          </div>
         </div>
+
+        {/* Unconfigured / disabled IMAP banner */}
+        {!imapConfig?.enabled && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+              <div>
+                <div className="text-xs font-semibold text-amber-800 dark:text-amber-200">
+                  尚未启用邮箱 IMAP 自动收信
+                </div>
+                <p className="mt-0.5 text-xs text-amber-700/90 dark:text-amber-300/85">
+                  配置 QQ / Gmail / 163 / iCloud / Outlook 邮箱授权码后，即可自动同步并提取验证码邮件。
+                </p>
+              </div>
+            </div>
+            {onOpenImapSettings && (
+              <button
+                type="button"
+                onClick={onOpenImapSettings}
+                className="shrink-0 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/85"
+              >
+                立即配置 IMAP
+              </button>
+            )}
+          </div>
+        )}
+
+        {syncFeedback && (
+          <div
+            className={`rounded-lg border px-3.5 py-2 text-xs ${
+              syncFeedback.kind === 'error'
+                ? 'border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400'
+                : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+            }`}
+          >
+            {syncFeedback.message}
+          </div>
+        )}
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           {/* Live Email OTP Stream */}
@@ -39,8 +178,31 @@ export const EmailOtpView: React.FC = () => {
               </div>
 
               {emails.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-border bg-background p-8 text-center text-xs text-muted-foreground">
-                  暂无验证码邮件。在「设置」中启用 IMAP 或 Cloudflare 收信后，新验证码将自动展示于此。
+                <div className="space-y-3 rounded-lg border border-dashed border-border bg-background p-8 text-center text-xs text-muted-foreground">
+                  <p>
+                    暂无验证码邮件。在「设置」中启用 IMAP 或 Cloudflare 收信后，新验证码将自动展示于此。
+                  </p>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <button
+                      type="button"
+                      disabled={syncing}
+                      onClick={() => void handleSyncNow()}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50"
+                    >
+                      <RefreshCw className={`h-3 w-3 ${syncing ? 'animate-spin' : ''}`} />
+                      <span>立即同步收信</span>
+                    </button>
+                    {onOpenImapSettings && (
+                      <button
+                        type="button"
+                        onClick={onOpenImapSettings}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
+                      >
+                        <Inbox className="h-3 w-3" />
+                        <span>配置 IMAP</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-3">

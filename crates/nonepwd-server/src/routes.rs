@@ -177,6 +177,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/imap", get(handle_get_imap).put(handle_put_imap))
         .route("/api/imap/test", post(handle_test_imap))
+        .route("/api/imap/sync", post(handle_sync_imap))
         .route("/api/webhooks/email/cf", post(handle_cf_webhook))
         .route("/api/ws", get(handle_ws_upgrade))
         .route("/install.sh", get(handle_install_sh))
@@ -2030,6 +2031,18 @@ async fn handle_test_imap(
         .test_connection(&host, port, tls, &username, &password)
         .await;
     Json(result).into_response()
+}
+
+async fn handle_sync_imap(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(res) = require_owner(&state.db, &headers) {
+        return res;
+    }
+    state.imap_worker.trigger_sync();
+    Json(json!({
+        "ok": true,
+        "imap": state.imap_worker.get_public_config(),
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]

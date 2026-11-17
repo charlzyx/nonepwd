@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Cloud, Filter, HardDrive, Inbox, Plus, RefreshCw, RotateCcw, Save, TestTube2, Trash2 } from 'lucide-react';
 import { randomId } from '@nonepwd/core';
 import {
@@ -10,6 +10,20 @@ import {
   type R2BackupMeta,
 } from '../state/VaultContext';
 import { CopyButton } from './CopyButton';
+
+export type SettingsFocusTab = 'alias' | 'imap' | 'filter' | 'backup';
+
+interface SettingsViewProps {
+  initialFocus?: SettingsFocusTab;
+}
+
+const IMAP_PRESETS = [
+  { label: 'QQ 邮箱', host: 'imap.qq.com', port: 993, tls: true },
+  { label: 'Gmail', host: 'imap.gmail.com', port: 993, tls: true },
+  { label: '163 邮箱', host: 'imap.163.com', port: 993, tls: true },
+  { label: 'iCloud', host: 'imap.mail.me.com', port: 993, tls: true },
+  { label: 'Outlook', host: 'outlook.office365.com', port: 993, tls: true },
+] as const;
 
 const DEFAULT_FILTER: EmailFilterConfig = {
   enabled: false,
@@ -39,7 +53,7 @@ function validateRegex(pattern: string): { regex: RegExp | null; error: string |
   }
 }
 
-export const SettingsView: React.FC = () => {
+export const SettingsView: React.FC<SettingsViewProps> = ({ initialFocus }) => {
   const {
     account,
     imapConfig,
@@ -54,17 +68,31 @@ export const SettingsView: React.FC = () => {
     deleteBackup,
   } = useVault();
 
+  const filterRef = useRef<HTMLFormElement>(null);
+  const imapRef = useRef<HTMLFormElement>(null);
+  const aliasRef = useRef<HTMLDivElement>(null);
+  const backupRef = useRef<HTMLDivElement>(null);
+  const [highlightedTab, setHighlightedTab] = useState<SettingsFocusTab | null>(
+    initialFocus ?? null
+  );
+
   const [aliasDomain, setAliasDomain] = useState(account?.aliasDomain ?? '');
   const [savingAlias, setSavingAlias] = useState(false);
+  const [aliasNotice, setAliasNotice] = useState<string | null>(null);
+  const [aliasError, setAliasError] = useState<string | null>(null);
 
-  const [imapEnabled, setImapEnabled] = useState(imapConfig?.enabled ?? false);
-  const [imapHost, setImapHost] = useState(imapConfig?.host ?? 'imap.gmail.com');
+  const [imapEnabled, setImapEnabled] = useState(
+    Boolean(imapConfig?.enabled) || (!imapConfig?.enabled && !imapConfig?.host)
+  );
+  const [imapHost, setImapHost] = useState(imapConfig?.host ?? '');
   const [imapPort, setImapPort] = useState(imapConfig?.port ?? 993);
   const [imapTls, setImapTls] = useState(imapConfig?.tls ?? true);
   const [imapUser, setImapUser] = useState(imapConfig?.username ?? '');
   const [imapPass, setImapPass] = useState('');
   const [testResult, setTestResult] = useState<string | null>(null);
   const [savingImap, setSavingImap] = useState(false);
+  const [imapNotice, setImapNotice] = useState<string | null>(null);
+  const [imapError, setImapError] = useState<string | null>(null);
 
   const [filterConfig, setFilterConfig] = useState<EmailFilterConfig>(DEFAULT_FILTER);
   const [filterLoading, setFilterLoading] = useState(true);
@@ -219,11 +247,44 @@ export const SettingsView: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    if (!initialFocus) {
+      setHighlightedTab(null);
+      return;
+    }
+    setHighlightedTab(initialFocus);
+    const target =
+      initialFocus === 'filter'
+        ? filterRef.current
+        : initialFocus === 'imap'
+          ? imapRef.current
+          : initialFocus === 'alias'
+            ? aliasRef.current
+            : backupRef.current;
+    if (target && typeof target.scrollIntoView === 'function') {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    const timer = window.setTimeout(() => {
+      setHighlightedTab((cur) => (cur === initialFocus ? null : cur));
+    }, 2400);
+    return () => window.clearTimeout(timer);
+  }, [initialFocus, backupsSupported]);
+
+  const cardFocusClass = (tab: SettingsFocusTab) =>
+    highlightedTab === tab
+      ? 'ring-2 ring-primary/50 border-primary/60 transition-all duration-300'
+      : 'transition-all duration-300';
+
   const handleSaveAliasDomain = async (e: React.FormEvent) => {
     e.preventDefault();
     setSavingAlias(true);
+    setAliasNotice(null);
+    setAliasError(null);
     try {
       await updateSettings({ aliasDomain });
+      setAliasNotice('别名域名已保存');
+    } catch (err) {
+      setAliasError(err instanceof Error ? err.message : '保存别名域名失败');
     } finally {
       setSavingAlias(false);
     }
@@ -232,16 +293,21 @@ export const SettingsView: React.FC = () => {
   const handleSaveImap = async (e: React.FormEvent) => {
     e.preventDefault();
     setSavingImap(true);
+    setImapNotice(null);
+    setImapError(null);
     try {
       await saveImapConfig({
         enabled: imapEnabled,
-        host: imapHost,
+        host: imapHost.trim(),
         port: Number(imapPort),
         tls: imapTls,
-        username: imapUser,
+        username: imapUser.trim(),
         password: imapPass || undefined,
       });
       setImapPass('');
+      setImapNotice(imapEnabled ? 'IMAP 设置已保存并启用收信监听' : 'IMAP 设置已保存');
+    } catch (err) {
+      setImapError(err instanceof Error ? err.message : '保存 IMAP 设置失败');
     } finally {
       setSavingImap(false);
     }
@@ -323,8 +389,10 @@ export const SettingsView: React.FC = () => {
 
         {/* Email Filter Card */}
         <form
+          ref={filterRef}
+          data-settings-section="filter"
           onSubmit={handleSaveFilter}
-          className="space-y-4 rounded-xl border border-border bg-card p-5"
+          className={`space-y-4 rounded-xl border border-border bg-card p-5 ${cardFocusClass('filter')}`}
         >
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
@@ -551,8 +619,10 @@ export const SettingsView: React.FC = () => {
 
         {/* IMAP IDLE Card */}
         <form
+          ref={imapRef}
+          data-settings-section="imap"
           onSubmit={handleSaveImap}
-          className="space-y-4 rounded-xl border border-border bg-card p-5"
+          className={`space-y-4 rounded-xl border border-border bg-card p-5 ${cardFocusClass('imap')}`}
         >
           <div className="flex items-center justify-between">
             <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
@@ -572,11 +642,51 @@ export const SettingsView: React.FC = () => {
             </span>
           </div>
 
+          {imapError && (
+            <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
+              {imapError}
+            </div>
+          )}
+
+          {imapNotice && (
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-600 dark:text-emerald-400">
+              {imapNotice}
+            </div>
+          )}
+
           {imapConfig?.lastError && (
             <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
               最近错误：{imapConfig.lastError}
             </div>
           )}
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs text-muted-foreground">常用预设：</span>
+            {IMAP_PRESETS.map((preset) => {
+              const selected = imapHost.trim().toLowerCase() === preset.host.toLowerCase();
+              return (
+                <button
+                  key={preset.label}
+                  type="button"
+                  onClick={() => {
+                    setImapHost(preset.host);
+                    setImapPort(preset.port);
+                    setImapTls(preset.tls);
+                    setImapEnabled(true);
+                    setImapNotice(null);
+                    setImapError(null);
+                  }}
+                  className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+                    selected
+                      ? 'bg-primary text-primary-foreground'
+                      : 'border border-border bg-background text-foreground hover:bg-muted'
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              );
+            })}
+          </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div className="sm:col-span-2">
@@ -670,7 +780,11 @@ export const SettingsView: React.FC = () => {
         </form>
 
         {/* Cloudflare Email Worker Card */}
-        <div className="space-y-4 rounded-xl border border-border bg-card p-5">
+        <div
+          ref={aliasRef}
+          data-settings-section="alias"
+          className={`space-y-4 rounded-xl border border-border bg-card p-5 ${cardFocusClass('alias')}`}
+        >
           <div className="flex items-center justify-between">
             <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
               <Cloud className="h-4 w-4 text-muted-foreground" />
@@ -708,6 +822,18 @@ export const SettingsView: React.FC = () => {
             </button>
           </form>
 
+          {aliasError && (
+            <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
+              {aliasError}
+            </div>
+          )}
+
+          {aliasNotice && (
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-600 dark:text-emerald-400">
+              {aliasNotice}
+            </div>
+          )}
+
           <div className="space-y-2 rounded-lg border border-border bg-background p-4 text-xs">
             <div className="flex items-center justify-between gap-3">
               <span className="font-mono text-muted-foreground">WEBHOOK_URL</span>
@@ -741,7 +867,11 @@ export const SettingsView: React.FC = () => {
 
         {/* R2 Zero-Knowledge Snapshots Card (Cloudflare @nonepwd/cf-server) */}
         {backupsSupported && (
-          <div className="space-y-4 rounded-xl border border-border bg-card p-5">
+          <div
+            ref={backupRef}
+            data-settings-section="backup"
+            className={`space-y-4 rounded-xl border border-border bg-card p-5 ${cardFocusClass('backup')}`}
+          >
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">

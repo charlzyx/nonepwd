@@ -1440,6 +1440,7 @@ public struct ImapSettingsSheet: View {
                                     .foregroundStyle(.secondary)
                                 ForEach(presets, id: \.label) { preset in
                                     Button {
+                                        enabled = true
                                         host = preset.host
                                         portText = preset.port
                                         tls = true
@@ -1581,7 +1582,11 @@ public struct ImapSettingsSheet: View {
 
     private func syncDraftFromStore() {
         let cfg = store.imapConfig
-        enabled = cfg.enabled
+        if !cfg.enabled && cfg.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            enabled = true
+        } else {
+            enabled = cfg.enabled
+        }
         host = cfg.host
         portText = String(cfg.port > 0 ? cfg.port : 993)
         tls = cfg.tls

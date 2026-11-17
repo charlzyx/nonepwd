@@ -561,4 +561,172 @@ describe('@nonepwd/cf-server', () => {
       status: 'disabled',
     });
   });
+
+  it('ingests Cloudflare Access One-Time PIN emails when otpOnly is enabled', async () => {
+    const { env, broadcasts } = createMockCfEnv();
+    const app = createCfApp();
+
+    const api = async (path: string, init?: RequestInit) =>
+      app.fetch(new Request(`https://vault.example.com${path}`, init), env);
+
+    const secretKey = generateSecretKey();
+    const kdfSalt = toBase64Url(randomBytes(16));
+    const { masterUnlockKeyBytes, authVerifierB64 } = await deriveAccountKeys(
+      'CfAccessTest!99',
+      secretKey,
+      kdfSalt,
+      10_000
+    );
+    const rootKey = generateRawAesKey();
+    const emailKp = await generateEmailKeyPair();
+    const encryptedRootKeyset = await encryptJson(
+      masterUnlockKeyBytes,
+      {
+        rootKeyB64: toBase64Url(rootKey),
+        emailPrivateKeyPkcs8B64: emailKp.privateKeyPkcs8B64,
+      },
+      AAD.ROOT_KEYSET
+    );
+    const vaultId = 'v_cf_otp';
+    const vaultKey = generateRawAesKey();
+    const setupRes = await api('/api/auth/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'owner@example.com',
+        kdfSalt,
+        kdfIterations: 10_000,
+        authVerifier: authVerifierB64,
+        encryptedRootKeyset,
+        emailPublicKey: emailKp.publicKeyB64,
+        aliasDomain: 'mail.example.com',
+        vaults: [
+          {
+            id: vaultId,
+            encryptedKey: await encryptJson(
+              rootKey,
+              { vaultKeyB64: toBase64Url(vaultKey) },
+              AAD.vaultOwnerKey(vaultId)
+            ),
+            encryptedMeta: await encryptJson(
+              vaultKey,
+              { name: 'Personal' } satisfies VaultMetadata,
+              AAD.vaultMeta(vaultId)
+            ),
+          },
+        ],
+      }),
+    });
+    expect(setupRes.status).toBe(201);
+    const { token } = (await setupRes.json()) as { token: string };
+
+    const putFilterRes = await api('/api/email-filter', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        enabled: true,
+        otpOnly: true,
+        mode: 'allow',
+        rules: [
+          {
+            id: 'rule_cf',
+            field: 'from',
+            pattern: '@notify\\.cloudflare\\.com$',
+            enabled: true,
+          },
+        ],
+      }),
+    });
+    expect(putFilterRes.status).toBe(200);
+
+    const boundary = 'cf_boundary_123';
+    const cfHtmlMsg: EmailMessageLike = {
+      from: 'no-reply@notify.cloudflare.com',
+      to: 'cf.user@mail.example.com',
+      raw: streamFromText(
+        [
+          'From: Cloudflare <no-reply@notify.cloudflare.com>',
+          'To: cf.user@mail.example.com',
+          'Subject: Your Cloudflare Access one-time PIN',
+          'MIME-Version: 1.0',
+          `Content-Type: multipart/alternative; boundary="${boundary}"`,
+          '',
+          `--${boundary}`,
+          'Content-Type: text/plain; charset=utf-8',
+          '',
+          'Please view this message in an HTML-capable email client. Cloudflare, Inc. 101 Townsend St, San Francisco, CA 94107',
+          `--${boundary}`,
+          'Content-Type: text/html; charset=utf-8',
+          '',
+          '<html><body><table><tr><td>Your Cloudflare Access one-time PIN</td></tr><tr><td>To finish logging in, enter this code:</td></tr><tr><td>482910</td></tr><tr><td>101 Townsend St, San Francisco, CA 94107</td></tr></table></body></html>',
+          `--${boundary}--`,
+          '',
+        ].join('\r\n')
+      ),
+      forward: async () => {},
+    };
+
+    const htmlIngest = await handleIncomingCfEmail(cfHtmlMsg, env);
+    expect(htmlIngest.accepted).toBe(true);
+    expect(htmlIngest.email?.hasOtp).toBe(true);
+    const openedHtml = await openSealedJson<DecryptedEmailPayload>(
+      emailKp.privateKeyPkcs8B64,
+      htmlIngest.email!.sealedEnvelope
+    );
+    expect(openedHtml.otpCode).toBe('482910');
+    expect(openedHtml.confidence).toBeGreaterThan(0.5);
+    expect(openedHtml.senderDomain).toBe('cloudflare.com');
+
+    const cfInlineMsg: EmailMessageLike = {
+      from: 'no-reply@notify.cloudflare.com',
+      to: 'cf.user@mail.example.com',
+      raw: streamFromText(
+        [
+          'From: Cloudflare <no-reply@notify.cloudflare.com>',
+          'To: cf.user@mail.example.com',
+          'Subject: Your one-time PIN',
+          'Content-Type: text/plain; charset=utf-8',
+          '',
+          'Use the following code to finish logging in: 739154. Cloudflare, Inc. 101 Townsend St, San Francisco, CA 94107',
+        ].join('\r\n')
+      ),
+      forward: async () => {},
+    };
+
+    const inlineIngest = await handleIncomingCfEmail(cfInlineMsg, env);
+    expect(inlineIngest.accepted).toBe(true);
+    expect(inlineIngest.email?.hasOtp).toBe(true);
+    const openedInline = await openSealedJson<DecryptedEmailPayload>(
+      emailKp.privateKeyPkcs8B64,
+      inlineIngest.email!.sealedEnvelope
+    );
+    expect(openedInline.otpCode).toBe('739154');
+    expect(openedInline.confidence).toBeGreaterThan(0.5);
+
+    const nonOtpMsg: EmailMessageLike = {
+      from: 'no-reply@notify.cloudflare.com',
+      to: 'cf.user@mail.example.com',
+      raw: streamFromText(
+        [
+          'From: Cloudflare <no-reply@notify.cloudflare.com>',
+          'To: cf.user@mail.example.com',
+          'Subject: Account notice',
+          'Content-Type: text/plain; charset=utf-8',
+          '',
+          'Cloudflare, Inc. 101 Townsend St, San Francisco, CA 94107',
+        ].join('\r\n')
+      ),
+      forward: async () => {},
+    };
+
+    const nonOtpIngest = await handleIncomingCfEmail(nonOtpMsg, env);
+    expect(nonOtpIngest.accepted).toBe(false);
+    expect(nonOtpIngest.reason).toBe('filtered');
+
+    const emailsRes = (await (
+      await api('/api/emails', { headers: { Authorization: `Bearer ${token}` } })
+    ).json()) as { emails: EncryptedEmailRecord[] };
+    expect(emailsRes.emails).toHaveLength(2);
+    expect(broadcasts.filter((b) => b.event.type === 'email.received')).toHaveLength(2);
+  });
 });

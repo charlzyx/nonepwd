@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { type VaultItemPayload } from '@nonepwd/core';
+import { type ItemCategory, type VaultItemPayload } from '@nonepwd/core';
 import { Download, ExternalLink, Moon, Sun } from 'lucide-react';
 import { CopyButton } from './components/CopyButton';
 import { DeveloperView } from './components/DeveloperView';
 import { EmailOtpView } from './components/EmailOtpView';
 import { ImportCsvModal } from './components/ImportCsvModal';
 import { ItemDetail } from './components/ItemDetail';
-import { ItemList } from './components/ItemList';
+import { ItemList, type ItemSortField } from './components/ItemList';
 import { ItemModal } from './components/ItemModal';
 import { LandingPage } from './components/LandingPage';
 import { SettingsView } from './components/SettingsView';
@@ -137,14 +137,45 @@ cd packages/cf-server && pnpm run db:migrate:remote && pnpm run deploy`}
   );
 };
 
+const CATEGORY_TITLES: Record<ItemCategory, string> = {
+  login: '密码登录',
+  api_credential: 'API 密钥',
+  ssh_key: 'SSH 密钥',
+  card: '银行卡',
+  identity: '身份与地址',
+  secure_note: '安全笔记',
+};
+
 const WorkspaceApp: React.FC<{ onNavigateHome: () => void }> = ({ onNavigateHome }) => {
-  const { phase, items } = useVault();
+  const { phase, items, vaults, securityIssues } = useVault();
   const [selectedVaultId, setSelectedVaultId] = useState<string | 'all'>('all');
   const [section, setSection] = useState<ActiveSection>({ kind: 'items' });
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [modalItem, setModalItem] = useState<VaultItemPayload | null | undefined>(undefined);
+  const [sortField, setSortField] = useState<ItemSortField>('title');
+  const [sortAscending, setSortAscending] = useState(true);
+  const [modalState, setModalState] = useState<
+    | {
+        item: VaultItemPayload | null;
+        defaultCategory?: ItemCategory;
+        defaultTags?: string[];
+      }
+    | undefined
+  >(undefined);
   const [importModalOpen, setImportModalOpen] = useState(false);
+
+  const destinationTitle = useMemo(() => {
+    if (selectedVaultId !== 'all') {
+      return vaults.find((v) => v.id === selectedVaultId)?.metadata.name ?? '密码库';
+    }
+    if (section.kind !== 'items') return '全部';
+    if (section.favoritesOnly) return '收藏夹';
+    if (section.twoFactorOnly) return '验证码';
+    if (section.securityOnly) return '安全性';
+    if (section.group) return section.group;
+    if (section.category) return CATEGORY_TITLES[section.category] ?? '全部';
+    return '全部';
+  }, [section, selectedVaultId, vaults]);
 
   const filteredItems = useMemo(() => {
     let list = items;
@@ -154,27 +185,60 @@ const WorkspaceApp: React.FC<{ onNavigateHome: () => void }> = ({ onNavigateHome
     if (section.kind === 'items') {
       if (section.favoritesOnly) list = list.filter((i) => i.favorite);
       if (section.category) list = list.filter((i) => i.category === section.category);
+      if (section.twoFactorOnly) list = list.filter((i) => Boolean(i.totp?.trim()));
+      if (section.securityOnly) list = list.filter((i) => Boolean(securityIssues[i.id]));
+      if (section.group) {
+        const gLower = section.group.trim().toLowerCase();
+        list = list.filter((i) => i.tags.some((t) => t.trim().toLowerCase() === gLower));
+      }
     }
     const q = searchQuery.trim().toLowerCase();
     if (q) {
-      list = list.filter(
-        (i) =>
+      list = list.filter((i) => {
+        const cardDigits = (i.card?.number ?? '').replace(/\s+/g, '');
+        const last4 = cardDigits.slice(-4);
+        return (
           i.title.toLowerCase().includes(q) ||
           (i.username ?? '').toLowerCase().includes(q) ||
           (i.emailAlias ?? '').toLowerCase().includes(q) ||
           (i.card?.brand ?? '').toLowerCase().includes(q) ||
           (i.card?.cardholderName ?? '').toLowerCase().includes(q) ||
+          last4.includes(q) ||
           (i.identity?.fullName ?? '').toLowerCase().includes(q) ||
           (i.identity?.email ?? '').toLowerCase().includes(q) ||
           (i.identity?.phone ?? '').toLowerCase().includes(q) ||
           (i.identity?.company ?? '').toLowerCase().includes(q) ||
           (i.identity?.city ?? '').toLowerCase().includes(q) ||
           i.urls.some((u) => u.toLowerCase().includes(q)) ||
-          i.tags.some((t) => t.toLowerCase().includes(q))
-      );
+          i.tags.some((t) => t.toLowerCase().includes(q)) ||
+          i.customFields.some(
+            (cf) =>
+              cf.label.toLowerCase().includes(q) ||
+              (cf.type !== 'concealed' && cf.value.toLowerCase().includes(q))
+          )
+        );
+      });
     }
-    return list;
-  }, [items, searchQuery, section, selectedVaultId]);
+    const sorted = [...list].sort((a, b) => {
+      let cmp = 0;
+      if (sortField === 'title') {
+        cmp = a.title.localeCompare(b.title, 'zh-Hans-CN');
+      } else if (sortField === 'website') {
+        const ua = a.urls[0] || a.title;
+        const ub = b.urls[0] || b.title;
+        cmp = ua.localeCompare(ub, 'zh-Hans-CN');
+      } else if (sortField === 'createdAt') {
+        cmp = a.createdAt.localeCompare(b.createdAt);
+      } else {
+        cmp = a.updatedAt.localeCompare(b.updatedAt);
+      }
+      if (cmp === 0) {
+        cmp = a.id.localeCompare(b.id);
+      }
+      return sortAscending ? cmp : -cmp;
+    });
+    return sorted;
+  }, [items, searchQuery, section, securityIssues, selectedVaultId, sortAscending, sortField]);
 
   const activeItem = useMemo(
     () =>
@@ -183,6 +247,20 @@ const WorkspaceApp: React.FC<{ onNavigateHome: () => void }> = ({ onNavigateHome
       filteredItems[0] ??
       null,
     [filteredItems, items, selectedItemId]
+  );
+
+  const handleOpenCreateModal = useCallback(
+    (explicitCategory?: ItemCategory) => {
+      const defaultCategory: ItemCategory =
+        explicitCategory ?? (section.kind === 'items' && section.category ? section.category : 'login');
+      const defaultTags = section.kind === 'items' && section.group ? [section.group] : [];
+      setModalState({
+        item: null,
+        defaultCategory,
+        defaultTags,
+      });
+    },
+    [section]
   );
 
   if (phase === 'loading') {
@@ -218,27 +296,46 @@ const WorkspaceApp: React.FC<{ onNavigateHome: () => void }> = ({ onNavigateHome
       {section.kind === 'items' && (
         <>
           <ItemList
+            title={destinationTitle}
             items={filteredItems}
             selectedItemId={activeItem?.id ?? null}
             onSelectItem={setSelectedItemId}
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
-            onCreateNew={() => setModalItem(null)}
+            sortField={sortField}
+            sortAscending={sortAscending}
+            onChangeSortField={setSortField}
+            onChangeSortAscending={setSortAscending}
+            onCreateNew={handleOpenCreateModal}
             onOpenImportCsv={() => setImportModalOpen(true)}
           />
-          <ItemDetail item={activeItem} onEdit={(it) => setModalItem(it)} />
+          <ItemDetail
+            item={activeItem}
+            onEdit={(it) => setModalState({ item: it })}
+            onSelectGroup={(group) => {
+              setSelectedVaultId('all');
+              setSection({ kind: 'items', group });
+            }}
+          />
         </>
       )}
 
-      {section.kind === 'email_otp' && <EmailOtpView />}
+      {section.kind === 'email_otp' && (
+        <EmailOtpView
+          onOpenImapSettings={() => setSection({ kind: 'settings', focusTab: 'imap' })}
+          onOpenFilterSettings={() => setSection({ kind: 'settings', focusTab: 'filter' })}
+        />
+      )}
       {section.kind === 'developer' && <DeveloperView />}
-      {section.kind === 'settings' && <SettingsView />}
+      {section.kind === 'settings' && <SettingsView initialFocus={section.focusTab} />}
 
-      {modalItem !== undefined && (
+      {modalState !== undefined && (
         <ItemModal
-          initialItem={modalItem}
+          initialItem={modalState.item}
           defaultVaultId={selectedVaultId}
-          onClose={() => setModalItem(undefined)}
+          defaultCategory={modalState.defaultCategory}
+          defaultTags={modalState.defaultTags}
+          onClose={() => setModalState(undefined)}
           onSaved={(saved) => setSelectedItemId(saved.id)}
         />
       )}

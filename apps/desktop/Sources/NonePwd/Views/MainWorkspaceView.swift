@@ -449,7 +449,7 @@ public struct MainWorkspaceView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(isSelected ? Color.primary.opacity(0.08) : .clear)
             )
             .contentShape(Rectangle())
@@ -476,9 +476,7 @@ public struct MainWorkspaceView: View {
                     Button {
                         Task { await store.runEmailCronAndAIExtract(forceLatest: true) }
                     } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 15.5, weight: .regular))
-                            .foregroundStyle(.primary)
+                        toolbarSymbol("arrow.clockwise")
                     }
                     .disabled(store.isRefreshingEmails)
                     .help("刷新收件验证码列表")
@@ -486,9 +484,7 @@ public struct MainWorkspaceView: View {
                     Button {
                         store.showEmailFilterSheet = true
                     } label: {
-                        Image(systemName: "line.3.horizontal.decrease.circle")
-                            .font(.system(size: 15.5, weight: .regular))
-                            .foregroundStyle(.primary)
+                        toolbarSymbol("line.3.horizontal.decrease.circle")
                     }
                     .help("邮件接收过滤规则")
 
@@ -510,9 +506,7 @@ public struct MainWorkspaceView: View {
                         }
                         .pickerStyle(.inline)
                     } label: {
-                        Image(systemName: "arrow.up.arrow.down")
-                            .font(.system(size: 15.5, weight: .regular))
-                            .foregroundStyle(.primary)
+                        toolbarSymbol("arrow.up.arrow.down")
                     }
                     .menuIndicator(.hidden)
                     .help("排序方式")
@@ -590,7 +584,11 @@ public struct MainWorkspaceView: View {
     }
 
     private var emailInboxList: some View {
-        Group {
+        VStack(spacing: 0) {
+            if !store.imapConfig.enabled {
+                imapDisabledBanner
+            }
+
             if store.emails.isEmpty {
                 VStack(spacing: 14) {
                     Image(systemName: "tray")
@@ -644,7 +642,49 @@ public struct MainWorkspaceView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private var imapDisabledBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 13.5, weight: .medium))
+                    .foregroundStyle(.orange)
+                    .padding(.top, 1)
+
+                Text("尚未启用 IMAP 自动收信，开启并保存邮箱授权码后即可自动拉取 CF 等验证码")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Spacer()
+                Button {
+                    store.showImapSheet = true
+                } label: {
+                    Text("开启 IMAP 收信")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(ApplePillButtonStyle(isProminent: true, height: 26, cornerRadius: 7))
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.orange.opacity(0.09))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.orange.opacity(0.22), lineWidth: 0.5)
+        )
+        .padding(.horizontal, 10)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
     }
 
     // MARK: - Column 3: Detail
@@ -763,12 +803,16 @@ public struct MainWorkspaceView: View {
                 Label("新建分组…", systemImage: "tag")
             }
         } label: {
-            Image(systemName: "plus")
-                .font(.system(size: 15.5, weight: .regular))
-                .foregroundStyle(.primary)
+            toolbarSymbol("plus")
         }
         .menuIndicator(.hidden)
         .help("新建密钥 / 添加邮箱 / 分组")
+    }
+
+    private func toolbarSymbol(_ systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 13.5, weight: .regular))
+            .foregroundStyle(.primary)
     }
 
     private var defaultCategoryForCurrentDestination: ItemCategory {
@@ -903,7 +947,7 @@ private struct CredentialRowView: View {
             .padding(.horizontal, 10)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(
                         isSelected
                             ? Color.primary.opacity(0.09)

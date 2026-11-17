@@ -330,12 +330,13 @@ public struct BentoCategoryTile: View {
                     .foregroundStyle(isSelected ? Color.white : Color.primary)
                     .lineLimit(1)
             }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 11)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: 17, style: .continuous)
                     .fill(isSelected ? tint : Color.primary.opacity(0.065))
             )
+            .contentShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
