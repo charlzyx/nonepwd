@@ -7,15 +7,8 @@
     <script>
       try {
         var saved = localStorage.getItem('nonepwd.theme');
-        var m = matchMedia('(prefers-color-scheme: dark)');
-        var apply = function () {
-          var isDark = saved ? saved === 'dark' : m.matches;
-          document.documentElement.classList.toggle('dark', isDark);
-        };
-        apply();
-        m.addEventListener('change', function () {
-          if (!localStorage.getItem('nonepwd.theme')) apply();
-        });
+        var isDark = saved === 'dark';
+        document.documentElement.classList.toggle('dark', isDark);
       } catch (e) {}
     </script>
   </head>

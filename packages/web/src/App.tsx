@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { type VaultItemPayload } from '@nonepwd/core';
-import { Download, ExternalLink, Terminal } from 'lucide-react';
+import { Download, ExternalLink, Moon, Sun } from 'lucide-react';
 import { CopyButton } from './components/CopyButton';
 import { DeveloperView } from './components/DeveloperView';
 import { EmailOtpView } from './components/EmailOtpView';
@@ -12,9 +12,11 @@ import { SettingsView } from './components/SettingsView';
 import { SetupWizard } from './components/SetupWizard';
 import { Sidebar, type ActiveSection } from './components/Sidebar';
 import { UnlockScreen } from './components/UnlockScreen';
+import { useTheme } from './state/theme';
 import { useVault, VaultProvider } from './state/VaultContext';
 
 const StandaloneVaultGuide: React.FC<{ onBackHome: () => void }> = ({ onBackHome }) => {
+  const { isDark, toggleTheme } = useTheme();
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
   const cliInstallCmd = origin
     ? `curl -fsSL ${origin}/install.sh | bash`
@@ -31,9 +33,19 @@ const StandaloneVaultGuide: React.FC<{ onBackHome: () => void }> = ({ onBackHome
           >
             ← 返回 nonepwd 官网
           </button>
-          <span className="rounded-full border border-border px-2.5 py-0.5 font-mono text-[11px] text-muted-foreground">
-            Zero-Knowledge Self-Hosted
-          </span>
+          <div className="flex items-center gap-3">
+            <span className="rounded-full border border-border px-2.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+              Zero-Knowledge Self-Hosted
+            </span>
+            <button
+              type="button"
+              onClick={toggleTheme}
+              aria-label="切换亮暗模式"
+              className="inline-flex size-7 items-center justify-center rounded-md border border-border/80 bg-background text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              {isDark ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
+            </button>
+          </div>
         </header>
 
         <main className="flex flex-1 flex-col justify-center px-5 py-14 md:px-10">
@@ -95,13 +107,6 @@ const StandaloneVaultGuide: React.FC<{ onBackHome: () => void }> = ({ onBackHome
                 <Download className="size-3.5" />
                 <span>下载浏览器插件包</span>
               </a>
-              <a
-                href="/demo-login"
-                className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-border bg-background px-4 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
-              >
-                <Terminal className="size-3.5" />
-                <span>体验 6 宫格沙盒</span>
-              </a>
             </div>
           </div>
         </main>
@@ -152,7 +157,7 @@ const WorkspaceApp: React.FC<{ onNavigateHome: () => void }> = ({ onNavigateHome
 
   if (phase === 'loading') {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#0b0e14] text-sm text-slate-400">
+      <div className="flex min-h-screen items-center justify-center bg-background text-sm text-muted-foreground">
         正在连接 nonepwd 零知识服务端...
       </div>
     );
@@ -171,7 +176,7 @@ const WorkspaceApp: React.FC<{ onNavigateHome: () => void }> = ({ onNavigateHome
   }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#0b0e14] text-slate-100">
+    <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
       <Sidebar
         selectedVaultId={selectedVaultId}
         onSelectVault={setSelectedVaultId}

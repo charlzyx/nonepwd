@@ -3,18 +3,20 @@ import {
   Code2,
   FolderLock,
   Globe,
-  KeyRound,
   Lock,
   Mail,
+  Moon,
   Plus,
   Settings,
   ShieldCheck,
   Star,
   StickyNote,
+  Sun,
   Terminal,
   Wifi,
   WifiOff,
 } from 'lucide-react';
+import { useTheme } from '../state/theme';
 import { useVault } from '../state/VaultContext';
 
 export type ActiveSection =
@@ -39,6 +41,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onBackHome,
 }) => {
   const { vaults, items, emails, wsConnected, lock, createVault, account } = useVault();
+  const { isDark, toggleTheme } = useTheme();
   const [creatingVault, setCreatingVault] = useState(false);
   const [newVaultName, setNewVaultName] = useState('');
 
@@ -55,48 +58,61 @@ export const Sidebar: React.FC<SidebarProps> = ({
   };
 
   const navClass = (active: boolean) =>
-    `flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition ${
+    `flex w-full items-center justify-between rounded-md px-2.5 py-2 text-xs transition-colors ${
       active
-        ? 'bg-indigo-600/20 text-indigo-200 ring-1 ring-indigo-500/30'
-        : 'text-slate-400 hover:bg-slate-800/70 hover:text-slate-200'
+        ? 'bg-muted font-medium text-foreground'
+        : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
     }`;
 
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-slate-800/80 bg-[#0e121b] p-3">
-      {/* Brand + live sync badge */}
-      <div className="mb-4 flex items-center justify-between px-1.5 pt-1">
-        <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-white shadow-md shadow-indigo-600/30">
-            <ShieldCheck className="h-4.5 w-4.5" />
+    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border bg-card p-3 text-foreground">
+      {/* Brand + live sync badge + theme switch */}
+      <div className="mb-4 flex items-center justify-between gap-2 px-1.5 pt-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
+            <ShieldCheck className="h-4 w-4" />
           </div>
-          <div>
-            <div className="text-sm font-semibold text-white">nonepwd</div>
-            <div className="max-w-[125px] truncate text-[10px] text-slate-500">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold tracking-tight text-foreground">nonepwd</div>
+            <div className="max-w-[100px] truncate font-mono text-[10px] text-muted-foreground">
               {account?.email}
             </div>
           </div>
         </div>
-        <span
-          title={wsConnected ? 'WebSocket 实时同步已连接' : 'WebSocket 重连中'}
-          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
-            wsConnected
-              ? 'bg-emerald-500/15 text-emerald-300'
-              : 'bg-amber-500/15 text-amber-300'
-          }`}
-        >
-          {wsConnected ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
-          {wsConnected ? 'Live' : 'Sync'}
-        </span>
+
+        <div className="flex shrink-0 items-center gap-1">
+          <span
+            title={wsConnected ? 'WebSocket 实时同步已连接' : 'WebSocket 重连中'}
+            className={`inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 font-mono text-[10px] ${
+              wsConnected
+                ? 'bg-background text-emerald-600 dark:text-emerald-400'
+                : 'bg-background text-amber-600 dark:text-amber-400'
+            }`}
+          >
+            {wsConnected ? <Wifi className="h-2.5 w-2.5" /> : <WifiOff className="h-2.5 w-2.5" />}
+            {wsConnected ? 'Live' : 'Sync'}
+          </span>
+
+          <button
+            type="button"
+            onClick={toggleTheme}
+            aria-label="切换亮暗模式"
+            title={isDark ? '切换到亮色模式' : '切换到暗色模式'}
+            className="inline-flex size-6 items-center justify-center rounded-md border border-border bg-background text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            {isDark ? <Sun className="h-3 w-3" /> : <Moon className="h-3 w-3" />}
+          </button>
+        </div>
       </div>
 
       {/* Vault Selector */}
       <div className="mb-4">
-        <div className="mb-1.5 flex items-center justify-between px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-          <span>密码库 (Vaults)</span>
+        <div className="mb-1.5 flex items-center justify-between px-2 font-mono text-[10px] font-semibold tracking-wider text-muted-foreground uppercase">
+          <span>Vaults</span>
           <button
             type="button"
             onClick={() => setCreatingVault((v) => !v)}
-            className="rounded p-0.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+            className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
             title="新建独立密码库"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -111,11 +127,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
               value={newVaultName}
               onChange={(e) => setNewVaultName(e.target.value)}
               placeholder="库名称 (如 Work)"
-              className="w-full rounded-lg border border-slate-700 bg-[#0b0e14] px-2.5 py-1 text-xs text-white outline-none focus:border-indigo-500"
+              className="w-full rounded-md border border-input bg-background px-2.5 py-1 text-xs text-foreground outline-none focus:border-ring"
             />
             <button
               type="submit"
-              className="rounded-lg bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-500"
+              className="rounded-md bg-primary px-2 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/85"
             >
               添加
             </button>
@@ -129,13 +145,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
               onSelectVault('all');
               onSelectSection({ kind: 'items' });
             }}
-            className={navClass(selectedVaultId === 'all' && section.kind === 'items' && !section.category && !section.favoritesOnly)}
+            className={navClass(
+              selectedVaultId === 'all' &&
+                section.kind === 'items' &&
+                !section.category &&
+                !section.favoritesOnly
+            )}
           >
             <span className="flex items-center gap-2">
-              <FolderLock className="h-3.5 w-3.5 text-indigo-400" />
+              <FolderLock className="h-3.5 w-3.5 text-muted-foreground" />
               全部密码库
             </span>
-            <span className="text-[11px] text-slate-500">{items.length}</span>
+            <span className="font-mono text-[11px] text-muted-foreground">{items.length}</span>
           </button>
 
           {vaults.map((v) => {
@@ -151,10 +172,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 className={navClass(selectedVaultId === v.id && section.kind === 'items')}
               >
                 <span className="flex items-center gap-2 truncate">
-                  <span className="h-2 w-2 rounded-full bg-indigo-400" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-foreground/50" />
                   <span className="truncate">{v.metadata.name}</span>
                 </span>
-                <span className="text-[11px] text-slate-500">{count}</span>
+                <span className="font-mono text-[11px] text-muted-foreground">{count}</span>
               </button>
             );
           })}
@@ -163,7 +184,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Quick Category Views */}
       <div className="mb-4">
-        <div className="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+        <div className="mb-1.5 px-2 font-mono text-[10px] font-semibold tracking-wider text-muted-foreground uppercase">
           分类视图
         </div>
         <div className="space-y-0.5">
@@ -173,7 +194,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className={navClass(section.kind === 'items' && Boolean(section.favoritesOnly))}
           >
             <span className="flex items-center gap-2">
-              <Star className="h-3.5 w-3.5 text-amber-400" />
+              <Star className="h-3.5 w-3.5 text-muted-foreground" />
               收藏夹
             </span>
           </button>
@@ -183,7 +204,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className={navClass(section.kind === 'items' && section.category === 'login')}
           >
             <span className="flex items-center gap-2">
-              <Globe className="h-3.5 w-3.5 text-sky-400" />
+              <Globe className="h-3.5 w-3.5 text-muted-foreground" />
               网站登录
             </span>
           </button>
@@ -193,7 +214,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className={navClass(section.kind === 'items' && section.category === 'api_credential')}
           >
             <span className="flex items-center gap-2">
-              <Code2 className="h-3.5 w-3.5 text-emerald-400" />
+              <Code2 className="h-3.5 w-3.5 text-muted-foreground" />
               API 密钥
             </span>
           </button>
@@ -203,7 +224,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className={navClass(section.kind === 'items' && section.category === 'secure_note')}
           >
             <span className="flex items-center gap-2">
-              <StickyNote className="h-3.5 w-3.5 text-violet-400" />
+              <StickyNote className="h-3.5 w-3.5 text-muted-foreground" />
               安全笔记
             </span>
           </button>
@@ -212,8 +233,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Email OTP, Developer & Settings */}
       <div className="mb-4">
-        <div className="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-          引擎与工具
+        <div className="mb-1.5 px-2 font-mono text-[10px] font-semibold tracking-wider text-muted-foreground uppercase">
+          引擎与配置
         </div>
         <div className="space-y-0.5">
           <button
@@ -222,11 +243,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className={navClass(section.kind === 'email_otp')}
           >
             <span className="flex items-center gap-2">
-              <Mail className="h-3.5 w-3.5 text-indigo-400" />
-              邮箱验证码 & 别名
+              <Mail className="h-3.5 w-3.5 text-muted-foreground" />
+              邮箱验证码 &amp; 别名
             </span>
             {otpEmailCount > 0 && (
-              <span className="rounded-full bg-indigo-600/30 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-200">
+              <span className="rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[10px] font-medium text-foreground">
                 {otpEmailCount}
               </span>
             )}
@@ -238,8 +259,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className={navClass(section.kind === 'developer')}
           >
             <span className="flex items-center gap-2">
-              <Terminal className="h-3.5 w-3.5 text-emerald-400" />
-              CLI & Service Account
+              <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
+              CLI &amp; Service Account
             </span>
           </button>
 
@@ -249,36 +270,27 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className={navClass(section.kind === 'settings')}
           >
             <span className="flex items-center gap-2">
-              <Settings className="h-3.5 w-3.5 text-slate-400" />
+              <Settings className="h-3.5 w-3.5 text-muted-foreground" />
               IMAP / Cloudflare 配置
             </span>
           </button>
         </div>
       </div>
 
-      <div className="mt-auto space-y-2 border-t border-slate-800/80 pt-3">
+      <div className="mt-auto space-y-2 border-t border-border pt-3">
         {onBackHome && (
           <button
             type="button"
             onClick={onBackHome}
-            className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-800/70 bg-[#0b0e14]/70 px-3 py-1.5 text-[11px] text-slate-400 transition hover:border-slate-700 hover:text-slate-200"
+            className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
             ← 返回官网首页
           </button>
         )}
-        <a
-          href="/demo-login"
-          target="_blank"
-          rel="noreferrer"
-          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs text-slate-300 transition hover:border-indigo-500/40 hover:text-indigo-200"
-        >
-          <KeyRound className="h-3.5 w-3.5 text-indigo-400" />
-          <span>打开自动填充测试页</span>
-        </a>
         <button
           type="button"
           onClick={() => void lock()}
-          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-800 bg-[#0b0e14] px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-rose-500/40 hover:text-rose-300"
+          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition-colors hover:border-rose-500/50 hover:text-rose-600 dark:hover:text-rose-400"
         >
           <Lock className="h-3.5 w-3.5" />
           <span>立即锁定密码库</span>

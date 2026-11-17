@@ -245,7 +245,7 @@ function connectWs(session: SessionCache): void {
                 ((it.emailAlias && emailItem.to.toLowerCase() === it.emailAlias.toLowerCase()) ||
                   urlsMatchWithLocalhost(tabUrl, emailItem.senderDomain))
             );
-            if (matchesPending || matchesUrl || matchesAnyLogin || tabUrl.includes('/demo-login')) {
+            if (matchesPending || matchesUrl || matchesAnyLogin) {
               try {
                 await chrome.tabs.sendMessage(tab.id, {
                   type: 'NONEPWD_LIVE_OTP',

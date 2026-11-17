@@ -27,42 +27,22 @@ export const CopyButton: React.FC<CopyButtonProps> = ({
     }
   };
 
-  if (variant === 'minimal') {
-    return (
-      <button
-        type="button"
-        onClick={handleCopy}
-        className={`inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground ${className}`}
-      >
-        {copied ? (
-          <>
-            <Check className="h-3.5 w-3.5 text-foreground" />
-            <span className="text-foreground">已复制</span>
-          </>
-        ) : (
-          <>
-            <Copy className="h-3.5 w-3.5" />
-            {label ? <span>{label}</span> : null}
-          </>
-        )}
-      </button>
-    );
-  }
-
   return (
     <button
       type="button"
       onClick={handleCopy}
-      className={`inline-flex items-center gap-1.5 rounded-lg border border-slate-700/80 bg-slate-800/70 px-2.5 py-1 text-xs font-medium text-slate-200 transition hover:border-indigo-500/60 hover:bg-indigo-500/15 hover:text-indigo-200 ${className}`}
+      className={`inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-background text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground ${
+        variant === 'minimal' ? 'px-2 py-1' : 'px-2.5 py-1'
+      } ${className}`}
     >
       {copied ? (
         <>
-          <Check className="h-3.5 w-3.5 text-emerald-400" />
-          <span className="text-emerald-300">已复制</span>
+          <Check className="h-3.5 w-3.5 text-foreground" />
+          <span className="text-foreground">已复制</span>
         </>
       ) : (
         <>
-          <Copy className="h-3.5 w-3.5 text-slate-400" />
+          <Copy className="h-3.5 w-3.5" />
           {label ? <span>{label}</span> : null}
         </>
       )}

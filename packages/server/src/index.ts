@@ -31,7 +31,6 @@ if (isDirectEntry) {
 
   const started = await server.start(port, host);
   console.log(`nonepwd server listening on http://${host}:${started.port}`);
-  console.log(`Autofill playground ready at http://127.0.0.1:${started.port}/demo-login`);
 
   const shutdown = async () => {
     await server.close();

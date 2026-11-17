@@ -22,7 +22,6 @@ import {
   type AuthContext,
 } from './auth.js';
 import { openNonePwdDb, type NonePwdDb } from './db.js';
-import { DEMO_LOGIN_HTML } from './demo-login.js';
 import {
   ingestPreSealedEmail,
   ingestRawEmail,
@@ -1146,9 +1145,6 @@ export function createNonePwdServer(
     return c.json({ accepted: true, emailId: result.email?.id });
   });
 
-  // Built-in Autofill Playground
-  app.get('/demo-login', (c) => c.html(DEMO_LOGIN_HTML));
-
   // Cross-platform native Rust `np` CLI installer script & binary downloads
   app.get('/install.sh', (c) => {
     const origin = new URL(c.req.url).origin;
@@ -1213,10 +1209,7 @@ echo "Installed nonepwd native CLI -> $PREFIX/np"
       return c.json({ error: 'Not found' }, 404);
     }
     if (!fs.existsSync(webDistDir)) {
-      return c.text(
-        'nonepwd API server is running. Build @nonepwd/web or open /demo-login.',
-        200
-      );
+      return c.text('nonepwd API server is running.', 200);
     }
     const reqPath = c.req.path === '/' ? '/index.html' : c.req.path;
     const safeRel = path.normalize(reqPath).replace(/^(\.\.(\/|\\|$))+/, '');

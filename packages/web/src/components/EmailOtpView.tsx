@@ -1,39 +1,13 @@
 import React, { useState } from 'react';
-import { ExternalLink, Mail, MailPlus, Play, Power, Trash2 } from 'lucide-react';
+import { ExternalLink, Mail, MailPlus, Power, Trash2 } from 'lucide-react';
 import { useVault } from '../state/VaultContext';
 import { CopyButton } from './CopyButton';
 
-const PRESETS = [
-  {
-    label: 'GitHub 登录验证码',
-    from: 'GitHub <noreply@github.com>',
-    subject: '[GitHub] Please verify your device',
-    text: 'Your GitHub verification code is: 849201\nThis code expires in 10 minutes.',
-  },
-  {
-    label: 'Cursor 邮箱登录码',
-    from: 'Cursor <no-reply@cursor.com>',
-    subject: 'Sign in to Cursor',
-    text: 'Enter this one-time passcode to sign in:\n\n519382\n\nOr open: https://cursor.com/auth/magic?token=demo123',
-  },
-  {
-    label: 'Steam 中文安全码',
-    from: 'Steam <noreply@steampowered.com>',
-    subject: '您的 Steam 令牌安全验证码',
-    text: '您好，您本次登录的验证码为：649-102，请在 5 分钟内输入。',
-  },
-];
-
 export const EmailOtpView: React.FC = () => {
-  const { account, emails, aliases, createAlias, toggleAlias, deleteAlias, simulateEmail, deleteEmail } =
+  const { account, emails, aliases, createAlias, toggleAlias, deleteAlias, deleteEmail } =
     useVault();
   const [siteInput, setSiteInput] = useState('github.com');
   const [explicitAddr, setExplicitAddr] = useState('');
-  const [simFrom, setSimFrom] = useState(PRESETS[0].from);
-  const [simTo, setSimTo] = useState(account?.email ?? 'me@example.com');
-  const [simSubject, setSimSubject] = useState(PRESETS[0].subject);
-  const [simText, setSimText] = useState(PRESETS[0].text);
-  const [simResult, setSimResult] = useState<string | null>(null);
 
   const handleCreateAlias = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -44,81 +18,70 @@ export const EmailOtpView: React.FC = () => {
     setExplicitAddr('');
   };
 
-  const handleSimulate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSimResult(null);
-    const res = await simulateEmail({
-      from: simFrom,
-      to: simTo,
-      subject: simSubject,
-      text: simText,
-    });
-    setSimResult(
-      res.accepted
-        ? '已通过 X25519 零知识密封入库并通过 WebSocket 实时推送！'
-        : `邮件已拦截（原因：${res.reason}）`
-    );
-  };
-
   return (
-    <div className="flex-1 overflow-y-auto bg-[#0b0e14] p-6">
+    <div className="flex-1 overflow-y-auto bg-background p-6 text-foreground">
       <div className="mx-auto max-w-5xl space-y-6">
         <div>
-          <h2 className="text-xl font-semibold text-white">邮箱验证码实时中心 & 域名别名</h2>
-          <p className="mt-1 text-xs text-slate-400">
+          <h2 className="text-xl font-semibold tracking-tight text-foreground">
+            邮箱验证码实时中心 &amp; 域名别名
+          </h2>
+          <p className="mt-1 text-xs text-muted-foreground">
             来自 IMAP IDLE 或 Cloudflare Email Worker 的验证码邮件经 X25519 公钥密封存储，仅在本地内存解密展示。
           </p>
         </div>
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           {/* Live Email OTP Stream */}
-          <div className="space-y-4 lg:col-span-2">
-            <div className="rounded-2xl border border-slate-800 bg-[#121622] p-5">
+          <div className="lg:col-span-2">
+            <div className="rounded-xl border border-border bg-card p-5">
               <div className="mb-4 flex items-center justify-between">
-                <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
-                  <Mail className="h-4 w-4 text-indigo-400" />
+                <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                  <Mail className="h-4 w-4 text-muted-foreground" />
                   实时收件流（共 {emails.length} 封）
                 </h3>
               </div>
 
               {emails.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-slate-800 p-8 text-center text-xs text-slate-500">
-                  暂无加密邮件。配置右侧 IMAP / Cloudflare Worker，或使用下方模拟器发送测试验证码邮件。
+                <div className="rounded-lg border border-dashed border-border bg-background p-8 text-center text-xs text-muted-foreground">
+                  暂无验证码邮件。在「IMAP / Cloudflare 配置」中启用收信通道后，新到达的验证码将自动经 X25519 密封展示于此。
                 </div>
               ) : (
                 <div className="space-y-3">
                   {emails.map((em) => (
                     <div
                       key={em.id}
-                      className="rounded-xl border border-slate-800 bg-[#0d111a] p-4 transition hover:border-slate-700"
+                      className="rounded-lg border border-border bg-background p-4 transition-colors hover:border-ring"
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
-                            <span className="rounded bg-slate-800 px-1.5 py-0.5 uppercase text-slate-300">
+                          <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                            <span className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono uppercase text-foreground">
                               {em.source}
                             </span>
-                            <span className="font-medium text-slate-200">{em.from}</span>
+                            <span className="font-medium text-foreground">{em.from}</span>
                             {em.to && <span>→ {em.to}</span>}
                           </div>
-                          <div className="mt-1 text-sm font-medium text-white">{em.subject}</div>
+                          <div className="mt-1 text-sm font-medium text-foreground">
+                            {em.subject}
+                          </div>
                         </div>
                         <button
                           type="button"
                           onClick={() => void deleteEmail(em.id)}
-                          className="rounded p-1 text-slate-500 hover:text-rose-400"
+                          className="rounded p-1 text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400"
+                          title="删除记录"
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
                       </div>
 
                       {em.otpCode && (
-                        <div className="mt-3 flex items-center justify-between rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3.5 py-2">
+                        <div className="mt-3 flex items-center justify-between rounded-lg border border-border bg-muted/40 px-3.5 py-2.5">
                           <div>
-                            <span className="text-[11px] text-emerald-300">
+                            <span className="font-mono text-[11px] text-muted-foreground">
                               提取验证码 (置信度 {Math.round(em.confidence * 100)}%)
                             </span>
-                            <div className="font-mono text-xl font-bold tracking-widest text-white">
+                            <div className="font-mono text-xl font-bold tracking-widest text-foreground">
                               {em.otpCode}
                             </div>
                           </div>
@@ -132,7 +95,7 @@ export const EmailOtpView: React.FC = () => {
                             href={em.magicLink}
                             target="_blank"
                             rel="noreferrer"
-                            className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:underline"
+                            className="inline-flex items-center gap-1 text-xs text-foreground underline underline-offset-4 hover:opacity-75"
                           >
                             <span>打开 Magic Link 登录链接</span>
                             <ExternalLink className="h-3 w-3" />
@@ -140,90 +103,22 @@ export const EmailOtpView: React.FC = () => {
                         </div>
                       )}
 
-                      <p className="mt-2 line-clamp-2 text-xs text-slate-400">{em.snippet}</p>
+                      <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">{em.snippet}</p>
                     </div>
                   ))}
                 </div>
               )}
             </div>
-
-            {/* Simulator */}
-            <form
-              onSubmit={handleSimulate}
-              className="space-y-3 rounded-2xl border border-slate-800 bg-[#121622] p-5"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
-                  <Play className="h-4 w-4 text-emerald-400" />
-                  验证码提取 & WebSocket 推送模拟器
-                </h3>
-                <div className="flex flex-wrap gap-1.5">
-                  {PRESETS.map((p) => (
-                    <button
-                      key={p.label}
-                      type="button"
-                      onClick={() => {
-                        setSimFrom(p.from);
-                        setSimSubject(p.subject);
-                        setSimText(p.text);
-                      }}
-                      className="rounded-lg border border-slate-700 bg-slate-800/70 px-2 py-1 text-[11px] text-slate-300 hover:border-indigo-500/50"
-                    >
-                      {p.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                <input
-                  type="text"
-                  value={simFrom}
-                  onChange={(e) => setSimFrom(e.target.value)}
-                  placeholder="发件人 From"
-                  className="rounded-xl border border-slate-700 bg-[#0b0e14] px-3 py-2 text-xs text-white outline-none"
-                />
-                <input
-                  type="text"
-                  value={simTo}
-                  onChange={(e) => setSimTo(e.target.value)}
-                  placeholder="收件人 To（可填别名以测试屏蔽开关）"
-                  className="rounded-xl border border-slate-700 bg-[#0b0e14] px-3 py-2 text-xs text-white outline-none"
-                />
-              </div>
-              <input
-                type="text"
-                value={simSubject}
-                onChange={(e) => setSimSubject(e.target.value)}
-                placeholder="邮件主题 Subject"
-                className="w-full rounded-xl border border-slate-700 bg-[#0b0e14] px-3 py-2 text-xs text-white outline-none"
-              />
-              <textarea
-                rows={3}
-                value={simText}
-                onChange={(e) => setSimText(e.target.value)}
-                className="w-full rounded-xl border border-slate-700 bg-[#0b0e14] px-3 py-2 text-xs text-white outline-none"
-              />
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-emerald-300">{simResult}</span>
-                <button
-                  type="submit"
-                  className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500"
-                >
-                  模拟发送并实时推送
-                </button>
-              </div>
-            </form>
           </div>
 
           {/* Masked Aliases Column */}
           <div className="space-y-4">
             <form
               onSubmit={handleCreateAlias}
-              className="space-y-3 rounded-2xl border border-slate-800 bg-[#121622] p-5"
+              className="space-y-3 rounded-xl border border-border bg-card p-5"
             >
-              <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
-                <MailPlus className="h-4 w-4 text-indigo-400" />
+              <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                <MailPlus className="h-4 w-4 text-muted-foreground" />
                 生成域名邮箱别名
               </h3>
               <input
@@ -231,7 +126,7 @@ export const EmailOtpView: React.FC = () => {
                 value={siteInput}
                 onChange={(e) => setSiteInput(e.target.value)}
                 placeholder="目标站点域名 (如 cursor.com)"
-                className="w-full rounded-xl border border-slate-700 bg-[#0b0e14] px-3 py-2 text-xs text-white outline-none"
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs text-foreground outline-none focus:border-ring"
               />
               <input
                 type="text"
@@ -242,40 +137,40 @@ export const EmailOtpView: React.FC = () => {
                     ? `留空将自动生成 @${account.aliasDomain}`
                     : '输入完整别名地址 (或先配置 aliasDomain)'
                 }
-                className="w-full rounded-xl border border-slate-700 bg-[#0b0e14] px-3 py-2 font-mono text-xs text-white outline-none"
+                className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground outline-none focus:border-ring"
               />
               <button
                 type="submit"
-                className="w-full rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500"
+                className="w-full rounded-md bg-primary px-4 py-2 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/85"
               >
                 创建别名
               </button>
             </form>
 
-            <div className="rounded-2xl border border-slate-800 bg-[#121622] p-5">
-              <h3 className="mb-3 text-sm font-semibold text-white">
+            <div className="rounded-xl border border-border bg-card p-5">
+              <h3 className="mb-3 text-sm font-semibold text-foreground">
                 已创建别名 ({aliases.length})
               </h3>
               <div className="space-y-2">
                 {aliases.map((a) => (
                   <div
                     key={a.id}
-                    className="rounded-xl border border-slate-800 bg-[#0d111a] p-3 text-xs"
+                    className="rounded-lg border border-border bg-background p-3 text-xs"
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="truncate font-mono text-slate-100">{a.address}</span>
+                      <span className="truncate font-mono text-foreground">{a.address}</span>
                       <CopyButton value={a.address} />
                     </div>
-                    <div className="mt-2 flex items-center justify-between text-[11px] text-slate-400">
+                    <div className="mt-2 flex items-center justify-between text-[11px] text-muted-foreground">
                       <span>收信 {a.receivedCount} 次</span>
                       <div className="flex items-center gap-2">
                         <button
                           type="button"
                           onClick={() => void toggleAlias(a.id, !a.enabled)}
-                          className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-medium ${
+                          className={`inline-flex items-center gap-1 rounded border border-border px-2 py-0.5 font-medium ${
                             a.enabled
-                              ? 'bg-emerald-500/15 text-emerald-300'
-                              : 'bg-rose-500/15 text-rose-300'
+                              ? 'bg-muted/40 text-emerald-600 dark:text-emerald-400'
+                              : 'bg-muted/40 text-rose-600 dark:text-rose-400'
                           }`}
                         >
                           <Power className="h-3 w-3" />
@@ -284,7 +179,7 @@ export const EmailOtpView: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => void deleteAlias(a.id)}
-                          className="text-slate-500 hover:text-rose-400"
+                          className="text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400"
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
@@ -293,7 +188,7 @@ export const EmailOtpView: React.FC = () => {
                   </div>
                 ))}
                 {aliases.length === 0 && (
-                  <p className="text-xs text-slate-500">尚未生成邮箱别名。</p>
+                  <p className="text-xs text-muted-foreground">尚未生成邮箱别名。</p>
                 )}
               </div>
             </div>

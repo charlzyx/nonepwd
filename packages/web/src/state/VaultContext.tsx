@@ -124,13 +124,6 @@ interface VaultContextValue {
   }): Promise<AliasRecord>;
   toggleAlias(id: string, enabled: boolean): Promise<void>;
   deleteAlias(id: string): Promise<void>;
-  simulateEmail(params: {
-    from: string;
-    to: string;
-    subject: string;
-    text?: string;
-    html?: string;
-  }): Promise<{ accepted: boolean; reason?: string }>;
   deleteEmail(id: string): Promise<void>;
   createServiceAccount(
     name: string,
@@ -633,16 +626,6 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [apiFetch]
   );
 
-  const simulateEmail = useCallback<VaultContextValue['simulateEmail']>(
-    async (params) => {
-      return apiFetch<{ accepted: boolean; reason?: string }>('/api/emails/simulate', {
-        method: 'POST',
-        body: JSON.stringify(params),
-      });
-    },
-    [apiFetch]
-  );
-
   const deleteEmail = useCallback<VaultContextValue['deleteEmail']>(
     async (id) => {
       await apiFetch(`/api/emails/${id}`, { method: 'DELETE' });
@@ -754,7 +737,6 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       createAlias,
       toggleAlias,
       deleteAlias,
-      simulateEmail,
       deleteEmail,
       createServiceAccount,
       revokeServiceAccount,
@@ -787,7 +769,6 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       createAlias,
       toggleAlias,
       deleteAlias,
-      simulateEmail,
       deleteEmail,
       createServiceAccount,
       revokeServiceAccount,
