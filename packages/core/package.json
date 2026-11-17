@@ -1,7 +1,8 @@
 {
   "name": "@nonepwd/core",
   "version": "0.1.0",
-  "private": true,
+  "description": "Rust WASM zero-knowledge cryptography, RFC 6238 TOTP, Email OTP extractor, and np:// secret reference engine for nonepwd.",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -10,6 +11,12 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

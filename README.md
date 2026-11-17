@@ -56,7 +56,21 @@ nonepwd/
 
 ## 快速启动
 
-### 方式一：本地全量构建与运行
+### 方式零：通过 npm 一键安装启动（推荐）
+
+> 环境要求：Node.js >= 22.13 / 26
+
+```bash
+# 直接通过 npx 启动自建零知识服务端（内置 Web Vault 官网与浏览器插件包下载，默认端口 8787）
+NONEPWD_DATA_DIR=./data npx @nonepwd/server
+
+# 或全局安装客户端 CLI 与服务端
+npm install -g @nonepwd/cli @nonepwd/server
+nonepwd-server
+np version
+```
+
+### 方式一：本地全量源码构建与运行
 
 > 环境要求：Rust (`rustc` / `cargo`，需 `wasm32-unknown-unknown`；macOS 上交叉编译 Linux 可选 `x86_64-unknown-linux-musl`) + Node.js >= 24/26 + `pnpm`。
 

@@ -1,5 +1,7 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createNonePwdServer } from './app.js';
 
 export * from './app.js';
@@ -9,10 +11,18 @@ export * from './email-ingest.js';
 export * from './imap-worker.js';
 export * from './ws.js';
 
-const isDirectEntry =
-  typeof process !== 'undefined' &&
-  Boolean(process.argv[1]) &&
-  pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
+function isDirectInvocation(): boolean {
+  if (typeof process === 'undefined' || !process.argv[1]) return false;
+  try {
+    const resolvedArgv = fs.realpathSync(path.resolve(process.argv[1]));
+    const resolvedSelf = fs.realpathSync(fileURLToPath(import.meta.url));
+    return pathToFileURL(resolvedArgv).href === pathToFileURL(resolvedSelf).href;
+  } catch {
+    return pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
+  }
+}
+
+const isDirectEntry = isDirectInvocation();
 
 if (isDirectEntry) {
   const port = Number.parseInt(process.env.NONEPWD_PORT ?? process.env.PORT ?? '8787', 10);

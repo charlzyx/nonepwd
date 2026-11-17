@@ -60,12 +60,17 @@ const MIME_TYPES: Record<string, string> = {
 
 function defaultWebDistDir(): string {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const bundled = path.resolve(__dirname, '../web-dist');
+  if (fs.existsSync(bundled)) return bundled;
   return path.resolve(__dirname, '../../web/dist');
 }
 
-function defaultBinDistDir(): string {
+function defaultBinDistDirs(): string[] {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  return path.resolve(__dirname, '../../../dist/bin');
+  return [
+    path.resolve(__dirname, '../bin-dist'),
+    path.resolve(__dirname, '../../../dist/bin'),
+  ];
 }
 
 const ALLOWED_CLI_BINARIES = new Set([
@@ -84,8 +89,8 @@ export function createNonePwdServer(
     options.dataDir ?? process.env.NONEPWD_DATA_DIR ?? path.resolve(process.cwd(), 'data');
   const webDistDir =
     options.webDistDir ?? process.env.NONEPWD_WEB_DIST ?? defaultWebDistDir();
-  const binDistDir =
-    options.binDistDir ?? process.env.NONEPWD_BIN_DIST ?? defaultBinDistDir();
+  const binDistDirOverride = options.binDistDir ?? process.env.NONEPWD_BIN_DIST;
+  const binDistDirs = binDistDirOverride ? [binDistDirOverride] : defaultBinDistDirs();
 
   const db = openNonePwdDb(dataDir);
   const wsHub = createWsHub(db);
@@ -1186,8 +1191,10 @@ echo "Installed nonepwd native CLI -> $PREFIX/np"
     if (!ALLOWED_CLI_BINARIES.has(filename)) {
       return c.json({ error: 'Binary not found' }, 404);
     }
-    const targetPath = path.join(binDistDir, filename);
-    if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isFile()) {
+    const targetPath = binDistDirs
+      .map((dir) => path.join(dir, filename))
+      .find((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isFile());
+    if (!targetPath) {
       return c.json({ error: 'Binary artifact not built' }, 404);
     }
     const content = fs.readFileSync(targetPath);

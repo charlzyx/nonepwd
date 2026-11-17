@@ -10,3 +10,6 @@ data
 .env
 .env.local
 coverage
+.npmrc
+packages/server/web-dist
+packages/server/bin-dist

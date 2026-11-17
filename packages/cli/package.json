@@ -1,15 +1,26 @@
 {
   "name": "@nonepwd/cli",
   "version": "0.1.0",
-  "private": true,
+  "description": "Zero-knowledge np / nonepwd CLI, secret injector, live Email OTP waiter, and Connect HTTP API gateway.",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "bin": {
     "np": "./dist/bin.js",
     "nonepwd": "./dist/bin.js"
   },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').chmodSync('dist/bin.js', 0o755)\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
