@@ -60,15 +60,11 @@ jobs:
 
       - name: Package Android APK
         run: |
-          mkdir -p "$PWD/dist-android" release-assets
-          nsh package --target android -o "$PWD/dist-android" apps/nsh
-          APK_FILE="$(find "$PWD/dist-android" -maxdepth 2 -name '*.apk' -print -quit)"
-          if [ -z "$APK_FILE" ]; then
-            echo "ERROR: No .apk produced in $PWD/dist-android" >&2
-            ls -la "$PWD/dist-android" >&2 || true
-            exit 1
+          mkdir -p release-assets
+          if ! command -v convert >/dev/null 2>&1 && ! command -v magick >/dev/null 2>&1 && ! python3 -c "import PIL" >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-pil
           fi
-          cp "$APK_FILE" release-assets/NonePwd-android.apk
+          ./apps/nsh/scripts/package-android.sh "$PWD/release-assets/NonePwd-android.apk"
 
       - uses: actions/upload-artifact@v4
         with:

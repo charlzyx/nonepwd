@@ -1,5 +1,6 @@
 import {
   Clipboard,
+  Image,
   Overlay,
   Scroll,
   Text,
@@ -8,14 +9,18 @@ import {
   cleanup,
   computed,
   effect,
+  lifecycle,
   mount,
   openUrl,
   platform,
   setColorScheme,
   signal,
+  token,
+  windowSize,
 } from "nsh";
-import { AlertDialog, Button, Input, Sheet, Switch, Tab, Tabs } from "nsh/base";
+import { AlertDialog, Button, Progress, Switch, Tab, Tabs } from "nsh/base";
 import { BackHandler, Haptics, TabBar, isAvailable as mobileApisAvailable } from "nsh/mobile";
+import appIcon from "./icon.png";
 import {
   ApiError,
   clearRememberedSession,
@@ -30,6 +35,7 @@ import {
   loadThemePreference,
   logoutSession,
   normalizeServerUrl,
+  rememberDurationMs,
   saveClientPrefs,
   saveEmailFilter,
   saveImapAccount,
@@ -46,6 +52,14 @@ import {
   type ThemePreference,
   type UnlockedSession,
 } from "./src/api";
+import {
+  getAndroidAutofillStatus,
+  requestEnableAndroidAutofill,
+  syncAndroidAutofill,
+  takePendingAndroidSaves,
+  type AndroidAutofillStatus,
+  type PendingAndroidSave,
+} from "./src/autofill";
 import {
   DEFAULT_SERVER_URL,
   auditVaultItems,
@@ -65,12 +79,50 @@ import {
   type TotpResult,
   type VaultItemPayload,
 } from "./src/crypto";
+import chevronRightIcon from "./src/icons/chevron-right.svg";
+import copyIcon from "./src/icons/copy.svg";
+import plusIcon from "./src/icons/plus.svg";
+import qrcodeIcon from "./src/icons/qrcode.svg";
+import refreshIcon from "./src/icons/refresh.svg";
 import { ImapEditorSheet } from "./src/imap-editor";
 import { CATEGORY_OPTIONS, ItemEditorSheet } from "./src/item-editor";
 import { QrScannerSheet } from "./src/qr-scanner";
+import {
+  ActionButton,
+  AppInput,
+  AppSelect,
+  BadgePill,
+  BodyText,
+  CaptionText,
+  CompactButton,
+  FeedbackBanner,
+  FilterPill,
+  FormField,
+  GroupedList,
+  GroupedRow,
+  ItemAvatar,
+  OtpHeroText,
+  PageTitle,
+  ScreenHeader,
+  SearchBar,
+  SectionHeader,
+  SectionTitle,
+  SegmentedControl,
+  SheetContainer,
+  SubheadText,
+  SurfaceCard,
+  type BadgeTone,
+} from "./src/ui";
 
 type AppTab = "totp" | "vault" | "inbox" | "settings";
 const TAB_ORDER: AppTab[] = ["totp", "vault", "inbox", "settings"];
+
+const MOBILE_TABS = [
+  { key: "totp" as const, label: "验证码" },
+  { key: "vault" as const, label: "密码库" },
+  { key: "inbox" as const, label: "收件箱" },
+  { key: "settings" as const, label: "设置" },
+];
 
 const REMEMBER_OPTIONS: Array<{ key: RememberDuration; label: string }> = [
   { key: "3h", label: "3小时" },
@@ -111,21 +163,21 @@ function extractAddressesFromHeader(raw: string | null | undefined): string[] {
   return [extractEmailAddress(trimmed)];
 }
 
-function getImapStatusInfo(acc: ImapAccountPublic): { label: string; badgeClass: string } {
+function getImapStatusInfo(acc: ImapAccountPublic): { label: string; tone: BadgeTone } {
   if (!acc.enabled || acc.status === "disabled") {
-    return { label: "已禁用", badgeClass: "bg-muted text-muted-foreground" };
+    return { label: "已禁用", tone: "neutral" };
   }
   if (acc.status === "listening") {
-    return { label: "监听中", badgeClass: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" };
+    return { label: "监听中", tone: "success" };
   }
   if (acc.status === "connecting") {
-    return { label: "连接中", badgeClass: "bg-amber-500/15 text-amber-600 dark:text-amber-400" };
+    return { label: "连接中", tone: "warning" };
   }
-  return { label: "连接异常", badgeClass: "bg-destructive/15 text-destructive" };
+  return { label: "连接异常", tone: "danger" };
 }
 
 function App() {
-  const isDesktop = platform.desktop;
+  const isWideDesktop = computed(() => platform.desktop && windowSize().width >= 720);
 
   // Auth & Connection state
   const phase = signal<"locked" | "setup" | "unlocked">("locked");
@@ -192,12 +244,46 @@ function App() {
   const newVaultDialogOpen = signal(false);
   const newVaultName = signal("");
 
+  // Android System Autofill state
+  const autofillStatus = signal<AndroidAutofillStatus>({
+    available: false,
+    supported: false,
+    enabled: false,
+  });
+  const pendingAndroidSaves = signal<PendingAndroidSave[]>([]);
+
   function showToast(text: string, kind: "ok" | "error" | "info" = "info") {
     if (toastTimer !== undefined) clearTimeout(toastTimer);
     toast.set({ kind, text });
     toastTimer = setTimeout(() => {
       toast.set(null);
     }, 2600);
+  }
+
+  async function syncAutofillNow() {
+    if (phase() !== "unlocked") return;
+    const durMs = rememberDurationMs(rememberDuration());
+    const expiresAtMs = durMs > 0 ? Date.now() + durMs : 0;
+    await syncAndroidAutofill({
+      unlocked: true,
+      expiresAtMs,
+      items: items(),
+      emails: emails(),
+    });
+  }
+
+  async function refreshAutofillAndPending() {
+    const st = await getAndroidAutofillStatus();
+    autofillStatus.set(st);
+    if (phase() === "unlocked") {
+      const pending = await takePendingAndroidSaves();
+      if (pending.length > 0) {
+        pendingAndroidSaves.update((prev) => {
+          const seen = new Set(prev.map((p) => p.id));
+          return [...prev, ...pending.filter((p) => !seen.has(p.id))];
+        });
+      }
+    }
   }
 
   async function performSync(activeSession: UnlockedSession): Promise<void> {
@@ -232,10 +318,11 @@ function App() {
   effect(() => {
     let cancelled = false;
     void (async () => {
-      const [prefs, savedTheme, remembered] = await Promise.all([
+      const [prefs, savedTheme, remembered, afStatus] = await Promise.all([
         loadClientPrefs(),
         loadThemePreference(),
         loadRememberedSession(),
+        getAndroidAutofillStatus(),
       ]);
       if (cancelled) return;
       batch(() => {
@@ -245,6 +332,7 @@ function App() {
         }
         rememberDuration.set(prefs.rememberDuration);
         themePref.set(savedTheme);
+        autofillStatus.set(afStatus);
       });
       setColorScheme(savedTheme);
 
@@ -266,6 +354,8 @@ function App() {
             session.set(restored);
             phase.set("unlocked");
           });
+          void syncAutofillNow();
+          void refreshAutofillAndPending();
         } catch (err) {
           if (err instanceof ApiError && err.status === 401) {
             await clearRememberedSession();
@@ -276,6 +366,13 @@ function App() {
     return () => {
       cancelled = true;
     };
+  });
+
+  // Refresh Android Autofill status and pending captured logins when app resumes
+  effect(() => {
+    if (phase() === "unlocked" && lifecycle() === "active") {
+      void refreshAutofillAndPending();
+    }
   });
 
   // Live 1s ticker for TOTP codes while unlocked
@@ -343,7 +440,7 @@ function App() {
         newVaultDialogOpen.set(false);
         return true;
       }
-      if (!isDesktop && activeTab() === "vault" && selectedItemId()) {
+      if (!isWideDesktop() && activeTab() === "vault" && selectedItemId()) {
         selectedItemId.set(null);
         return true;
       }
@@ -496,6 +593,8 @@ function App() {
         masterPasswordInput.set("");
         phase.set("unlocked");
       });
+      void syncAutofillNow();
+      void refreshAutofillAndPending();
       Haptics.notification("success");
     } catch (err) {
       authError.set(err instanceof Error ? err.message : "解锁失败");
@@ -539,6 +638,8 @@ function App() {
         setupPassword.set("");
         phase.set("unlocked");
       });
+      void syncAutofillNow();
+      void refreshAutofillAndPending();
       Haptics.notification("success");
       showToast("初始化并解锁成功，请妥善保管 Secret Key", "ok");
     } catch (err) {
@@ -555,6 +656,7 @@ function App() {
       await logoutSession(cur.serverUrl, cur.token);
     }
     await clearRememberedSession();
+    void syncAndroidAutofill({ unlocked: false });
     if (clearCredentials) {
       secretKeyInput.set("");
       await saveClientPrefs({
@@ -572,6 +674,7 @@ function App() {
       items.set([]);
       emails.set([]);
       imapAccounts.set([]);
+      pendingAndroidSaves.set([]);
       selectedItemId.set(null);
       masterPasswordInput.set("");
       phase.set("locked");
@@ -585,6 +688,8 @@ function App() {
     syncing.set(true);
     try {
       await performSync(cur);
+      void syncAutofillNow();
+      void refreshAutofillAndPending();
       Haptics.notification("success");
       showToast("同步完成", "ok");
     } catch (err) {
@@ -601,14 +706,21 @@ function App() {
     showToast(`已复制${label}`, "ok");
   }
 
-  async function handleSaveVaultItem(payload: VaultItemPayload, isNew: boolean) {
+  async function handleSaveVaultItem(
+    payload: VaultItemPayload,
+    isNew: boolean,
+    opts?: { select?: boolean }
+  ) {
     const cur = session();
     if (!cur) throw new Error("密码库已锁定");
     const vk = vaultKeys().get(payload.vaultId);
     if (!vk) throw new Error("未找到对应保险库密钥");
     const saved = await saveItem(cur.serverUrl, cur.token, vk, payload, isNew);
     items.update((prev) => [saved, ...prev.filter((i) => i.id !== saved.id)]);
-    selectedItemId.set(saved.id);
+    if (opts?.select !== false) {
+      selectedItemId.set(saved.id);
+    }
+    void syncAutofillNow();
     showToast(isNew ? "已创建条目" : "已保存修改", "ok");
   }
 
@@ -628,6 +740,7 @@ function App() {
       await deleteItem(cur.serverUrl, cur.token, item.vaultId, item.id);
       items.update((prev) => prev.filter((i) => i.id !== item.id));
       if (selectedItemId() === item.id) selectedItemId.set(null);
+      void syncAutofillNow();
       Haptics.notification("success");
       showToast("条目已删除", "ok");
     } catch (err) {
@@ -692,6 +805,7 @@ function App() {
         ...createdSaved,
         ...prev.map((it) => updatedMap.get(it.id) ?? it),
       ]);
+      void syncAutofillNow();
     }
     showToast(
       `导入完成：新增 ${createdSaved.length}，关联 ${updatedItems.length}，跳过 ${skipped}`,
@@ -728,6 +842,7 @@ function App() {
       const res = await syncImapNow(cur.serverUrl, cur.token, accountId);
       imapAccounts.set(res.accounts);
       await performSync(cur);
+      void syncAutofillNow();
       if (res.ok) {
         Haptics.notification("success");
         showToast(
@@ -818,10 +933,79 @@ function App() {
       await deleteEmail(cur.serverUrl, cur.token, em.id);
       emails.update((prev) => prev.filter((e) => e.id !== em.id));
       if (expandedEmailId() === em.id) expandedEmailId.set(null);
+      void syncAutofillNow();
       showToast("已删除邮件记录", "ok");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "删除邮件失败", "error");
     }
+  }
+
+  async function handleEnableAndroidAutofill() {
+    const launched = await requestEnableAndroidAutofill();
+    if (launched) {
+      showToast("请在系统设置中选择「NonePwd」作为自动填充服务", "info");
+      setTimeout(() => {
+        void getAndroidAutofillStatus().then((st) => autofillStatus.set(st));
+      }, 800);
+    } else if (platform.os !== "android") {
+      showToast("系统级自动填充服务仅支持 Android 8.0+ 原生客户端", "info");
+    } else {
+      showToast("请前往系统设置 → 密码与自动填充 → 选择 NonePwd", "info");
+    }
+  }
+
+  async function handleRefreshAutofillStatus() {
+    const st = await getAndroidAutofillStatus();
+    autofillStatus.set(st);
+    if (phase() === "unlocked") {
+      await syncAutofillNow();
+      await refreshAutofillAndPending();
+    }
+    showToast(st.enabled ? "系统自动填充已开启" : "已刷新自动填充状态", "info");
+  }
+
+  async function handleSavePendingAndroidLogin(pending: PendingAndroidSave) {
+    const targetVid =
+      selectedVaultId() !== "all" ? selectedVaultId() : vaults()[0]?.id ?? "";
+    if (!targetVid) {
+      showToast("未找到可用保险库", "error");
+      return;
+    }
+    const now = new Date().toISOString();
+    const rawDomain = pending.domain.trim();
+    const url = rawDomain
+      ? /^https?:\/\//i.test(rawDomain)
+        ? rawDomain
+        : `https://${rawDomain}`
+      : "";
+    const title = rawDomain || pending.packageName || pending.username || "登录凭据";
+    try {
+      await handleSaveVaultItem(
+        {
+          id: randomId(),
+          vaultId: targetVid,
+          category: "login",
+          title,
+          favorite: false,
+          tags: [],
+          urls: url ? [url] : [],
+          username: pending.username,
+          password: pending.password,
+          customFields: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+        true,
+        { select: isWideDesktop() }
+      );
+      pendingAndroidSaves.update((prev) => prev.filter((p) => p.id !== pending.id));
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "保存自动填充凭据失败", "error");
+    }
+  }
+
+  function handleDismissPendingAndroidLogin(id: string) {
+    pendingAndroidSaves.update((prev) => prev.filter((p) => p.id !== id));
   }
 
   function handleChangeTheme(next: ThemePreference) {
@@ -835,348 +1019,356 @@ function App() {
     revealedFieldKeys.update((prev) => ({ ...prev, [key]: !prev[key] }));
   }
 
-  function renderItemDetailContent(item: VaultItemPayload) {
-    const totpState = totpCodes()[item.id];
-    const vaultName = vaults().find((v) => v.id === item.vaultId)?.metadata.name ?? "保险库";
-    const warnings = auditSummary().issuesByItemId[item.id] ?? [];
-    const sshPub =
-      item.category === "ssh_key"
-        ? item.customFields.find((f) => f.label.trim().toLowerCase() === "public_key")?.value
+  function renderItemDetailContent(item: () => VaultItemPayload, inSheet = false) {
+    const totpState = computed(() => totpCodes()[item().id]);
+    const vaultName = computed(
+      () => vaults().find((v) => v.id === item().vaultId)?.metadata.name ?? "保险库"
+    );
+    const warnings = computed(() => auditSummary().issuesByItemId[item().id] ?? []);
+    const sshPub = computed(() => {
+      const cur = item();
+      return cur.category === "ssh_key"
+        ? cur.customFields.find((f) => f.label.trim().toLowerCase() === "public_key")?.value
         : undefined;
-    const sshPass =
-      item.category === "ssh_key"
-        ? item.customFields.find((f) => f.label.trim().toLowerCase() === "passphrase")?.value
+    });
+    const sshPass = computed(() => {
+      const cur = item();
+      return cur.category === "ssh_key"
+        ? cur.customFields.find((f) => f.label.trim().toLowerCase() === "passphrase")?.value
         : undefined;
-    const extraCustom =
-      item.category === "ssh_key"
-        ? item.customFields.filter((f) => {
+    });
+    const extraCustom = computed(() => {
+      const cur = item();
+      return cur.category === "ssh_key"
+        ? cur.customFields.filter((f) => {
             const k = f.label.trim().toLowerCase();
             return k !== "public_key" && k !== "passphrase";
           })
-        : item.customFields;
+        : cur.customFields;
+    });
+
+    const lastDetailKey = computed(() => {
+      const cur = item();
+      const visibleKeys: string[] = [];
+      if (totpState()) visibleKeys.push("totp");
+      if (cur.username) visibleKeys.push("username");
+      if (cur.password) visibleKeys.push("password");
+      if (sshPub()) visibleKeys.push("sshPub");
+      if (sshPass()) visibleKeys.push("sshPass");
+      if (cur.card) visibleKeys.push("card");
+      if (cur.identity) visibleKeys.push("identity");
+      if (cur.urls.length > 0) visibleKeys.push("urls");
+      for (const cf of extraCustom()) visibleKeys.push(`cf:${cf.id}`);
+      if (cur.notes) visibleKeys.push("notes");
+      return visibleKeys[visibleKeys.length - 1];
+    });
 
     return (
-      <View class="gap-3">
+      <View class="gap-4">
         {/* Title & Actions */}
-        <View class="flex-row items-start justify-between gap-2 border-b border-border pb-3">
-          <View class="flex-1 gap-1">
-            <View class="flex-row flex-wrap items-center gap-1.5">
-              <View class="rounded-md bg-muted px-2 py-0.5">
-                <Text class="text-[11px] font-medium text-foreground">{vaultName}</Text>
+        <View class="flex-row items-start justify-between gap-3">
+          <View class="flex-1 flex-row items-center gap-3">
+            <ItemAvatar title={item().title} category={item().category} />
+            <View class="flex-1 gap-1">
+              <If when={!inSheet}>
+                <SectionTitle>{item().title}</SectionTitle>
+              </If>
+              <View class="flex-row flex-wrap items-center gap-2">
+                <BadgePill label={vaultName()} tone="neutral" />
+                <BadgePill label={categoryLabel(item().category)} tone="primary" />
               </View>
-              <View class="rounded-md border border-border px-2 py-0.5">
-                <Text class="text-[11px] text-muted-foreground">
-                  {categoryLabel(item.category)}
-                </Text>
-              </View>
+              <If when={item().tags.length > 0}>
+                <View class="flex-row flex-wrap gap-1 pt-1">
+                  <Each of={item().tags}>
+                    {(tag) => <BadgePill label={`#${tag()}`} tone="neutral" />}
+                  </Each>
+                </View>
+              </If>
             </View>
-            <Text class="text-xl font-semibold text-foreground">{item.title}</Text>
-            <If when={item.tags.length > 0}>
-              <View class="flex-row flex-wrap gap-1">
-                <Each of={item.tags}>
-                  {(tag) => (
-                    <View class="rounded-full bg-muted px-2 py-0.5">
-                      <Text class="text-[10px] text-muted-foreground">#{tag()}</Text>
-                    </View>
-                  )}
-                </Each>
-              </View>
-            </If>
           </View>
 
-          <View class="flex-row items-center gap-1.5">
-            <Button
+          <View class="flex-row items-center gap-2">
+            <CompactButton
+              label="编辑"
+              variant="neutral"
               onPress={() => {
-                editingItem.set(item);
+                editingItem.set(item());
                 itemEditorOpen.set(true);
               }}
-              class="rounded-lg border border-border bg-background px-2.5 py-1.5 active:bg-muted"
-            >
-              <Text class="text-xs font-medium text-foreground">编辑</Text>
-            </Button>
-            <Button
-              onPress={() => void handleDeleteVaultItem(item)}
-              class="rounded-lg bg-destructive/15 px-2.5 py-1.5 active:opacity-75"
-            >
-              <Text class="text-xs font-medium text-destructive">删除</Text>
-            </Button>
+            />
+            <CompactButton
+              label="删除"
+              variant="danger"
+              onPress={() => void handleDeleteVaultItem(item())}
+            />
           </View>
         </View>
 
-        <If when={warnings.length > 0}>
-          <View class="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2">
-            <Text class="text-xs font-medium text-amber-600 dark:text-amber-400">
-              安全提醒：{warnings.join(" · ")}
-            </Text>
-          </View>
+        <If when={warnings().length > 0}>
+          <FeedbackBanner kind="warning" text={`安全提醒：${warnings().join(" · ")}`} />
         </If>
 
-        {/* TOTP Card inside Detail */}
-        <If when={totpState}>
-          {(t) => (
-            <Button
-              onPress={() => void handleCopyText(t().code, " 2FA 验证码")}
-              class="flex-row items-center justify-between rounded-xl border border-border bg-background p-3.5 active:bg-muted"
-            >
-              <View class="gap-0.5">
-                <Text class="text-[11px] text-muted-foreground">一次性动态验证码 (点击复制)</Text>
-                <Text class="font-mono text-2xl font-bold tracking-widest text-foreground">
-                  {t().code}
-                </Text>
-              </View>
-              <View class="rounded-full bg-primary/15 px-2.5 py-1">
-                <Text class="font-mono text-xs font-semibold text-primary">
-                  {t().remainingSeconds}s
-                </Text>
-              </View>
-            </Button>
-          )}
-        </If>
-
-        {/* Username */}
-        <If when={item.username}>
-          {(u) => (
-            <View class="flex-row items-center justify-between gap-2 rounded-xl border border-border bg-background p-3">
-              <View class="flex-1 gap-0.5">
-                <Text class="text-[11px] text-muted-foreground">用户名 / 标识</Text>
-                <Text class="text-sm text-foreground">{u()}</Text>
-              </View>
-              <Button
-                onPress={() => void handleCopyText(u(), "用户名")}
-                class="rounded-lg bg-muted px-2.5 py-1.5 active:opacity-75"
-              >
-                <Text class="text-xs font-medium text-foreground">复制</Text>
-              </Button>
-            </View>
-          )}
-        </If>
-
-        {/* Password / Secret */}
-        <If when={item.password}>
-          {(pw) => (
-            <View class="gap-2 rounded-xl border border-border bg-background p-3">
-              <View class="flex-row items-center justify-between gap-2">
-                <View class="flex-1 gap-0.5">
-                  <Text class="text-[11px] text-muted-foreground">
-                    {item.category === "api_credential"
-                      ? "API 密钥"
-                      : item.category === "ssh_key"
-                        ? "SSH 私钥"
-                        : "密码 / 机密"}
-                  </Text>
-                  <Text class="font-mono text-sm text-foreground">
-                    {revealedFieldKeys()[`${item.id}:pw`] ? pw() : maskSecret(pw())}
-                  </Text>
-                </View>
-                <View class="flex-row gap-1.5">
-                  <Button
-                    onPress={() => toggleReveal(`${item.id}:pw`)}
-                    class="rounded-lg border border-border bg-card px-2.5 py-1.5 active:bg-muted"
-                  >
-                    <Text class="text-xs text-foreground">
-                      {revealedFieldKeys()[`${item.id}:pw`] ? "隐藏" : "显示"}
-                    </Text>
-                  </Button>
-                  <Button
-                    onPress={() => void handleCopyText(pw(), "密码")}
-                    class="rounded-lg bg-muted px-2.5 py-1.5 active:opacity-75"
-                  >
-                    <Text class="text-xs font-medium text-foreground">复制</Text>
-                  </Button>
-                </View>
-              </View>
-            </View>
-          )}
-        </If>
-
-        {/* SSH extra */}
-        <If when={sshPub}>
-          {(pub) => (
-            <View class="flex-row items-center justify-between gap-2 rounded-xl border border-border bg-background p-3">
-              <View class="flex-1 gap-0.5">
-                <Text class="text-[11px] text-muted-foreground">SSH 公钥</Text>
-                <Text class="line-clamp-2 font-mono text-xs text-foreground">
-                  {pub()}
-                </Text>
-              </View>
-              <Button
-                onPress={() => void handleCopyText(pub(), " SSH 公钥")}
-                class="rounded-lg bg-muted px-2.5 py-1.5"
-              >
-                <Text class="text-xs font-medium text-foreground">复制</Text>
-              </Button>
-            </View>
-          )}
-        </If>
-        <If when={sshPass}>
-          {(pass) => (
-            <View class="flex-row items-center justify-between gap-2 rounded-xl border border-border bg-background p-3">
-              <View class="flex-1 gap-0.5">
-                <Text class="text-[11px] text-muted-foreground">私钥口令</Text>
-                <Text class="font-mono text-xs text-foreground">
-                  {revealedFieldKeys()[`${item.id}:sshpass`] ? pass() : maskSecret(pass())}
-                </Text>
-              </View>
-              <View class="flex-row gap-1.5">
-                <Button
-                  onPress={() => toggleReveal(`${item.id}:sshpass`)}
-                  class="rounded-lg border border-border bg-card px-2 py-1"
+        {/* Quiet Grouped Fields List (no nested cards) */}
+        <If when={lastDetailKey() !== undefined}>
+          <GroupedList surface={inSheet ? "sheet" : "canvas"}>
+            {/* TOTP */}
+            <If when={totpState()}>
+              {(t) => (
+                <GroupedRow
+                  last={lastDetailKey() === "totp"}
+                  onPress={() => void handleCopyText(t().code, " 2FA 验证码")}
+                  class="flex-row items-center justify-between gap-3"
                 >
-                  <Text class="text-xs text-foreground">
-                    {revealedFieldKeys()[`${item.id}:sshpass`] ? "隐藏" : "显示"}
-                  </Text>
-                </Button>
-                <Button
-                  onPress={() => void handleCopyText(pass(), "私钥口令")}
-                  class="rounded-lg bg-muted px-2.5 py-1"
-                >
-                  <Text class="text-xs font-medium text-foreground">复制</Text>
-                </Button>
-              </View>
-            </View>
-          )}
-        </If>
-
-        {/* Card Details */}
-        <If when={item.card}>
-          {(card) => (
-            <View class="gap-2 rounded-xl border border-border bg-background p-3">
-              <If when={card().cardholderName}>
-                <Text class="text-xs text-foreground">持卡人：{card().cardholderName}</Text>
-              </If>
-              <If when={card().number}>
-                <View class="flex-row items-center justify-between">
-                  <Text class="font-mono text-sm text-foreground">
-                    {revealedFieldKeys()[`${item.id}:card`]
-                      ? card().number
-                      : `•••• •••• •••• ${(card().number ?? "").slice(-4)}`}
-                  </Text>
-                  <View class="flex-row gap-1.5">
-                    <Button
-                      onPress={() => toggleReveal(`${item.id}:card`)}
-                      class="rounded-lg border border-border bg-card px-2 py-1"
-                    >
-                      <Text class="text-xs text-foreground">
-                        {revealedFieldKeys()[`${item.id}:card`] ? "隐藏" : "显示"}
-                      </Text>
-                    </Button>
-                    <Button
-                      onPress={() => void handleCopyText(card().number ?? "", "卡号")}
-                      class="rounded-lg bg-muted px-2.5 py-1"
-                    >
-                      <Text class="text-xs font-medium text-foreground">复制</Text>
-                    </Button>
+                  <View class="gap-1">
+                    <SubheadText>一次性动态验证码 (点击复制)</SubheadText>
+                    <OtpHeroText code={t().code} />
                   </View>
-                </View>
-              </If>
-              <View class="flex-row gap-4">
-                <If when={card().expMonth || card().expYear}>
-                  <Text class="text-xs text-muted-foreground">
-                    有效期：{card().expMonth}/{card().expYear}
-                  </Text>
-                </If>
-                <If when={card().cvv}>
-                  <Button onPress={() => void handleCopyText(card().cvv ?? "", " CVV")}>
-                    <Text class="text-xs text-muted-foreground">
-                      CVV：{revealedFieldKeys()[`${item.id}:card`] ? card().cvv : "•••"}
-                    </Text>
-                  </Button>
-                </If>
-              </View>
-            </View>
-          )}
-        </If>
-
-        {/* Identity Details */}
-        <If when={item.identity}>
-          {(id) => (
-            <View class="gap-1.5 rounded-xl border border-border bg-background p-3">
-              <If when={id().fullName}>
-                <Text class="text-sm font-medium text-foreground">{id().fullName}</Text>
-              </If>
-              <If when={id().email}>
-                <Text class="text-xs text-muted-foreground">邮箱：{id().email}</Text>
-              </If>
-              <If when={id().phone}>
-                <Text class="text-xs text-muted-foreground">电话：{id().phone}</Text>
-              </If>
-              <If when={id().address1 || id().city}>
-                <Text class="text-xs text-foreground">
-                  {[id().country, id().state, id().city, id().address1, id().postalCode]
-                    .filter(Boolean)
-                    .join(" ")}
-                </Text>
-              </If>
-            </View>
-          )}
-        </If>
-
-        {/* URLs */}
-        <If when={item.urls.length > 0}>
-          <View class="gap-1.5 rounded-xl border border-border bg-background p-3">
-            <Text class="text-[11px] text-muted-foreground">关联网址</Text>
-            <Each of={item.urls}>
-              {(u) => (
-                <Button
-                  onPress={() => {
-                    const target = /^https?:\/\//i.test(u()) ? u() : `https://${u()}`;
-                    void openUrl(target);
-                  }}
-                  class="py-0.5 active:opacity-70"
-                >
-                  <Text class="text-xs text-primary underline">{u()}</Text>
-                </Button>
+                  <BadgePill label={`${t().remainingSeconds}s`} tone="primary" />
+                </GroupedRow>
               )}
-            </Each>
-          </View>
-        </If>
+            </If>
 
-        {/* Custom Fields */}
-        <If when={extraCustom.length > 0}>
-          <View class="gap-1.5">
-            <Each of={extraCustom} key={(cf) => cf.id}>
+            {/* Username */}
+            <If when={item().username}>
+              {(u) => (
+                <GroupedRow
+                  last={lastDetailKey() === "username"}
+                  class="flex-row items-center justify-between gap-3"
+                >
+                  <View class="flex-1 gap-1">
+                    <CaptionText>用户名 / 标识</CaptionText>
+                    <BodyText>{u()}</BodyText>
+                  </View>
+                  <CompactButton
+                    label="复制"
+                    icon={copyIcon}
+                    variant="card"
+                    onPress={() => void handleCopyText(u(), "用户名")}
+                  />
+                </GroupedRow>
+              )}
+            </If>
+
+            {/* Password / Secret */}
+            <If when={item().password}>
+              {(pw) => (
+                <GroupedRow
+                  last={lastDetailKey() === "password"}
+                  class="flex-row items-center justify-between gap-3"
+                >
+                  <View class="flex-1 gap-1">
+                    <CaptionText>
+                      {item().category === "api_credential"
+                        ? "API 密钥"
+                        : item().category === "ssh_key"
+                          ? "SSH 私钥"
+                          : "密码 / 机密"}
+                    </CaptionText>
+                    <Text class="font-mono text-[15px] text-foreground">
+                      {revealedFieldKeys()[`${item().id}:pw`] ? pw() : maskSecret(pw())}
+                    </Text>
+                  </View>
+                  <View class="flex-row gap-2">
+                    <CompactButton
+                      label={revealedFieldKeys()[`${item().id}:pw`] ? "隐藏" : "显示"}
+                      variant="card"
+                      onPress={() => toggleReveal(`${item().id}:pw`)}
+                    />
+                    <CompactButton
+                      label="复制"
+                      icon={copyIcon}
+                      variant="tonal"
+                      onPress={() => void handleCopyText(pw(), "密码")}
+                    />
+                  </View>
+                </GroupedRow>
+              )}
+            </If>
+
+            {/* SSH extra */}
+            <If when={sshPub()}>
+              {(pub) => (
+                <GroupedRow
+                  last={lastDetailKey() === "sshPub"}
+                  class="flex-row items-center justify-between gap-3"
+                >
+                  <View class="flex-1 gap-1">
+                    <CaptionText>SSH 公钥</CaptionText>
+                    <Text class="line-clamp-2 font-mono text-[13px] text-foreground">{pub()}</Text>
+                  </View>
+                  <CompactButton
+                    label="复制"
+                    icon={copyIcon}
+                    variant="card"
+                    onPress={() => void handleCopyText(pub(), " SSH 公钥")}
+                  />
+                </GroupedRow>
+              )}
+            </If>
+            <If when={sshPass()}>
+              {(pass) => (
+                <GroupedRow
+                  last={lastDetailKey() === "sshPass"}
+                  class="flex-row items-center justify-between gap-3"
+                >
+                  <View class="flex-1 gap-1">
+                    <CaptionText>私钥口令</CaptionText>
+                    <Text class="font-mono text-[14px] text-foreground">
+                      {revealedFieldKeys()[`${item().id}:sshpass`] ? pass() : maskSecret(pass())}
+                    </Text>
+                  </View>
+                  <View class="flex-row gap-2">
+                    <CompactButton
+                      label={revealedFieldKeys()[`${item().id}:sshpass`] ? "隐藏" : "显示"}
+                      variant="card"
+                      onPress={() => toggleReveal(`${item().id}:sshpass`)}
+                    />
+                    <CompactButton
+                      label="复制"
+                      icon={copyIcon}
+                      variant="tonal"
+                      onPress={() => void handleCopyText(pass(), "私钥口令")}
+                    />
+                  </View>
+                </GroupedRow>
+              )}
+            </If>
+
+            {/* Card Details */}
+            <If when={item().card}>
+              {(card) => (
+                <GroupedRow last={lastDetailKey() === "card"} class="gap-2">
+                  <If when={card().cardholderName}>
+                    <BodyText>持卡人：{card().cardholderName}</BodyText>
+                  </If>
+                  <If when={card().number}>
+                    <View class="flex-row items-center justify-between gap-2">
+                      <Text class="font-mono text-[15px] text-foreground">
+                        {revealedFieldKeys()[`${item().id}:card`]
+                          ? card().number
+                          : `•••• •••• •••• ${(card().number ?? "").slice(-4)}`}
+                      </Text>
+                      <View class="flex-row gap-2">
+                        <CompactButton
+                          label={revealedFieldKeys()[`${item().id}:card`] ? "隐藏" : "显示"}
+                          variant="card"
+                          onPress={() => toggleReveal(`${item().id}:card`)}
+                        />
+                        <CompactButton
+                          label="复制"
+                          icon={copyIcon}
+                          variant="tonal"
+                          onPress={() => void handleCopyText(card().number ?? "", "卡号")}
+                        />
+                      </View>
+                    </View>
+                  </If>
+                  <View class="flex-row gap-4">
+                    <If when={card().expMonth || card().expYear}>
+                      <SubheadText>
+                        有效期：{card().expMonth}/{card().expYear}
+                      </SubheadText>
+                    </If>
+                    <If when={card().cvv}>
+                      <Button onPress={() => void handleCopyText(card().cvv ?? "", " CVV")}>
+                        <SubheadText>
+                          CVV：{revealedFieldKeys()[`${item().id}:card`] ? card().cvv : "•••"}
+                        </SubheadText>
+                      </Button>
+                    </If>
+                  </View>
+                </GroupedRow>
+              )}
+            </If>
+
+            {/* Identity Details */}
+            <If when={item().identity}>
+              {(id) => (
+                <GroupedRow last={lastDetailKey() === "identity"} class="gap-1">
+                  <If when={id().fullName}>
+                    <BodyText class="font-semibold">{id().fullName}</BodyText>
+                  </If>
+                  <If when={id().email}>
+                    <SubheadText>邮箱：{id().email}</SubheadText>
+                  </If>
+                  <If when={id().phone}>
+                    <SubheadText>电话：{id().phone}</SubheadText>
+                  </If>
+                  <If when={id().address1 || id().city}>
+                    <BodyText>
+                      {[id().country, id().state, id().city, id().address1, id().postalCode]
+                        .filter(Boolean)
+                        .join(" ")}
+                    </BodyText>
+                  </If>
+                </GroupedRow>
+              )}
+            </If>
+
+            {/* URLs */}
+            <If when={item().urls.length > 0}>
+              <GroupedRow last={lastDetailKey() === "urls"} class="gap-1">
+                <CaptionText>关联网址</CaptionText>
+                <Each of={item().urls}>
+                  {(u) => (
+                    <Button
+                      onPress={() => {
+                        const target = /^https?:\/\//i.test(u()) ? u() : `https://${u()}`;
+                        void openUrl(target);
+                      }}
+                      class="py-1 active:opacity-70"
+                    >
+                      <Text class="text-[14px] font-medium text-primary underline">{u()}</Text>
+                    </Button>
+                  )}
+                </Each>
+              </GroupedRow>
+            </If>
+
+            {/* Custom Fields */}
+            <Each of={extraCustom()} key={(cf) => cf.id}>
               {(cf) => (
-                <View class="flex-row items-center justify-between gap-2 rounded-xl border border-border bg-background p-3">
-                  <View class="flex-1 gap-0.5">
-                    <Text class="text-[11px] text-muted-foreground">{cf().label}</Text>
-                    <Text class="font-mono text-xs text-foreground">
-                      {cf().type === "concealed" && !revealedFieldKeys()[`${item.id}:${cf().id}`]
+                <GroupedRow
+                  last={lastDetailKey() === `cf:${cf().id}`}
+                  class="flex-row items-center justify-between gap-3"
+                >
+                  <View class="flex-1 gap-1">
+                    <CaptionText>{cf().label}</CaptionText>
+                    <Text class="font-mono text-[14px] text-foreground">
+                      {cf().type === "concealed" && !revealedFieldKeys()[`${item().id}:${cf().id}`]
                         ? maskSecret(cf().value)
                         : cf().value}
                     </Text>
                   </View>
-                  <View class="flex-row gap-1.5">
+                  <View class="flex-row gap-2">
                     <If when={cf().type === "concealed"}>
-                      <Button
-                        onPress={() => toggleReveal(`${item.id}:${cf().id}`)}
-                        class="rounded-lg border border-border bg-card px-2 py-1"
-                      >
-                        <Text class="text-xs text-foreground">
-                          {revealedFieldKeys()[`${item.id}:${cf().id}`] ? "隐藏" : "显示"}
-                        </Text>
-                      </Button>
+                      <CompactButton
+                        label={revealedFieldKeys()[`${item().id}:${cf().id}`] ? "隐藏" : "显示"}
+                        variant="card"
+                        onPress={() => toggleReveal(`${item().id}:${cf().id}`)}
+                      />
                     </If>
-                    <Button
+                    <CompactButton
+                      label="复制"
+                      icon={copyIcon}
+                      variant="tonal"
                       onPress={() => void handleCopyText(cf().value, cf().label)}
-                      class="rounded-lg bg-muted px-2.5 py-1"
-                    >
-                      <Text class="text-xs font-medium text-foreground">复制</Text>
-                    </Button>
+                    />
                   </View>
-                </View>
+                </GroupedRow>
               )}
             </Each>
-          </View>
-        </If>
 
-        {/* Notes */}
-        <If when={item.notes}>
-          {(n) => (
-            <View class="gap-1 rounded-xl border border-border bg-background p-3">
-              <Text class="text-[11px] text-muted-foreground">备注</Text>
-              <Text class="text-xs text-foreground">{n()}</Text>
-            </View>
-          )}
+            {/* Notes */}
+            <If when={item().notes}>
+              {(n) => (
+                <GroupedRow last={lastDetailKey() === "notes"} class="gap-1">
+                  <CaptionText>备注</CaptionText>
+                  <BodyText>{n()}</BodyText>
+                </GroupedRow>
+              )}
+            </If>
+          </GroupedList>
         </If>
       </View>
     );
@@ -1189,36 +1381,32 @@ function App() {
       <View class="flex-1 bg-background pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
         <Scroll
           class="flex-1"
-          contentClass="grow items-center justify-center px-5 py-8"
+          contentClass="grow items-center justify-center px-4 py-8"
           keyboardDismissMode="on-drag"
         >
-          <View class="w-full max-w-md gap-5">
+          <View class="w-full max-w-md gap-6">
             {/* Brand Header */}
-            <View class="items-center gap-1.5">
-              <View class="h-14 w-14 items-center justify-center rounded-2xl bg-primary">
-                <Text class="text-xl font-bold text-primary-foreground">NP</Text>
-              </View>
-              <Text class="text-2xl font-bold tracking-tight text-foreground">NonePwd</Text>
-              <Text class="text-xs text-muted-foreground">
-                端到端零知识密码库 · 2FA 与邮箱验证码中枢
-              </Text>
+            <View class="items-center gap-2">
+              <Image src={appIcon} class="h-14 w-14 rounded-2xl" />
+              <PageTitle>NonePwd</PageTitle>
+              <SubheadText>端到端零知识密码库 · 2FA 与邮箱验证码中枢</SubheadText>
             </View>
 
             {/* Auth Card */}
-            <View class="gap-4 rounded-2xl border border-border bg-card p-5">
+            <View class="gap-4 rounded-2xl border border-border bg-card p-4">
               {/* Server URL */}
-              <View class="gap-1.5">
-                <View class="flex-row items-center justify-between">
-                  <Text class="text-xs font-medium text-muted-foreground">服务端地址</Text>
-                  <Button
+              <FormField
+                label="服务端地址"
+                rightSlot={
+                  <CompactButton
+                    label="检测服务端"
+                    variant="tonal"
                     disabled={authBusy()}
                     onPress={() => void handleCheckServer()}
-                    class="rounded-md px-2 py-0.5 active:bg-muted"
-                  >
-                    <Text class="text-[11px] font-medium text-primary">检测服务端</Text>
-                  </Button>
-                </View>
-                <Input
+                  />
+                }
+              >
+                <AppInput
                   testID="server-url-input"
                   value={serverUrl()}
                   onChange={(e) => serverUrl.set(e.value)}
@@ -1226,74 +1414,48 @@ function App() {
                   keyboardType="url"
                   autoCapitalize="none"
                   autoCorrect={false}
-                  class="rounded-xl border border-input bg-background px-3 py-2.5 text-sm text-foreground"
                 />
-              </View>
+              </FormField>
 
               {/* Mode toggle */}
-              <View class="flex-row gap-1.5 rounded-xl bg-muted p-1">
-                <Button
-                  onPress={() => {
-                    authError.set(null);
-                    phase.set("locked");
-                  }}
-                  class={`flex-1 items-center rounded-lg py-2 ${
-                    phase() === "locked" ? "bg-card" : ""
-                  }`}
-                >
-                  <Text
-                    class={`text-xs font-medium ${
-                      phase() === "locked" ? "text-foreground" : "text-muted-foreground"
-                    }`}
-                  >
-                    解锁密码库
-                  </Text>
-                </Button>
-                <Button
-                  onPress={() => {
-                    authError.set(null);
-                    phase.set("setup");
-                  }}
-                  class={`flex-1 items-center rounded-lg py-2 ${
-                    phase() === "setup" ? "bg-card" : ""
-                  }`}
-                >
-                  <Text
-                    class={`text-xs font-medium ${
-                      phase() === "setup" ? "text-foreground" : "text-muted-foreground"
-                    }`}
-                  >
-                    初始化新服务端
-                  </Text>
-                </Button>
-              </View>
+              <SegmentedControl
+                options={[
+                  { key: "locked", label: "解锁密码库" },
+                  { key: "setup", label: "初始化新服务端" },
+                ]}
+                value={phase() === "setup" ? "setup" : "locked"}
+                onChange={(next) => {
+                  authError.set(null);
+                  phase.set(next);
+                }}
+              />
 
               {/* Unlock Form */}
               <If when={phase() === "locked"}>
-                <View class="gap-3.5">
-                  <View class="gap-1">
-                    <Text class="text-xs font-medium text-muted-foreground">Secret Key</Text>
-                    <Input
+                <View class="gap-4">
+                  <FormField label="Secret Key">
+                    <AppInput
+                      mono
                       testID="secret-key-input"
                       value={secretKeyInput()}
                       onChange={(e) => secretKeyInput.set(e.value)}
                       placeholder="NP3-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX"
                       autoCapitalize="characters"
                       autoCorrect={false}
-                      class="rounded-xl border border-input bg-background px-3 py-2.5 font-mono text-xs text-foreground"
                     />
-                  </View>
+                  </FormField>
 
-                  <View class="gap-1">
-                    <View class="flex-row items-center justify-between">
-                      <Text class="text-xs font-medium text-muted-foreground">主密码</Text>
-                      <Button onPress={() => showUnlockPassword.update((v) => !v)}>
-                        <Text class="text-[11px] text-primary">
-                          {showUnlockPassword() ? "隐藏" : "显示"}
-                        </Text>
-                      </Button>
-                    </View>
-                    <Input
+                  <FormField
+                    label="主密码"
+                    rightSlot={
+                      <CompactButton
+                        label={showUnlockPassword() ? "隐藏" : "显示"}
+                        variant="neutral"
+                        onPress={() => showUnlockPassword.update((v) => !v)}
+                      />
+                    }
+                  >
+                    <AppInput
                       testID="master-password-input"
                       value={masterPasswordInput()}
                       onChange={(e) => masterPasswordInput.set(e.value)}
@@ -1301,138 +1463,94 @@ function App() {
                       autoComplete="current-password"
                       placeholder="输入主密码"
                       onSubmit={() => void handleUnlock()}
-                      class="rounded-xl border border-input bg-background px-3 py-2.5 text-sm text-foreground"
                     />
-                  </View>
+                  </FormField>
 
-                  <View class="gap-1.5">
-                    <Text class="text-xs font-medium text-muted-foreground">记住登录时长</Text>
-                    <View class="flex-row gap-1.5">
-                      <Each of={REMEMBER_OPTIONS}>
-                        {(opt) => (
-                          <Button
-                            onPress={() => {
-                              Haptics.selection();
-                              rememberDuration.set(opt().key);
-                            }}
-                            class={`flex-1 items-center rounded-lg border py-2 ${
-                              rememberDuration() === opt().key
-                                ? "border-primary bg-primary"
-                                : "border-border bg-background"
-                            }`}
-                          >
-                            <Text
-                              class={`text-xs font-medium ${
-                                rememberDuration() === opt().key
-                                  ? "text-primary-foreground"
-                                  : "text-foreground"
-                              }`}
-                            >
-                              {opt().label}
-                            </Text>
-                          </Button>
-                        )}
-                      </Each>
-                    </View>
-                  </View>
+                  <FormField label="记住登录时长">
+                    <SegmentedControl
+                      options={REMEMBER_OPTIONS}
+                      value={rememberDuration()}
+                      onChange={(dur) => rememberDuration.set(dur)}
+                    />
+                  </FormField>
 
                   <If when={authError()}>
-                    {(msg) => (
-                      <View class="rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2">
-                        <Text class="text-xs text-destructive">{msg()}</Text>
-                      </View>
-                    )}
+                    {(msg) => <FeedbackBanner kind="error" text={msg()} />}
                   </If>
 
-                  <Button
+                  <ActionButton
                     testID="unlock-button"
                     disabled={authBusy()}
                     onPress={() => void handleUnlock()}
-                    class="items-center rounded-xl bg-primary py-3.5 active:opacity-85 disabled:opacity-50"
-                  >
-                    <Text class="text-sm font-semibold text-primary-foreground">
-                      {authBusy() ? "正在派生密钥并同步..." : "解锁密码库"}
-                    </Text>
-                  </Button>
+                    label={authBusy() ? "正在派生密钥并同步..." : "解锁密码库"}
+                  />
                 </View>
               </If>
 
               {/* Setup Form */}
               <If when={phase() === "setup"}>
-                <View class="gap-3">
-                  <View class="gap-1">
-                    <Text class="text-xs font-medium text-muted-foreground">主账号邮箱</Text>
-                    <Input
+                <View class="gap-4">
+                  <FormField label="主账号邮箱">
+                    <AppInput
                       value={setupEmail()}
                       onChange={(e) => setupEmail.set(e.value)}
                       keyboardType="email-address"
                       autoCapitalize="none"
                       placeholder="owner@example.com"
-                      class="rounded-xl border border-input bg-background px-3 py-2.5 text-sm text-foreground"
                     />
-                  </View>
+                  </FormField>
 
-                  <View class="gap-1">
-                    <View class="flex-row items-center justify-between">
-                      <Text class="text-xs font-medium text-muted-foreground">
-                        Secret Key (请务必保存)
-                      </Text>
+                  <FormField
+                    label="Secret Key (请务必保存)"
+                    rightSlot={
                       <View class="flex-row gap-2">
-                        <Button onPress={() => void handleCopyText(setupSecretKey(), " Secret Key")}>
-                          <Text class="text-[11px] text-primary">复制</Text>
-                        </Button>
-                        <Button onPress={() => setupSecretKey.set(generateSecretKey())}>
-                          <Text class="text-[11px] text-muted-foreground">重新生成</Text>
-                        </Button>
+                        <CompactButton
+                          label="复制"
+                          icon={copyIcon}
+                          variant="tonal"
+                          onPress={() => void handleCopyText(setupSecretKey(), " Secret Key")}
+                        />
+                        <CompactButton
+                          label="重新生成"
+                          variant="neutral"
+                          onPress={() => setupSecretKey.set(generateSecretKey())}
+                        />
                       </View>
+                    }
+                  >
+                    <View class="rounded-xl bg-input px-3 py-3">
+                      <Text class="font-mono text-[14px] text-foreground">{setupSecretKey()}</Text>
                     </View>
-                    <View class="rounded-xl border border-border bg-background px-3 py-2.5">
-                      <Text class="font-mono text-xs text-foreground">{setupSecretKey()}</Text>
-                    </View>
-                  </View>
+                  </FormField>
 
-                  <View class="gap-1">
-                    <Text class="text-xs font-medium text-muted-foreground">设置主密码</Text>
-                    <Input
+                  <FormField label="设置主密码">
+                    <AppInput
                       value={setupPassword()}
                       onChange={(e) => setupPassword.set(e.value)}
                       masked
                       autoComplete="new-password"
                       placeholder="至少 10 位强密码"
-                      class="rounded-xl border border-input bg-background px-3 py-2.5 text-sm text-foreground"
                     />
-                  </View>
+                  </FormField>
 
-                  <View class="gap-1">
-                    <Text class="text-xs font-medium text-muted-foreground">
-                      邮箱别名域名 (可选)
-                    </Text>
-                    <Input
+                  <FormField label="邮箱别名域名 (可选)">
+                    <AppInput
                       value={setupAliasDomain()}
                       onChange={(e) => setupAliasDomain.set(e.value)}
                       autoCapitalize="none"
                       placeholder="mail.example.com"
-                      class="rounded-xl border border-input bg-background px-3 py-2.5 text-xs text-foreground"
                     />
-                  </View>
+                  </FormField>
 
                   <If when={authError()}>
-                    {(msg) => (
-                      <View class="rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2">
-                        <Text class="text-xs text-destructive">{msg()}</Text>
-                      </View>
-                    )}
+                    {(msg) => <FeedbackBanner kind="error" text={msg()} />}
                   </If>
 
-                  <Button
+                  <ActionButton
                     disabled={authBusy()}
                     onPress={() => void handleSetup()}
-                    class="items-center rounded-xl bg-primary py-3.5 active:opacity-85 disabled:opacity-50"
-                  >
-                    <Text class="text-sm font-semibold text-primary-foreground">
-                      {authBusy() ? "正在创建加密保险库..." : "初始化并解锁"}
-                    </Text>
-                  </Button>
+                    label={authBusy() ? "正在创建加密保险库..." : "初始化并解锁"}
+                  />
                 </View>
               </If>
             </View>
@@ -1445,58 +1563,55 @@ function App() {
   function renderTotpTab() {
     return (
       <View class="flex-1 bg-background">
-        <View class="gap-3 border-b border-border bg-card px-4 py-3">
-          <View class="flex-row items-center justify-between gap-2">
-            <View class="gap-0.5">
-              <Text class="text-xl font-bold text-foreground">验证码</Text>
-              <Text class="text-xs text-muted-foreground">
-                共 {totpItems().length} 个 2FA 密钥 · 点击卡片一键复制
-              </Text>
-            </View>
-            <Button
+        <ScreenHeader
+          title="验证码"
+          badge={`${totpItems().length}`}
+          rightSlot={
+            <CompactButton
               testID="totp-import-btn"
+              label="+ 导入 2FA"
+              icon={qrcodeIcon}
+              variant="primary"
               onPress={() => {
                 singleTotpCallback = null;
                 qrSheetMode.set("import");
                 qrSheetOpen.set(true);
               }}
-              class="rounded-xl bg-primary px-3.5 py-2 active:opacity-85"
-            >
-              <Text class="text-xs font-semibold text-primary-foreground">+ 扫码 / 导入 2FA</Text>
-            </Button>
-          </View>
-
-          <Input
+            />
+          }
+        >
+          <SearchBar
             testID="totp-search-input"
             value={totpSearch()}
-            onChange={(e) => totpSearch.set(e.value)}
+            onChange={(v) => totpSearch.set(v)}
             placeholder="搜索服务名或账号..."
-            class="rounded-xl border border-input bg-background px-3 py-2 text-sm text-foreground"
           />
-        </View>
+        </ScreenHeader>
 
-        <Scroll class="flex-1" contentClass="p-4 gap-3 pb-6">
+        <Scroll
+          class="flex-1"
+          contentClass="px-4 pt-2 pb-6 gap-3"
+          refreshing={syncing()}
+          onRefresh={() => void handleManualSync()}
+        >
           <If
             when={filteredTotpItems().length > 0}
             else={
-              <View class="items-center gap-3 rounded-2xl border border-dashed border-border bg-card p-8">
-                <Text class="text-sm font-medium text-foreground">暂无 2FA 验证码</Text>
-                <Text class="text-center text-xs text-muted-foreground">
+              <SurfaceCard class="items-center py-8 gap-3 border border-border">
+                <SectionTitle>暂无 2FA 验证码</SectionTitle>
+                <SubheadText class="text-center">
                   支持相册选择二维码、摄像头扫码，或粘贴 otpauth:// 与 Google 迁移导出。
-                </Text>
-                <Button
+                </SubheadText>
+                <ActionButton
+                  label="立即导入 2FA 密钥"
+                  icon={qrcodeIcon}
                   onPress={() => {
                     singleTotpCallback = null;
                     qrSheetMode.set("import");
                     qrSheetOpen.set(true);
                   }}
-                  class="rounded-xl bg-primary px-4 py-2.5 active:opacity-85"
-                >
-                  <Text class="text-xs font-semibold text-primary-foreground">
-                    立即导入 2FA 密钥
-                  </Text>
-                </Button>
-              </View>
+                />
+              </SurfaceCard>
             }
           >
             <Each of={filteredTotpItems()} key={(it) => it.id}>
@@ -1511,42 +1626,42 @@ function App() {
                   return r ? r.remainingSeconds <= 5 : false;
                 });
                 return (
-                  <Button
+                  <SurfaceCard
+                    class="border border-border"
                     onPress={() => {
                       const code = res()?.code;
                       if (code) void handleCopyText(code, ` ${it().title} 验证码`);
                     }}
-                    class="gap-2.5 rounded-2xl border border-border bg-card p-4 active:opacity-85"
                   >
-                    <View class="flex-row items-center justify-between gap-2">
-                      <View class="flex-1 gap-0.5">
-                        <Text class="text-base font-semibold text-foreground">{it().title}</Text>
-                        <If when={it().username}>
-                          <Text class="text-xs text-muted-foreground">{it().username}</Text>
-                        </If>
+                    <View class="flex-row items-center justify-between gap-3">
+                      <View class="flex-1 min-w-0 flex-row items-center gap-3">
+                        <ItemAvatar title={it().title} category={it().category} />
+                        <View class="flex-1 min-w-0 gap-1">
+                          <Text class="line-clamp-1 text-[15px] font-semibold text-foreground">
+                            {it().title}
+                          </Text>
+                          <If when={it().username}>
+                            <SubheadText lineClamp={1}>{it().username}</SubheadText>
+                          </If>
+                        </View>
                       </View>
                       <View class="items-end gap-1">
-                        <Text class="font-mono text-2xl font-bold tracking-widest text-foreground">
-                          {res()?.code ?? "------"}
-                        </Text>
-                        <Text
-                          class={`font-mono text-[11px] font-semibold ${
-                            expiring() ? "text-destructive" : "text-muted-foreground"
-                          }`}
-                        >
-                          {res() ? `${res()!.remainingSeconds}s` : "..."}
-                        </Text>
+                        <OtpHeroText code={res()?.code ?? "------"} />
+                        <BadgePill
+                          label={res() ? `${res()!.remainingSeconds}s` : "..."}
+                          tone={expiring() ? "danger" : "primary"}
+                        />
                       </View>
                     </View>
-                    <View class="h-1 w-full overflow-hidden rounded-full bg-muted">
-                      <View
-                        class={`h-full rounded-full ${
-                          expiring() ? "bg-destructive" : "bg-primary"
-                        }`}
-                        style={{ width: `${pct()}%` }}
-                      />
-                    </View>
-                  </Button>
+                    <Progress
+                      value={pct()}
+                      accessibilityLabel={`${it().title} 验证码倒计时`}
+                      trackClass="h-1 w-full overflow-hidden rounded-full bg-secondary"
+                      indicatorClass={`h-full rounded-full ${
+                        expiring() ? "bg-destructive" : "bg-primary"
+                      }`}
+                    />
+                  </SurfaceCard>
                 );
               }}
             </Each>
@@ -1559,316 +1674,289 @@ function App() {
   function renderVaultTab() {
     return (
       <View class="flex-1 bg-background">
-        {/* Header & Search */}
-        <View class="gap-2.5 border-b border-border bg-card px-4 py-3">
-          <View class="flex-row items-center justify-between gap-2">
-            <View class="gap-0.5">
-              <Text class="text-xl font-bold text-foreground">密码库</Text>
-              <Text class="text-xs text-muted-foreground">
-                {vaults().length} 个保险库 · {filteredVaultItems().length} / {items().length} 条凭据
-              </Text>
-            </View>
-            <View class="flex-row items-center gap-1.5">
-              <Button
+        <ScreenHeader
+          title="密码库"
+          badge={`${filteredVaultItems().length} / ${items().length}`}
+          rightSlot={
+            <View class="flex-row items-center gap-2">
+              <CompactButton
+                label={syncing() ? "同步中" : "同步"}
+                icon={refreshIcon}
+                variant="card"
                 disabled={syncing()}
                 onPress={() => void handleManualSync()}
-                class="rounded-xl border border-border bg-background px-3 py-2 active:bg-muted disabled:opacity-50"
-              >
-                <Text class="text-xs font-medium text-foreground">
-                  {syncing() ? "同步中" : "同步"}
-                </Text>
-              </Button>
-              <Button
+              />
+              <CompactButton
                 testID="vault-add-btn"
+                label="+ 新建"
+                variant="primary"
                 onPress={() => {
                   editingItem.set(null);
                   itemEditorOpen.set(true);
                 }}
-                class="rounded-xl bg-primary px-3.5 py-2 active:opacity-85"
-              >
-                <Text class="text-xs font-semibold text-primary-foreground">+ 新建</Text>
-              </Button>
+              />
             </View>
-          </View>
-
-          <Input
+          }
+        >
+          <SearchBar
             testID="vault-search-input"
             value={vaultSearch()}
-            onChange={(e) => vaultSearch.set(e.value)}
+            onChange={(v) => vaultSearch.set(v)}
             placeholder="搜索标题、用户名、网址或标签..."
-            class="rounded-xl border border-input bg-background px-3 py-2 text-sm text-foreground"
           />
 
-          {/* Vault Filter Pills */}
-          <Scroll horizontal scrollbar={false} contentClass="flex-row items-center gap-1.5">
-            <Button
-              onPress={() => selectedVaultId.set("all")}
-              class={`rounded-full border px-3 py-1 ${
-                selectedVaultId() === "all"
-                  ? "border-primary bg-primary"
-                  : "border-border bg-background"
-              }`}
-            >
-              <Text
-                class={`text-xs font-medium ${
-                  selectedVaultId() === "all" ? "text-primary-foreground" : "text-foreground"
-                }`}
-              >
-                全部库
-              </Text>
-            </Button>
-            <Each of={vaults()}>
-              {(v) => (
-                <Button
-                  onPress={() => selectedVaultId.set(v().id)}
-                  class={`rounded-full border px-3 py-1 ${
-                    selectedVaultId() === v().id
-                      ? "border-primary bg-primary"
-                      : "border-border bg-background"
-                  }`}
-                >
-                  <Text
-                    class={`text-xs font-medium ${
-                      selectedVaultId() === v().id
-                        ? "text-primary-foreground"
-                        : "text-foreground"
-                    }`}
-                  >
-                    {v().metadata.name}
-                  </Text>
-                </Button>
-              )}
-            </Each>
-            <Button
-              onPress={() => newVaultDialogOpen.set(true)}
-              class="rounded-full border border-dashed border-border bg-background px-3 py-1 active:bg-muted"
-            >
-              <Text class="text-xs text-muted-foreground">+ 新建库</Text>
-            </Button>
-          </Scroll>
+          {/* Official Select for switching Vaults when multiple vaults exist */}
+          <If when={vaults().length > 1}>
+            <AppSelect
+              surface="canvas"
+              accessibilityLabel="切换保险库"
+              items={[
+                { value: "all", title: "全部保险库" },
+                ...vaults().map((v) => ({
+                  value: v.id,
+                  title: v.metadata.name,
+                })),
+              ]}
+              value={selectedVaultId()}
+              onChange={(val) => selectedVaultId.set(val)}
+            />
+          </If>
 
           {/* Category Filter Pills */}
-          <Scroll horizontal scrollbar={false} contentClass="flex-row items-center gap-1.5">
-            <Button
+          <Scroll horizontal scrollbar={false} contentClass="flex-row items-center gap-2">
+            <FilterPill
+              label="全部"
+              selected={selectedCategory() === "all"}
               onPress={() => selectedCategory.set("all")}
-              class={`rounded-full px-3 py-1 ${
-                selectedCategory() === "all" ? "bg-foreground" : "bg-muted"
-              }`}
-            >
-              <Text
-                class={`text-xs font-medium ${
-                  selectedCategory() === "all" ? "text-background" : "text-foreground"
-                }`}
-              >
-                全部
-              </Text>
-            </Button>
+            />
             <Each of={CATEGORY_OPTIONS}>
               {(cat) => (
-                <Button
+                <FilterPill
+                  label={cat().label}
+                  selected={selectedCategory() === cat().key}
                   onPress={() => selectedCategory.set(cat().key)}
-                  class={`rounded-full px-3 py-1 ${
-                    selectedCategory() === cat().key ? "bg-foreground" : "bg-muted"
-                  }`}
-                >
-                  <Text
-                    class={`text-xs font-medium ${
-                      selectedCategory() === cat().key ? "text-background" : "text-foreground"
-                    }`}
-                  >
-                    {cat().label}
-                  </Text>
-                </Button>
+                />
               )}
             </Each>
           </Scroll>
 
-          {/* Tag / Group Filter Pills */}
+          {/* Tag Filter Strip (only shown when tags exist) */}
           <If when={allTags().length > 0}>
-            <Scroll horizontal scrollbar={false} contentClass="flex-row items-center gap-1.5">
-              <Button
+            <Scroll horizontal scrollbar={false} contentClass="flex-row items-center gap-2">
+              <FilterPill
+                label="全部分组"
+                selected={selectedTag() === "all"}
                 onPress={() => selectedTag.set("all")}
-                class={`rounded-full border px-2.5 py-0.5 ${
-                  selectedTag() === "all"
-                    ? "border-primary bg-primary/15"
-                    : "border-border bg-background"
-                }`}
-              >
-                <Text class="text-[11px] text-foreground">全部分组</Text>
-              </Button>
+              />
               <Each of={allTags()}>
                 {(tag) => (
-                  <Button
+                  <FilterPill
+                    label={`#${tag()}`}
+                    selected={selectedTag() === tag()}
                     onPress={() =>
                       selectedTag.set(selectedTag() === tag() ? "all" : tag())
                     }
-                    class={`rounded-full border px-2.5 py-0.5 ${
-                      selectedTag() === tag()
-                        ? "border-primary bg-primary/15"
-                        : "border-border bg-background"
-                    }`}
-                  >
-                    <Text class="text-[11px] text-foreground">#{tag()}</Text>
-                  </Button>
+                  />
                 )}
               </Each>
             </Scroll>
           </If>
-        </View>
+        </ScreenHeader>
 
-        {/* Master-detail on desktop, list + sheet on mobile */}
-        <View class={`flex-1 ${isDesktop ? "flex-row" : ""}`}>
+        {/* Master-detail on desktop, quiet grouped list + sheet on mobile */}
+        <View class={`flex-1 ${isWideDesktop() ? "flex-row" : ""}`}>
           <Scroll
-            class={isDesktop ? "w-80 border-r border-border" : "flex-1"}
-            contentClass="p-3 gap-2 pb-6"
+            class={isWideDesktop() ? "w-80 border-r border-border" : "flex-1"}
+            contentClass="px-4 pt-2 pb-6 gap-3"
+            refreshing={syncing()}
+            onRefresh={() => void handleManualSync()}
           >
+            {/* Android System Autofill prompt when supported but not enabled */}
+            <If when={autofillStatus().supported && !autofillStatus().enabled}>
+              <GroupedList>
+                <GroupedRow last class="flex-row items-center justify-between gap-3">
+                  <View class="flex-1 gap-1">
+                    <BodyText class="font-semibold">系统自动填充尚未开启</BodyText>
+                    <SubheadText>开启后可在 Chrome 和其他 App 一键填充</SubheadText>
+                  </View>
+                  <CompactButton
+                    label="去开启"
+                    variant="tonal"
+                    onPress={() => void handleEnableAndroidAutofill()}
+                  />
+                </GroupedRow>
+              </GroupedList>
+            </If>
+
+            {/* Pending captured Android logins */}
+            <If when={pendingAndroidSaves().length > 0}>
+              <View class="gap-2">
+                <SectionHeader title="待保存的自动填充登录" />
+                <GroupedList>
+                  <Each of={pendingAndroidSaves()} key={(p) => p.id}>
+                    {(p, idx) => (
+                      <GroupedRow
+                        last={idx() === pendingAndroidSaves().length - 1}
+                        class="flex-row items-center justify-between gap-3"
+                      >
+                        <View class="flex-1 gap-1">
+                          <BodyText class="font-semibold" lineClamp={1}>
+                            {p().domain || p().packageName || "新登录凭据"}
+                          </BodyText>
+                          <SubheadText lineClamp={1}>{p().username}</SubheadText>
+                        </View>
+                        <View class="flex-row items-center gap-2">
+                          <CompactButton
+                            label="忽略"
+                            variant="neutral"
+                            onPress={() => handleDismissPendingAndroidLogin(p().id)}
+                          />
+                          <CompactButton
+                            label="保存到密码库"
+                            variant="primary"
+                            onPress={() => void handleSavePendingAndroidLogin(p())}
+                          />
+                        </View>
+                      </GroupedRow>
+                    )}
+                  </Each>
+                </GroupedList>
+              </View>
+            </If>
+
             <If
               when={filteredVaultItems().length > 0}
               else={
-                <View class="items-center gap-2 rounded-2xl border border-dashed border-border bg-card p-6">
-                  <Text class="text-sm font-medium text-foreground">没有匹配的条目</Text>
-                  <Text class="text-xs text-muted-foreground">
+                <SurfaceCard class="items-center py-8 gap-2 border border-border">
+                  <SectionTitle>没有匹配的条目</SectionTitle>
+                  <SubheadText class="text-center">
                     调整筛选条件或点击右上角「+ 新建」添加凭据
-                  </Text>
-                </View>
+                  </SubheadText>
+                </SurfaceCard>
               }
             >
-              <Each of={filteredVaultItems()} key={(it) => it.id}>
-                {(it) => {
-                  const isSelected = computed(() => selectedItemId() === it().id);
-                  const subtitle = computed(() => {
-                    const cur = it();
-                    if (cur.category === "card" && cur.card?.number) {
-                      return `${cur.card.brand || "银行卡"} •••• ${cur.card.number.slice(-4)}`;
-                    }
-                    if (cur.category === "identity") {
-                      return cur.identity?.fullName || cur.identity?.email || "身份信息";
-                    }
-                    return cur.username || cur.urls[0] || categoryLabel(cur.category);
-                  });
-                  const hasIssue = computed(
-                    () => Boolean(auditSummary().issuesByItemId[it().id]?.length)
-                  );
-                  return (
-                    <Button
-                      onPress={() => {
-                        Haptics.selection();
-                        selectedItemId.set(it().id);
-                      }}
-                      class={`gap-1 rounded-2xl border p-3.5 ${
-                        isSelected() && isDesktop
-                          ? "border-primary bg-primary/10"
-                          : "border-border bg-card"
-                      }`}
-                    >
-                      <View class="flex-row items-center justify-between gap-2">
-                        <Text class="flex-1 truncate text-sm font-semibold text-foreground">
-                          {it().title}
-                        </Text>
-                        <View class="flex-row items-center gap-1">
-                          <If when={it().totp}>
-                            <View class="rounded bg-primary/15 px-1.5 py-0.5">
-                              <Text class="text-[10px] font-semibold text-primary">2FA</Text>
-                            </View>
-                          </If>
-                          <If when={hasIssue()}>
-                            <View class="rounded bg-amber-500/15 px-1.5 py-0.5">
-                              <Text class="text-[10px] font-medium text-amber-600 dark:text-amber-400">
-                                风险
+              <GroupedList>
+                <Each of={filteredVaultItems()} key={(it) => it.id}>
+                  {(it, idx) => {
+                    const isSelected = computed(() => selectedItemId() === it().id);
+                    const subtitle = computed(() => {
+                      const cur = it();
+                      if (cur.category === "card" && cur.card?.number) {
+                        return `${cur.card.brand || "银行卡"} •••• ${cur.card.number.slice(-4)}`;
+                      }
+                      if (cur.category === "identity") {
+                        return cur.identity?.fullName || cur.identity?.email || "身份信息";
+                      }
+                      return cur.username || cur.urls[0] || categoryLabel(cur.category);
+                    });
+                    const hasIssue = computed(
+                      () => Boolean(auditSummary().issuesByItemId[it().id]?.length)
+                    );
+                    return (
+                      <GroupedRow
+                        last={idx() === filteredVaultItems().length - 1}
+                        selected={isSelected() && isWideDesktop()}
+                        onPress={() => {
+                          Haptics.selection();
+                          selectedItemId.set(it().id);
+                        }}
+                      >
+                        <View class="flex-row items-center gap-3">
+                          <ItemAvatar title={it().title} category={it().category} />
+                          <View class="flex-1 min-w-0 gap-1">
+                            <View class="flex-row items-center gap-2">
+                              <Text class="flex-1 line-clamp-1 text-[15px] font-semibold text-foreground">
+                                {it().title}
                               </Text>
+                              <If when={it().totp}>
+                                <BadgePill label="2FA" tone="primary" />
+                              </If>
+                              <If when={hasIssue()}>
+                                <BadgePill label="风险" tone="warning" />
+                              </If>
                             </View>
-                          </If>
+                            <SubheadText lineClamp={1}>{subtitle()}</SubheadText>
+                          </View>
+                          <Image
+                            src={chevronRightIcon}
+                            class="h-4 w-4"
+                            style={{ tintColor: token("muted-foreground") }}
+                          />
                         </View>
-                      </View>
-                      <Text class="truncate text-xs text-muted-foreground">
-                        {subtitle()}
-                      </Text>
-                    </Button>
-                  );
-                }}
-              </Each>
+                      </GroupedRow>
+                    );
+                  }}
+                </Each>
+              </GroupedList>
             </If>
           </Scroll>
 
           {/* Desktop Detail Pane */}
-          <If when={isDesktop}>
-            <Scroll class="flex-1" contentClass="p-5">
+          <If when={isWideDesktop()}>
+            <Scroll class="flex-1" contentClass="p-6">
               <If
                 when={selectedItem()}
                 else={
                   <View class="items-center justify-center py-20">
-                    <Text class="text-sm text-muted-foreground">从左侧选择一个条目查看详情</Text>
+                    <SubheadText>从左侧选择一个条目查看详情</SubheadText>
                   </View>
                 }
               >
-                {(item) => renderItemDetailContent(item())}
+                {(item) => renderItemDetailContent(item, false)}
               </If>
             </Scroll>
           </If>
         </View>
 
         {/* Mobile Item Detail Sheet */}
-        <If when={!isDesktop}>
-          <Sheet
+        <If when={!isWideDesktop()}>
+          <SheetContainer
             open={Boolean(selectedItem())}
-            onOpenChange={(e) => {
-              if (!e.open) selectedItemId.set(null);
-            }}
-            side="bottom"
-            closeOnSwipe
-            popupClass="bg-card rounded-t-2xl border-t border-border p-4 pb-[calc(env(safe-area-inset-bottom)+16px)] max-h-[88%]"
-            backdropClass="bg-black/45"
+            onClose={() => selectedItemId.set(null)}
+            title={selectedItem()?.title ?? "凭据详情"}
+            subtitle={
+              selectedItem()
+                ? categoryLabel(selectedItem()!.category)
+                : undefined
+            }
+            closeLabel="关闭"
           >
-            <View class="gap-3">
-              <View class="flex-row justify-end">
-                <Button
-                  onPress={() => selectedItemId.set(null)}
-                  class="rounded-full bg-muted px-3 py-1"
-                >
-                  <Text class="text-xs text-foreground">关闭</Text>
-                </Button>
-              </View>
-              <Scroll class="max-h-[480px]" contentClass="pb-4">
-                <If when={selectedItem()}>{(item) => renderItemDetailContent(item())}</If>
-              </Scroll>
-            </View>
-          </Sheet>
+            <If when={selectedItem()}>{(item) => renderItemDetailContent(item, true)}</If>
+          </SheetContainer>
         </If>
 
         {/* Create Vault Sheet */}
-        <Sheet
+        <SheetContainer
           open={newVaultDialogOpen()}
-          onOpenChange={(e) => {
-            if (!e.open) newVaultDialogOpen.set(false);
-          }}
-          side="bottom"
-          popupClass="bg-card rounded-t-2xl border-t border-border p-4 pb-[calc(env(safe-area-inset-bottom)+16px)]"
-          backdropClass="bg-black/45"
+          onClose={() => newVaultDialogOpen.set(false)}
+          title="新建保险库"
+          closeLabel="取消"
+          scrollable={false}
+          footer={
+            <View class="flex-row gap-2">
+              <ActionButton
+                variant="secondary"
+                class="flex-1"
+                label="取消"
+                onPress={() => newVaultDialogOpen.set(false)}
+              />
+              <ActionButton
+                variant="primary"
+                class="flex-1"
+                label="创建"
+                onPress={() => void handleCreateVault()}
+              />
+            </View>
+          }
         >
-          <View class="gap-3">
-            <Text class="text-base font-semibold text-foreground">新建保险库</Text>
-            <Input
+          <FormField label="保险库名称">
+            <AppInput
               value={newVaultName()}
               onChange={(e) => newVaultName.set(e.value)}
               placeholder="例如 家庭、公司"
-              class="rounded-xl border border-input bg-background px-3 py-2.5 text-sm text-foreground"
             />
-            <View class="flex-row gap-2">
-              <Button
-                onPress={() => newVaultDialogOpen.set(false)}
-                class="flex-1 items-center rounded-xl border border-border bg-background py-2.5"
-              >
-                <Text class="text-xs font-medium text-foreground">取消</Text>
-              </Button>
-              <Button
-                onPress={() => void handleCreateVault()}
-                class="flex-1 items-center rounded-xl bg-primary py-2.5"
-              >
-                <Text class="text-xs font-semibold text-primary-foreground">创建</Text>
-              </Button>
-            </View>
-          </View>
-        </Sheet>
+          </FormField>
+        </SheetContainer>
       </View>
     );
   }
@@ -1876,80 +1964,55 @@ function App() {
   function renderInboxTab() {
     return (
       <View class="flex-1 bg-background">
-        <View class="gap-2.5 border-b border-border bg-card px-4 py-3">
-          <View class="flex-row items-center justify-between gap-2">
-            <View class="gap-0.5">
-              <Text class="text-xl font-bold text-foreground">收件箱</Text>
-              <Text class="text-xs text-muted-foreground">
-                端到端加密邮箱验证码流 ({filteredEmails().length} 封)
-              </Text>
-            </View>
-            <Button
+        <ScreenHeader
+          title="收件箱"
+          badge={`${filteredEmails().length}`}
+          rightSlot={
+            <CompactButton
               testID="sync-imap-btn"
+              label={syncingImap() ? "同步中..." : "立即同步收信"}
+              icon={refreshIcon}
+              variant="primary"
               disabled={syncingImap()}
               onPress={() => void handleSyncImap()}
-              class="rounded-xl bg-primary px-3.5 py-2 active:opacity-85 disabled:opacity-50"
-            >
-              <Text class="text-xs font-semibold text-primary-foreground">
-                {syncingImap() ? "同步中..." : "立即同步收信"}
-              </Text>
-            </Button>
-          </View>
-
+            />
+          }
+        >
           <If when={mailboxes().length > 0}>
-            <Scroll horizontal scrollbar={false} contentClass="flex-row items-center gap-1.5">
-              <Button
+            <Scroll horizontal scrollbar={false} contentClass="flex-row items-center gap-2">
+              <FilterPill
+                label={`全部邮箱 (${emails().length})`}
+                selected={selectedMailbox() === "all"}
                 onPress={() => selectedMailbox.set("all")}
-                class={`rounded-full border px-3 py-1 ${
-                  selectedMailbox() === "all"
-                    ? "border-primary bg-primary"
-                    : "border-border bg-background"
-                }`}
-              >
-                <Text
-                  class={`text-xs font-medium ${
-                    selectedMailbox() === "all" ? "text-primary-foreground" : "text-foreground"
-                  }`}
-                >
-                  全部邮箱 ({emails().length})
-                </Text>
-              </Button>
+              />
               <Each of={mailboxes()} key={(m) => m.address}>
                 {(mb) => (
-                  <Button
+                  <FilterPill
+                    label={`${mb().label ? `${mb().label} · ${mb().address}` : mb().address} (${mb().count})`}
+                    selected={selectedMailbox() === mb().address}
                     onPress={() => selectedMailbox.set(mb().address)}
-                    class={`rounded-full border px-3 py-1 ${
-                      selectedMailbox() === mb().address
-                        ? "border-primary bg-primary"
-                        : "border-border bg-background"
-                    }`}
-                  >
-                    <Text
-                      class={`text-xs font-medium ${
-                        selectedMailbox() === mb().address
-                          ? "text-primary-foreground"
-                          : "text-foreground"
-                      }`}
-                    >
-                      {mb().label ? `${mb().label} · ${mb().address}` : mb().address} ({mb().count})
-                    </Text>
-                  </Button>
+                  />
                 )}
               </Each>
             </Scroll>
           </If>
-        </View>
+        </ScreenHeader>
 
-        <Scroll class="flex-1" contentClass="p-4 gap-3 pb-6">
+        <Scroll
+          class="flex-1"
+          contentClass="px-4 pt-2 pb-6 gap-3"
+          refreshing={syncingImap()}
+          onRefresh={() => void handleSyncImap()}
+        >
           <If
             when={filteredEmails().length > 0}
             else={
-              <View class="items-center gap-2 rounded-2xl border border-dashed border-border bg-card p-8">
-                <Text class="text-sm font-medium text-foreground">暂无验证码邮件</Text>
-                <Text class="text-center text-xs text-muted-foreground">
+              <SurfaceCard class="items-center py-8 gap-2 border border-border">
+                <SectionTitle>暂无验证码邮件</SectionTitle>
+                <SubheadText class="text-center">
                   在「设置 → 多邮箱 IMAP 收信」中添加 Gmail / QQ / 163 / 126 / iCloud / Outlook 后点击「立即同步收信」。
-                </Text>
-              </View>
+                </SubheadText>
+              </SurfaceCard>
             }
           >
             <Each of={filteredEmails()} key={(em) => em.id}>
@@ -1959,65 +2022,58 @@ function App() {
                   () => em().envelopeTo?.trim() || em().to?.trim() || ""
                 );
                 return (
-                  <View class="gap-2.5 rounded-2xl border border-border bg-card p-4">
-                    <View class="flex-row items-start justify-between gap-2">
+                  <SurfaceCard class="border border-border">
+                    <View class="flex-row items-start gap-3">
+                      <ItemAvatar title={em().from || em().subject || "Mail"} category="email" />
                       <View class="flex-1 gap-1">
-                        <View class="flex-row flex-wrap items-center gap-1.5">
-                          <View class="rounded bg-muted px-1.5 py-0.5">
-                            <Text class="font-mono text-[10px] font-semibold uppercase text-foreground">
-                              {em().source}
-                            </Text>
-                          </View>
-                          <Text class="truncate text-xs font-medium text-foreground">
-                            {em().from}
-                          </Text>
+                        <Text class="text-[15px] font-semibold text-foreground">
+                          {em().subject}
+                        </Text>
+                        <SubheadText lineClamp={1}>{em().from}</SubheadText>
+                        <View class="flex-row flex-wrap items-center gap-2 pt-1">
+                          <BadgePill label={em().source.toUpperCase()} tone="neutral" />
                           <If when={recipient()}>
-                            <View class="rounded bg-primary/10 px-1.5 py-0.5">
-                              <Text class="truncate font-mono text-[10px] text-primary">
-                                → {recipient()}
-                              </Text>
-                            </View>
+                            <BadgePill label={`→ ${recipient()}`} tone="primary" />
                           </If>
                         </View>
-                        <Text class="text-sm font-semibold text-foreground">{em().subject}</Text>
                       </View>
-                      <Button
+                      <CompactButton
+                        label="删除"
+                        variant="neutral"
                         onPress={() => void handleDeleteEmail(em())}
-                        class="rounded-lg px-2 py-1 active:bg-muted"
-                      >
-                        <Text class="text-xs text-muted-foreground">删除</Text>
-                      </Button>
+                      />
                     </View>
 
                     <If when={em().otpCode}>
                       {(code) => (
                         <Button
                           onPress={() => void handleCopyText(code(), "邮箱验证码")}
-                          class="flex-row items-center justify-between rounded-xl border border-border bg-background px-3.5 py-2.5 active:bg-muted"
+                          class="flex-row items-center justify-between rounded-xl bg-input px-4 py-3 active:opacity-80"
                         >
-                          <View class="gap-0.5">
-                            <Text class="text-[11px] text-muted-foreground">
-                              提取验证码 (置信度 {Math.round(em().confidence * 100)}%)
-                            </Text>
-                            <Text class="font-mono text-2xl font-bold tracking-widest text-foreground">
-                              {code()}
-                            </Text>
+                          <View class="gap-1">
+                            <CaptionText>
+                              提取验证码 · 置信度 {Math.round(em().confidence * 100)}%
+                            </CaptionText>
+                            <OtpHeroText code={code()} size="compact" />
                           </View>
-                          <View class="rounded-lg bg-primary px-3 py-1.5">
-                            <Text class="text-xs font-semibold text-primary-foreground">复制</Text>
-                          </View>
+                          <CompactButton
+                            label="复制"
+                            icon={copyIcon}
+                            variant="primary"
+                            onPress={() => void handleCopyText(code(), "邮箱验证码")}
+                          />
                         </Button>
                       )}
                     </If>
 
                     <If when={em().magicLink}>
                       {(link) => (
-                        <Button
+                        <CompactButton
+                          label="打开登录链接"
+                          variant="tonal"
+                          class="self-start"
                           onPress={() => void openUrl(link())}
-                          class="self-start rounded-lg border border-border bg-background px-3 py-1.5 active:bg-muted"
-                        >
-                          <Text class="text-xs font-medium text-primary">打开登录链接</Text>
-                        </Button>
+                        />
                       )}
                     </If>
 
@@ -2025,20 +2081,16 @@ function App() {
                       onPress={() =>
                         expandedEmailId.set(expanded() ? null : em().id)
                       }
-                      class="gap-1"
+                      class="gap-1 active:opacity-80"
                     >
-                      <Text
-                        class={`text-xs text-muted-foreground ${
-                          expanded() ? "" : "line-clamp-2"
-                        }`}
-                      >
+                      <SubheadText lineClamp={expanded() ? undefined : 2}>
                         {expanded() ? em().textBody || em().snippet : em().snippet}
-                      </Text>
-                      <Text class="text-[11px] font-medium text-primary">
+                      </SubheadText>
+                      <CaptionText class="text-primary">
                         {expanded() ? "收起正文" : "展开详情"}
-                      </Text>
+                      </CaptionText>
                     </Button>
-                  </View>
+                  </SurfaceCard>
                 );
               }}
             </Each>
@@ -2051,219 +2103,261 @@ function App() {
   function renderSettingsTab() {
     return (
       <View class="flex-1 bg-background">
-        <View class="border-b border-border bg-card px-4 py-3">
-          <Text class="text-xl font-bold text-foreground">设置</Text>
-          <Text class="text-xs text-muted-foreground">
-            多邮箱 IMAP 收信 · 邮件过滤 · 安全审计 · 外观与会话
-          </Text>
-        </View>
+        <ScreenHeader title="设置" />
 
-        <Scroll class="flex-1" contentClass="p-4 gap-4 pb-8">
-          {/* Multi-Account IMAP Section */}
-          <View class="gap-3 rounded-2xl border border-border bg-card p-4">
-            <View class="flex-row items-center justify-between gap-2">
-              <View class="flex-1 gap-0.5">
-                <Text class="text-base font-semibold text-foreground">多邮箱 IMAP 收信</Text>
-                <Text class="text-xs text-muted-foreground">
-                  支持 Gmail / QQ / 163 / 126 / iCloud / Outlook / 自定义无限账号
-                </Text>
-              </View>
-              <Button
-                testID="add-imap-btn"
-                onPress={() => {
-                  editingImapAccount.set(null);
-                  imapEditorOpen.set(true);
-                }}
-                class="rounded-xl bg-primary px-3 py-2 active:opacity-85"
-              >
-                <Text class="text-xs font-semibold text-primary-foreground">+ 添加邮箱账号</Text>
-              </Button>
-            </View>
-
-            <If
-              when={imapAccounts().length > 0}
-              else={
-                <View class="rounded-xl border border-dashed border-border bg-background p-4">
-                  <Text class="text-center text-xs text-muted-foreground">
-                    尚未配置 IMAP 收信邮箱，点击上方按钮添加。
-                  </Text>
+        <Scroll class="flex-1" contentClass="px-4 pt-2 pb-8 gap-6">
+          {/* 1. Android System Autofill Section */}
+          <View class="gap-2">
+            <SectionHeader title="系统自动填充" />
+            <GroupedList>
+              <GroupedRow class="gap-1">
+                <View class="flex-row items-center justify-between gap-2">
+                  <BodyText class="font-semibold">Android 系统自动填充</BodyText>
+                  <BadgePill
+                    label={
+                      autofillStatus().enabled
+                        ? "已开启"
+                        : autofillStatus().supported
+                          ? "未启用"
+                          : "系统级填充服务"
+                    }
+                    tone={
+                      autofillStatus().enabled
+                        ? "success"
+                        : autofillStatus().supported
+                          ? "warning"
+                          : "neutral"
+                    }
+                  />
                 </View>
+                <SubheadText>
+                  在 Chrome 与其他 Android App 登录框自动填充账号、密码、实时 2FA 与邮箱验证码
+                </SubheadText>
+              </GroupedRow>
+              <GroupedRow last class="flex-row flex-wrap items-center gap-2">
+                <CompactButton
+                  testID="enable-autofill-btn"
+                  label="开启系统自动填充"
+                  variant={autofillStatus().enabled ? "neutral" : "primary"}
+                  onPress={() => void handleEnableAndroidAutofill()}
+                />
+                <CompactButton
+                  label="刷新状态"
+                  icon={refreshIcon}
+                  variant="neutral"
+                  onPress={() => void handleRefreshAutofillStatus()}
+                />
+              </GroupedRow>
+            </GroupedList>
+          </View>
+
+          {/* 2. Multi-Account IMAP Section */}
+          <View class="gap-2">
+            <SectionHeader
+              title="多邮箱 IMAP 收信"
+              rightSlot={
+                <CompactButton
+                  testID="add-imap-btn"
+                  label="+ 添加邮箱账号"
+                  variant="primary"
+                  onPress={() => {
+                    editingImapAccount.set(null);
+                    imapEditorOpen.set(true);
+                  }}
+                />
               }
-            >
-              <Each of={imapAccounts()} key={(a) => a.id}>
-                {(acc) => {
-                  const statusInfo = computed(() => getImapStatusInfo(acc()));
-                  return (
-                    <View class="gap-2 rounded-xl border border-border bg-background p-3">
-                      <View class="flex-row items-center justify-between gap-2">
-                        <View class="flex-1 gap-0.5">
-                          <View class="flex-row items-center gap-2">
-                            <Text class="text-sm font-semibold text-foreground">
-                              {acc().label || acc().username}
-                            </Text>
-                            <View class={`rounded-full px-2 py-0.5 ${statusInfo().badgeClass}`}>
-                              <Text class="text-[10px] font-medium">{statusInfo().label}</Text>
+            />
+            <GroupedList>
+              <If
+                when={imapAccounts().length > 0}
+                else={
+                  <GroupedRow last class="items-center py-4">
+                    <SubheadText class="text-center">
+                      尚未配置 IMAP 收信邮箱，支持 Gmail / QQ / 163 / 126 / iCloud / Outlook。
+                    </SubheadText>
+                  </GroupedRow>
+                }
+              >
+                <Each of={imapAccounts()} key={(a) => a.id}>
+                  {(acc, idx) => {
+                    const statusInfo = computed(() => getImapStatusInfo(acc()));
+                    return (
+                      <GroupedRow
+                        last={idx() === imapAccounts().length - 1}
+                        class="gap-3"
+                      >
+                        <View class="flex-row items-center justify-between gap-2">
+                          <View class="flex-1 gap-1">
+                            <View class="flex-row flex-wrap items-center gap-2">
+                              <BodyText class="font-semibold">
+                                {acc().label || acc().username}
+                              </BodyText>
+                              <BadgePill
+                                label={statusInfo().label}
+                                tone={statusInfo().tone}
+                              />
                             </View>
+                            <SubheadText>
+                              {acc().username} · {acc().host}:{acc().port}
+                            </SubheadText>
                           </View>
-                          <Text class="text-xs text-muted-foreground">
-                            {acc().username} · {acc().host}:{acc().port}
-                          </Text>
+                          <Switch
+                            checked={acc().enabled}
+                            onChange={() => void handleToggleImapEnabled(acc())}
+                            trackClass="w-10 h-6 rounded-full bg-muted checked:bg-primary p-0.5 justify-center"
+                            thumbClass="w-5 h-5 rounded-full bg-primary-foreground checked:translate-x-4"
+                          />
                         </View>
-                        <Switch
-                          checked={acc().enabled}
-                          onChange={() => void handleToggleImapEnabled(acc())}
-                          trackClass="w-10 h-6 rounded-full bg-muted checked:bg-primary p-0.5 justify-center"
-                          thumbClass="w-5 h-5 rounded-full bg-background checked:translate-x-4"
-                        />
-                      </View>
 
-                      <If when={acc().lastError}>
-                        {(errText) => (
-                          <Text class="text-[11px] text-destructive">异常：{errText()}</Text>
-                        )}
-                      </If>
+                        <If when={acc().lastError}>
+                          {(errText) => (
+                            <Text class="text-[13px] font-medium text-destructive">
+                              异常：{errText()}
+                            </Text>
+                          )}
+                        </If>
 
-                      <View class="flex-row gap-2">
-                        <Button
-                          onPress={() => void handleSyncImap(acc().id)}
-                          class="rounded-lg border border-border bg-card px-2.5 py-1.5 active:bg-muted"
-                        >
-                          <Text class="text-xs text-foreground">立即同步</Text>
-                        </Button>
-                        <Button
-                          onPress={() => {
-                            editingImapAccount.set(acc());
-                            imapEditorOpen.set(true);
-                          }}
-                          class="rounded-lg border border-border bg-card px-2.5 py-1.5 active:bg-muted"
-                        >
-                          <Text class="text-xs text-foreground">编辑 / 改授权码</Text>
-                        </Button>
-                        <Button
-                          onPress={() => void handleDeleteImapAccount(acc())}
-                          class="rounded-lg bg-destructive/10 px-2.5 py-1.5 active:opacity-75"
-                        >
-                          <Text class="text-xs text-destructive">删除</Text>
-                        </Button>
-                      </View>
-                    </View>
-                  );
-                }}
-              </Each>
-            </If>
+                        <View class="flex-row flex-wrap gap-2">
+                          <CompactButton
+                            label="立即同步"
+                            icon={refreshIcon}
+                            variant="neutral"
+                            onPress={() => void handleSyncImap(acc().id)}
+                          />
+                          <CompactButton
+                            label="编辑 / 改授权码"
+                            variant="neutral"
+                            onPress={() => {
+                              editingImapAccount.set(acc());
+                              imapEditorOpen.set(true);
+                            }}
+                          />
+                          <CompactButton
+                            label="删除"
+                            variant="danger"
+                            onPress={() => void handleDeleteImapAccount(acc())}
+                          />
+                        </View>
+                      </GroupedRow>
+                    );
+                  }}
+                </Each>
+              </If>
+            </GroupedList>
           </View>
 
-          {/* Email Filter Card */}
-          <View class="gap-3 rounded-2xl border border-border bg-card p-4">
-            <Text class="text-base font-semibold text-foreground">邮件过滤策略</Text>
-            <View class="flex-row items-center justify-between rounded-xl border border-border bg-background px-3 py-2.5">
-              <View class="flex-1 gap-0.5 pr-3">
-                <Text class="text-sm font-medium text-foreground">仅保留含验证码邮件</Text>
-                <Text class="text-xs text-muted-foreground">
-                  开启后仅入库包含 OTP 或登录链接的邮件 (otpOnly)
-                </Text>
-              </View>
-              <Switch
-                testID="otp-only-switch"
-                checked={emailFilter().otpOnly}
-                onChange={(e) => void handleToggleOtpOnly(e.checked)}
-                trackClass="w-10 h-6 rounded-full bg-muted checked:bg-primary p-0.5 justify-center"
-                thumbClass="w-5 h-5 rounded-full bg-background checked:translate-x-4"
-              />
-            </View>
+          {/* 3. Email Filter Section */}
+          <View class="gap-2">
+            <SectionHeader title="邮件过滤策略" />
+            <GroupedList>
+              <GroupedRow last class="flex-row items-center justify-between gap-3">
+                <View class="flex-1 gap-1">
+                  <BodyText class="font-medium">仅保留含验证码邮件</BodyText>
+                  <SubheadText>
+                    开启后仅入库包含 OTP 或登录链接的邮件 (otpOnly)
+                  </SubheadText>
+                </View>
+                <Switch
+                  testID="otp-only-switch"
+                  checked={emailFilter().otpOnly}
+                  onChange={(e) => void handleToggleOtpOnly(e.checked)}
+                  trackClass="w-10 h-6 rounded-full bg-muted checked:bg-primary p-0.5 justify-center"
+                  thumbClass="w-5 h-5 rounded-full bg-primary-foreground checked:translate-x-4"
+                />
+              </GroupedRow>
+            </GroupedList>
           </View>
 
-          {/* Security Audit Summary */}
-          <View class="gap-3 rounded-2xl border border-border bg-card p-4">
-            <View class="flex-row items-center justify-between">
-              <Text class="text-base font-semibold text-foreground">安全审计总览</Text>
-              <View class="rounded-full bg-primary/15 px-3 py-1">
-                <Text class="font-mono text-xs font-bold text-primary">
-                  评分 {auditSummary().score} / 100
-                </Text>
-              </View>
-            </View>
-            <View class="flex-row gap-2">
-              <View class="flex-1 items-center gap-0.5 rounded-xl border border-border bg-background p-2.5">
-                <Text class="font-mono text-lg font-bold text-destructive">
-                  {auditSummary().weakItems.length}
-                </Text>
-                <Text class="text-[11px] text-muted-foreground">弱密码</Text>
-              </View>
-              <View class="flex-1 items-center gap-0.5 rounded-xl border border-border bg-background p-2.5">
-                <Text class="font-mono text-lg font-bold text-amber-600 dark:text-amber-400">
-                  {auditSummary().reusedItems.length}
-                </Text>
-                <Text class="text-[11px] text-muted-foreground">重复密码</Text>
-              </View>
-              <View class="flex-1 items-center gap-0.5 rounded-xl border border-border bg-background p-2.5">
-                <Text class="font-mono text-lg font-bold text-foreground">
-                  {auditSummary().missingTotpItems.length}
-                </Text>
-                <Text class="text-[11px] text-muted-foreground">未开 2FA</Text>
-              </View>
-            </View>
-          </View>
-
-          {/* Appearance */}
-          <View class="gap-2.5 rounded-2xl border border-border bg-card p-4">
-            <Text class="text-base font-semibold text-foreground">外观主题</Text>
-            <View class="flex-row gap-2">
-              <Each of={THEME_OPTIONS}>
-                {(opt) => (
-                  <Button
-                    onPress={() => handleChangeTheme(opt().key)}
-                    class={`flex-1 items-center rounded-xl border py-2.5 ${
-                      themePref() === opt().key
-                        ? "border-primary bg-primary"
-                        : "border-border bg-background"
-                    }`}
-                  >
-                    <Text
-                      class={`text-xs font-medium ${
-                        themePref() === opt().key
-                          ? "text-primary-foreground"
-                          : "text-foreground"
-                      }`}
-                    >
-                      {opt().label}
+          {/* 4. Security Audit Summary */}
+          <View class="gap-2">
+            <SectionHeader
+              title="安全审计总览"
+              rightSlot={
+                <BadgePill label={`评分 ${auditSummary().score} / 100`} tone="primary" />
+              }
+            />
+            <GroupedList>
+              <GroupedRow last class="p-0">
+                <View class="flex-row">
+                  <View class="flex-1 items-center gap-1 border-r border-border px-2 py-3">
+                    <Text class="font-mono text-[20px] font-bold text-destructive">
+                      {auditSummary().weakItems.length}
                     </Text>
-                  </Button>
-                )}
-              </Each>
-            </View>
+                    <CaptionText>弱密码</CaptionText>
+                  </View>
+                  <View class="flex-1 items-center gap-1 border-r border-border px-2 py-3">
+                    <Text class="font-mono text-[20px] font-bold text-chart-3">
+                      {auditSummary().reusedItems.length}
+                    </Text>
+                    <CaptionText>重复密码</CaptionText>
+                  </View>
+                  <View class="flex-1 items-center gap-1 px-2 py-3">
+                    <Text class="font-mono text-[20px] font-bold text-foreground">
+                      {auditSummary().missingTotpItems.length}
+                    </Text>
+                    <CaptionText>未开 2FA</CaptionText>
+                  </View>
+                </View>
+              </GroupedRow>
+            </GroupedList>
           </View>
 
-          {/* Session & Actions */}
-          <View class="gap-2.5 rounded-2xl border border-border bg-card p-4">
-            <Text class="text-base font-semibold text-foreground">账号与同步</Text>
-            <Text class="text-xs text-muted-foreground">
-              服务端：{session()?.serverUrl} · 账号：{session()?.email}
-            </Text>
-            <View class="flex-row gap-2">
-              <Button
-                disabled={syncing()}
-                onPress={() => void handleManualSync()}
-                class="flex-1 items-center rounded-xl border border-border bg-background py-2.5 active:bg-muted"
-              >
-                <Text class="text-xs font-medium text-foreground">
-                  {syncing() ? "同步中..." : "立即全量同步"}
-                </Text>
-              </Button>
-              <Button
-                testID="lock-vault-btn"
-                onPress={() => void handleLock(false)}
-                class="flex-1 items-center rounded-xl bg-destructive py-2.5 active:opacity-85"
-              >
-                <Text class="text-xs font-semibold text-white">锁定密码库</Text>
-              </Button>
-            </View>
-            <Button
-              onPress={() => void handleLock(true)}
-              class="items-center rounded-xl border border-border bg-background py-2 active:bg-muted"
-            >
-              <Text class="text-xs text-muted-foreground">清除已记住的密钥并锁定</Text>
-            </Button>
+          {/* 5. Appearance */}
+          <View class="gap-2">
+            <SectionHeader title="外观主题" />
+            <GroupedList>
+              <GroupedRow last class="p-3">
+                <SegmentedControl
+                  options={THEME_OPTIONS}
+                  value={themePref()}
+                  onChange={(pref) => handleChangeTheme(pref)}
+                />
+              </GroupedRow>
+            </GroupedList>
+          </View>
+
+          {/* 6. Session & Actions */}
+          <View class="gap-2">
+            <SectionHeader
+              title="账号与同步"
+              rightSlot={
+                <CompactButton
+                  label="新建保险库"
+                  icon={plusIcon}
+                  variant="tonal"
+                  onPress={() => newVaultDialogOpen.set(true)}
+                />
+              }
+            />
+            <GroupedList>
+              <GroupedRow class="gap-1">
+                <BodyText class="font-medium">{session()?.email}</BodyText>
+                <SubheadText>服务端：{session()?.serverUrl}</SubheadText>
+              </GroupedRow>
+              <GroupedRow last class="gap-2">
+                <View class="flex-row gap-2">
+                  <ActionButton
+                    variant="secondary"
+                    class="flex-1"
+                    disabled={syncing()}
+                    onPress={() => void handleManualSync()}
+                    label={syncing() ? "同步中..." : "立即全量同步"}
+                  />
+                  <ActionButton
+                    testID="lock-vault-btn"
+                    variant="danger"
+                    class="flex-1"
+                    onPress={() => void handleLock(false)}
+                    label="锁定密码库"
+                  />
+                </View>
+                <ActionButton
+                  variant="ghost"
+                  onPress={() => void handleLock(true)}
+                  label="清除已记住的密钥并锁定"
+                />
+              </GroupedRow>
+            </GroupedList>
           </View>
         </Scroll>
       </View>
@@ -2281,144 +2375,138 @@ function App() {
   function renderUnlockedShell() {
     const tabIndex = computed(() => Math.max(0, TAB_ORDER.indexOf(activeTab())));
 
-    if (isDesktop) {
-      return (
+    return (
+      <If
+        when={isWideDesktop()}
+        else={
+          <View class="flex-1 bg-background pt-[env(safe-area-inset-top)]">
+            <View class="flex-1">{renderMainContent()}</View>
+            <If
+              when={mobileApisAvailable}
+              else={
+                <Tabs
+                  testID="mobile-tab-bar"
+                  class="flex-row bg-card border-t border-border px-2 pt-2 pb-[calc(env(safe-area-inset-bottom)+8px)]"
+                >
+                  <Each of={MOBILE_TABS} key={(t) => t.key}>
+                    {(t) => {
+                      const active = () => activeTab() === t().key;
+                      return (
+                        <Tab
+                          selected={active()}
+                          onPress={() => {
+                            Haptics.selection();
+                            activeTab.set(t().key);
+                          }}
+                          class={`flex-1 h-11 items-center justify-center rounded-xl ${
+                            active() ? "bg-primary/12" : ""
+                          }`}
+                        >
+                          <Text
+                            class={`text-[13px] ${
+                              active()
+                                ? "font-semibold text-primary"
+                                : "font-medium text-muted-foreground"
+                            }`}
+                          >
+                            {t().label}
+                          </Text>
+                        </Tab>
+                      );
+                    }}
+                  </Each>
+                </Tabs>
+              }
+            >
+              <TabBar
+                testID="mobile-tab-bar"
+                class="w-full"
+                items={[
+                  {
+                    title: "验证码",
+                    icon: platform.select({ ios: "qrcode.viewfinder", android: "tab_totp" }),
+                  },
+                  {
+                    title: "密码库",
+                    icon: platform.select({ ios: "key.fill", android: "tab_vault" }),
+                  },
+                  {
+                    title: "收件箱",
+                    icon: platform.select({ ios: "envelope.badge", android: "tab_inbox" }),
+                  },
+                  {
+                    title: "设置",
+                    icon: platform.select({ ios: "gearshape.fill", android: "tab_settings" }),
+                  },
+                ]}
+                selectedIndex={tabIndex()}
+                onChange={(e) => {
+                  Haptics.selection();
+                  activeTab.set(TAB_ORDER[e.index] ?? "totp");
+                }}
+              />
+            </If>
+          </View>
+        }
+      >
         <View class="flex-1 flex-row bg-background">
           {/* Desktop Left Rail */}
           <View class="w-56 justify-between border-r border-border bg-card p-3">
             <View class="gap-4">
-              <View class="flex-row items-center gap-2.5 px-2 py-1">
-                <View class="h-8 w-8 items-center justify-center rounded-lg bg-primary">
-                  <Text class="text-xs font-bold text-primary-foreground">NP</Text>
-                </View>
-                <View class="flex-1">
-                  <Text class="text-sm font-bold text-foreground">NonePwd</Text>
-                  <Text class="truncate text-[10px] text-muted-foreground">
-                    {session()?.email}
-                  </Text>
+              <View class="flex-row items-center gap-3 px-2 py-1">
+                <Image src={appIcon} class="h-9 w-9 rounded-lg" />
+                <View class="flex-1 gap-1">
+                  <BodyText class="font-bold">NonePwd</BodyText>
+                  <CaptionText>{session()?.email ?? ""}</CaptionText>
                 </View>
               </View>
 
               <View class="gap-1">
-                {(
-                  [
-                    { key: "totp", label: "验证码 (2FA)" },
-                    { key: "vault", label: "密码库" },
-                    { key: "inbox", label: "收件箱" },
-                    { key: "settings", label: "设置" },
-                  ] as const
-                ).map((nav) => (
-                  <Button
-                    onPress={() => activeTab.set(nav.key)}
-                    class={`rounded-xl px-3 py-2.5 ${
-                      activeTab() === nav.key ? "bg-primary" : "bg-transparent hover:bg-muted"
-                    }`}
-                  >
-                    <Text
-                      class={`text-sm font-medium ${
-                        activeTab() === nav.key ? "text-primary-foreground" : "text-foreground"
-                      }`}
-                    >
-                      {nav.label}
-                    </Text>
-                  </Button>
-                ))}
+                <Each of={MOBILE_TABS} key={(n) => n.key}>
+                  {(nav) => {
+                    const active = () => activeTab() === nav().key;
+                    return (
+                      <Button
+                        onPress={() => activeTab.set(nav().key)}
+                        class={`h-11 flex-row items-center rounded-xl px-3 ${
+                          active() ? "bg-primary" : "bg-transparent hover:bg-muted"
+                        }`}
+                      >
+                        <Text
+                          class={`text-[15px] ${
+                            active()
+                              ? "font-semibold text-primary-foreground"
+                              : "font-medium text-foreground"
+                          }`}
+                        >
+                          {nav().label}
+                        </Text>
+                      </Button>
+                    );
+                  }}
+                </Each>
               </View>
             </View>
 
             <View class="gap-2">
-              <Button
+              <CompactButton
+                label={syncing() ? "同步中..." : "立即同步"}
+                icon={refreshIcon}
+                variant="neutral"
                 disabled={syncing()}
                 onPress={() => void handleManualSync()}
-                class="items-center rounded-xl border border-border bg-background py-2 hover:bg-muted"
-              >
-                <Text class="text-xs font-medium text-foreground">
-                  {syncing() ? "同步中..." : "立即同步"}
-                </Text>
-              </Button>
-              <Button
+              />
+              <CompactButton
+                label="锁定"
+                variant="danger"
                 onPress={() => void handleLock(false)}
-                class="items-center rounded-xl bg-muted py-2 hover:bg-destructive/20"
-              >
-                <Text class="text-xs font-medium text-foreground">锁定</Text>
-              </Button>
+              />
             </View>
           </View>
 
           <View class="flex-1">{renderMainContent()}</View>
         </View>
-      );
-    }
-
-    // Mobile layout with native TabBar when available, fallback bottom Tabs otherwise
-    return (
-      <View class="flex-1 bg-background pt-[env(safe-area-inset-top)]">
-        <View class="flex-1">{renderMainContent()}</View>
-        <If
-          when={mobileApisAvailable}
-          else={
-            <Tabs class="flex-row border-t border-border bg-card px-2 py-1.5 pb-[calc(env(safe-area-inset-bottom)+6px)]">
-              <Each
-                of={[
-                  { key: "totp" as const, label: "验证码" },
-                  { key: "vault" as const, label: "密码库" },
-                  { key: "inbox" as const, label: "收件箱" },
-                  { key: "settings" as const, label: "设置" },
-                ]}
-              >
-                {(t) => (
-                  <Tab
-                    selected={activeTab() === t().key}
-                    onPress={() => {
-                      Haptics.selection();
-                      activeTab.set(t().key);
-                    }}
-                    class={`flex-1 items-center rounded-xl py-2 ${
-                      activeTab() === t().key ? "bg-primary/15" : ""
-                    }`}
-                  >
-                    <Text
-                      class={`text-xs font-semibold ${
-                        activeTab() === t().key ? "text-primary" : "text-muted-foreground"
-                      }`}
-                    >
-                      {t().label}
-                    </Text>
-                  </Tab>
-                )}
-              </Each>
-            </Tabs>
-          }
-        >
-          <TabBar
-            testID="mobile-tab-bar"
-            class="w-full"
-            items={[
-              {
-                title: "验证码",
-                icon: platform.select({ ios: "qrcode.viewfinder", android: "android:ic_lock_lock" }),
-              },
-              {
-                title: "密码库",
-                icon: platform.select({ ios: "key.fill", android: "android:ic_menu_manage" }),
-              },
-              {
-                title: "收件箱",
-                icon: platform.select({ ios: "envelope.badge", android: "android:ic_dialog_email" }),
-              },
-              {
-                title: "设置",
-                icon: platform.select({ ios: "gearshape.fill", android: "android:ic_menu_preferences" }),
-              },
-            ]}
-            selectedIndex={tabIndex()}
-            onChange={(e) => {
-              Haptics.selection();
-              activeTab.set(TAB_ORDER[e.index] ?? "totp");
-            }}
-          />
-        </If>
-      </View>
+      </If>
     );
   }
 
@@ -2476,15 +2564,15 @@ function App() {
           <Overlay class="top-12 left-4 right-4 items-center">
             <Button
               onPress={() => toast.set(null)}
-              class={`rounded-full border px-4 py-2 ${
+              class={`rounded-full px-4 py-2 ${
                 t().kind === "error"
-                  ? "border-destructive bg-destructive"
-                  : "border-border bg-card"
+                  ? "bg-destructive"
+                  : "bg-card border border-border"
               }`}
             >
               <Text
-                class={`text-xs font-medium ${
-                  t().kind === "error" ? "text-white" : "text-foreground"
+                class={`text-[13px] font-semibold ${
+                  t().kind === "error" ? "text-primary-foreground" : "text-foreground"
                 }`}
               >
                 {t().text}

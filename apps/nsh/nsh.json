@@ -2,7 +2,64 @@
   "name": "NonePwd",
   "id": "dev.nonepwd.app",
   "version": "0.1.0",
-  "build": 1,
+  "build": 2,
+  "theme": {
+    "cssVars": {
+      "theme": {
+        "radius": "12px"
+      },
+      "light": {
+        "background": "#f2f2f7",
+        "foreground": "#1c1c1e",
+        "card": "#ffffff",
+        "card-foreground": "#1c1c1e",
+        "popover": "#ffffff",
+        "popover-foreground": "#1c1c1e",
+        "primary": "#3555f5",
+        "primary-foreground": "#ffffff",
+        "secondary": "#e5e5ea",
+        "secondary-foreground": "#1c1c1e",
+        "muted": "#e5e5ea",
+        "muted-foreground": "#6e6e73",
+        "accent": "#ebebf0",
+        "accent-foreground": "#1c1c1e",
+        "destructive": "#e5484d",
+        "border": "#e5e5ea",
+        "input": "#eff0f5",
+        "ring": "#3555f5",
+        "chart-1": "#3555f5",
+        "chart-2": "#10b981",
+        "chart-3": "#f59e0b",
+        "chart-4": "#7c3aed",
+        "chart-5": "#0ea5e9"
+      },
+      "dark": {
+        "background": "#0b0c10",
+        "foreground": "#f5f5f7",
+        "card": "#18191f",
+        "card-foreground": "#f5f5f7",
+        "popover": "#18191f",
+        "popover-foreground": "#f5f5f7",
+        "primary": "#4c6ef5",
+        "primary-foreground": "#ffffff",
+        "secondary": "#262830",
+        "secondary-foreground": "#f5f5f7",
+        "muted": "#262830",
+        "muted-foreground": "#98989f",
+        "accent": "#262830",
+        "accent-foreground": "#f5f5f7",
+        "destructive": "#e5484d",
+        "border": "#2a2c36",
+        "input": "#23252e",
+        "ring": "#4c6ef5",
+        "chart-1": "#4c6ef5",
+        "chart-2": "#34d399",
+        "chart-3": "#fbbf24",
+        "chart-4": "#a78bfa",
+        "chart-5": "#38bdf8"
+      }
+    }
+  },
   "capabilities": {
     "network": {
       "hosts": ["*"]
@@ -15,6 +72,12 @@
     "statusBar": true,
     "openUrl": {
       "schemes": ["https", "http"]
-    }
+    },
+    "host": [
+      "autofill.status",
+      "autofill.enable",
+      "autofill.sync",
+      "autofill.takePendingSaves"
+    ]
   }
 }

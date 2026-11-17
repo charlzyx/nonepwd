@@ -1,7 +1,6 @@
 import {
   Clipboard,
   Picker,
-  Scroll,
   Text,
   View,
   WebView,
@@ -11,7 +10,6 @@ import {
   signal,
   type WebViewRef,
 } from "nsh";
-import { Button, Input, Sheet } from "nsh/base";
 import { Haptics } from "nsh/mobile";
 import {
   buildOtpAuthUri,
@@ -23,9 +21,34 @@ import {
   type TotpImportPlanItem,
   type VaultItemPayload,
 } from "./crypto";
+import qrcodeIcon from "./icons/qrcode.svg";
 import { decodeQrFromRgba } from "./qr-cpu";
+import {
+  ActionButton,
+  AppInput,
+  AppSelect,
+  BadgePill,
+  BodyText,
+  CompactButton,
+  FeedbackBanner,
+  FormField,
+  GroupedList,
+  GroupedRow,
+  InsetCard,
+  ItemAvatar,
+  SectionHeader,
+  SegmentedControl,
+  SheetContainer,
+  SubheadText,
+} from "./ui";
 
 export type QrImportMode = "album" | "camera" | "text";
+
+const QR_MODE_OPTIONS: ReadonlyArray<{ key: QrImportMode; label: string }> = [
+  { key: "album", label: "相册选图" },
+  { key: "camera", label: "摄像头扫码" },
+  { key: "text", label: "粘贴 / 文本" },
+];
 
 export interface QrScannerSheetProps {
   open: boolean;
@@ -101,7 +124,7 @@ const IMAGE_DECODER_HTML = `<!doctype html>
       }
       canvas.width = w;
       canvas.height = h;
-      ctx.fillStyle = "#ffffff";
+      ctx.fillStyle = "white";
       ctx.fillRect(0, 0, w, h);
       ctx.drawImage(img, 0, 0, w, h);
       var imgData = ctx.getImageData(0, 0, w, h);
@@ -142,11 +165,11 @@ const CAMERA_SCANNER_HTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <style>
-  html,body{margin:0;padding:0;width:100%;height:100%;background:#0a0a0c;overflow:hidden;font-family:-apple-system,system-ui,sans-serif;}
+  html,body{margin:0;padding:0;width:100%;height:100%;background:black;overflow:hidden;font-family:-apple-system,system-ui,sans-serif;}
   video{width:100%;height:100%;object-fit:cover;display:block;}
   .reticle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;}
-  .box{width:190px;height:190px;border:2px solid rgba(255,255,255,0.85);border-radius:16px;box-shadow:0 0 0 9999px rgba(0,0,0,0.4);}
-  .status{position:absolute;bottom:10px;left:12px;right:12px;text-align:center;color:#fff;font-size:12px;text-shadow:0 1px 3px rgba(0,0,0,0.8);}
+  .box{width:190px;height:190px;border:2px solid rgb(255 255 255 / 0.85);border-radius:16px;box-shadow:0 0 0 9999px rgb(0 0 0 / 0.4);}
+  .status{position:absolute;bottom:10px;left:12px;right:12px;text-align:center;color:white;font-size:12px;text-shadow:0 1px 3px rgb(0 0 0 / 0.8);}
 </style>
 </head>
 <body>
@@ -625,295 +648,193 @@ export function QrScannerSheet(props: QrScannerSheetProps) {
   }
 
   return (
-    <Sheet
+    <SheetContainer
       open={props.open}
-      onOpenChange={(e) => {
-        if (!e.open) props.onClose();
-      }}
-      side="bottom"
-      closeOnSwipe
-      popupClass="bg-card rounded-t-2xl border-t border-border p-4 pb-[calc(env(safe-area-inset-bottom)+16px)] max-h-[90%]"
-      backdropClass="bg-black/45"
-    >
-      <View class="gap-3">
-        {/* Sheet Header */}
-        <View class="flex-row items-center justify-between">
-          <View class="gap-0.5">
-            <Text class="text-lg font-semibold text-foreground">
-              {props.mode === "single" ? "添加 2FA 密钥" : "导入 2FA 验证器"}
-            </Text>
-            <Text class="text-xs text-muted-foreground">
-              支持相册二维码、摄像头扫码、Google 迁移与 otpauth:// 文本
-            </Text>
-          </View>
-          <Button
-            onPress={props.onClose}
-            class="rounded-full bg-muted px-3 py-1.5 active:opacity-75"
-          >
-            <Text class="text-xs font-medium text-foreground">关闭</Text>
-          </Button>
-        </View>
-
-        {/* Mode Switcher */}
-        <View class="flex-row gap-1.5 rounded-xl bg-muted p-1">
-          <Button
-            onPress={() => {
-              Haptics.selection();
-              activeMode.set("album");
-            }}
-            class={`flex-1 items-center rounded-lg py-2 ${
-              activeMode() === "album" ? "bg-card" : ""
-            }`}
-          >
-            <Text
-              class={`text-xs font-medium ${
-                activeMode() === "album" ? "text-foreground" : "text-muted-foreground"
-              }`}
-            >
-              相册选图
-            </Text>
-          </Button>
-          <Button
-            onPress={() => {
-              Haptics.selection();
-              activeMode.set("camera");
-            }}
-            class={`flex-1 items-center rounded-lg py-2 ${
-              activeMode() === "camera" ? "bg-card" : ""
-            }`}
-          >
-            <Text
-              class={`text-xs font-medium ${
-                activeMode() === "camera" ? "text-foreground" : "text-muted-foreground"
-              }`}
-            >
-              摄像头扫码
-            </Text>
-          </Button>
-          <Button
-            onPress={() => {
-              Haptics.selection();
-              activeMode.set("text");
-            }}
-            class={`flex-1 items-center rounded-lg py-2 ${
-              activeMode() === "text" ? "bg-card" : ""
-            }`}
-          >
-            <Text
-              class={`text-xs font-medium ${
-                activeMode() === "text" ? "text-foreground" : "text-muted-foreground"
-              }`}
-            >
-              粘贴 / 文本
-            </Text>
-          </Button>
-        </View>
-
-        {/* Hidden WebView decoder for Picker images */}
-        <If when={props.open && webViewCapable()}>
-          <View class="h-0 w-0 overflow-hidden opacity-0">
-            <WebView
-              ref={(r) => {
-                decoderWebViewRef = r;
-              }}
-              html={IMAGE_DECODER_HTML}
-              javaScriptEnabled
-              onMessage={(e) => handleDecoderMessage(e.data)}
-              onError={() => webViewCapable.set(false)}
-            />
-          </View>
-        </If>
-
-        <Scroll class="max-h-[420px]" contentClass="gap-3 pb-2">
-          {/* Mode 1: Photo Album Picker */}
-          <If when={activeMode() === "album"}>
-            <View class="gap-3 rounded-xl border border-border bg-background p-4">
-              <Text class="text-xs text-muted-foreground">
-                从手机或电脑相册选择一张或多张 2FA 二维码截图（支持 Google Authenticator 批量导出二维码），完全本地离线解码。
-              </Text>
-              <Button
-                disabled={busy()}
-                onPress={() => void handlePickImages()}
-                class="items-center rounded-xl bg-primary py-3 active:opacity-85 disabled:opacity-50"
-              >
-                <Text class="text-sm font-semibold text-primary-foreground">
-                  {busy() ? "正在离线识别..." : "从相册选择二维码图片"}
-                </Text>
-              </Button>
-            </View>
-          </If>
-
-          {/* Mode 2: Live Camera Scanner */}
-          <If when={activeMode() === "camera"}>
-            <View class="gap-2 rounded-xl border border-border bg-background p-3">
-              <If
-                when={webViewCapable()}
-                else={
-                  <View class="items-center gap-2 py-6">
-                    <Text class="text-xs text-muted-foreground">
-                      当前环境不支持 WebView 摄像头，请使用「相册选图」或「粘贴 / 文本」。
-                    </Text>
-                  </View>
-                }
-              >
-                <View class="h-56 w-full overflow-hidden rounded-xl bg-black">
-                  <WebView
-                    ref={(r) => {
-                      cameraWebViewRef = r;
-                    }}
-                    html={CAMERA_SCANNER_HTML}
-                    javaScriptEnabled
-                    onMessage={(e) => handleCameraMessage(e.data)}
-                    onError={(e) =>
-                      statusMsg.set({
-                        kind: "error",
-                        text: e.message || "摄像头扫码组件加载失败",
-                      })
-                    }
-                  />
-                </View>
-              </If>
-            </View>
-          </If>
-
-          {/* Mode 3: Clipboard / Text Import */}
-          <If when={activeMode() === "text"}>
-            <View class="gap-2.5 rounded-xl border border-border bg-background p-3">
-              <View class="flex-row items-center justify-between gap-2">
-                <Text class="text-xs font-medium text-foreground">
-                  粘贴 otpauth:// 链接、迁移 URI 或 Base32 密钥
-                </Text>
-                <Button
-                  onPress={() => void handleReadClipboard()}
-                  class="rounded-lg border border-border bg-card px-2.5 py-1.5 active:bg-muted"
-                >
-                  <Text class="text-xs font-medium text-foreground">读取剪贴板</Text>
-                </Button>
-              </View>
-              <Input
-                testID="qr-paste-input"
-                value={pasteText()}
-                onChange={(e) => pasteText.set(e.value)}
-                multiline
-                placeholder="otpauth://totp/GitHub:alice?secret=... 或 otpauth-migration://offline?data=..."
-                class="h-24 rounded-lg border border-input bg-card p-2.5 text-xs text-foreground"
-              />
-              <Button
-                onPress={handleParseManualText}
-                class="items-center rounded-lg border border-border bg-card py-2 active:bg-muted"
-              >
-                <Text class="text-xs font-semibold text-foreground">解析预览</Text>
-              </Button>
-            </View>
-          </If>
-
-          {/* Status Feedback */}
-          <If when={statusMsg()}>
-            {(msg) => (
-              <View
-                class={`rounded-xl border px-3 py-2 ${
-                  msg().kind === "error"
-                    ? "border-destructive/40 bg-destructive/10"
-                    : msg().kind === "ok"
-                      ? "border-emerald-500/40 bg-emerald-500/10"
-                      : "border-border bg-muted"
-                }`}
-              >
-                <Text
-                  class={`text-xs ${
-                    msg().kind === "error"
-                      ? "text-destructive"
-                      : "text-foreground"
-                  }`}
-                >
-                  {msg().text}
-                </Text>
-              </View>
-            )}
-          </If>
-
-          {/* Parsed Entries Preview */}
-          <If when={entries().length > 0}>
-            <View class="gap-2 rounded-xl border border-border bg-background p-3">
-              <If when={props.mode === "import" && props.vaults.length > 0}>
-                <View class="gap-1.5">
-                  <Text class="text-xs font-medium text-muted-foreground">导入目标保险库</Text>
-                  <View class="flex-row flex-wrap gap-1.5">
-                    <Each of={props.vaults}>
-                      {(v) => (
-                        <Button
-                          onPress={() => targetVaultId.set(v().id)}
-                          class={`rounded-full border px-3 py-1 ${
-                            targetVaultId() === v().id
-                              ? "border-primary bg-primary"
-                              : "border-border bg-card"
-                          }`}
-                        >
-                          <Text
-                            class={`text-xs font-medium ${
-                              targetVaultId() === v().id
-                                ? "text-primary-foreground"
-                                : "text-foreground"
-                            }`}
-                          >
-                            {v().metadata.name}
-                          </Text>
-                        </Button>
-                      )}
-                    </Each>
-                  </View>
-                </View>
-              </If>
-
-              <Text class="text-xs font-semibold text-foreground">
-                待导入条目 ({entries().length})
-              </Text>
-              <Each of={importPlan()}>
-                {(step) => (
-                  <View class="flex-row items-center justify-between gap-2 rounded-lg border border-border bg-card px-3 py-2">
-                    <View class="flex-1 gap-0.5">
-                      <Text class="text-xs font-semibold text-foreground">
-                        {step().entry.issuer || step().entry.account || "2FA 账号"}
-                      </Text>
-                      <If when={step().entry.account}>
-                        <Text class="text-[11px] text-muted-foreground">
-                          {step().entry.account}
-                        </Text>
-                      </If>
-                    </View>
-                    <View class="rounded-full bg-muted px-2 py-0.5">
-                      <Text class="text-[10px] font-medium text-foreground">
-                        {step().action === "skip_duplicate"
-                          ? "跳过重复"
-                          : step().action === "attach"
-                            ? "绑定已有登录"
-                            : "新建条目"}
-                      </Text>
-                    </View>
-                  </View>
-                )}
-              </Each>
-            </View>
-          </If>
-        </Scroll>
-
-        {/* Confirm Button */}
+      onClose={() => props.onClose()}
+      title={props.mode === "single" ? "添加 2FA 密钥" : "导入 2FA 验证器"}
+      subtitle="支持相册二维码、摄像头扫码、Google 迁移与 otpauth:// 文本"
+      closeLabel="关闭"
+      headerExtra={
+        <SegmentedControl
+          options={QR_MODE_OPTIONS}
+          value={activeMode()}
+          onChange={(m) => activeMode.set(m)}
+        />
+      }
+      footer={
         <If when={entries().length > 0}>
-          <Button
+          <ActionButton
             disabled={importing()}
             onPress={() => void handleConfirm()}
-            class="items-center rounded-xl bg-primary py-3 active:opacity-85 disabled:opacity-50"
-          >
-            <Text class="text-sm font-semibold text-primary-foreground">
-              {importing()
+            label={
+              importing()
                 ? "正在加密保存..."
                 : props.mode === "single"
                   ? "填入此 2FA 密钥"
-                  : `确认导入 (${entries().length} 条)`}
-            </Text>
-          </Button>
+                  : `确认导入 (${entries().length} 条)`
+            }
+          />
         </If>
-      </View>
-    </Sheet>
+      }
+    >
+      {/* Hidden WebView decoder for Picker images */}
+      <If when={props.open && webViewCapable()}>
+        <View class="h-0 w-0 overflow-hidden opacity-0">
+          <WebView
+            ref={(r) => {
+              decoderWebViewRef = r;
+            }}
+            html={IMAGE_DECODER_HTML}
+            javaScriptEnabled
+            onMessage={(e) => handleDecoderMessage(e.data)}
+            onError={() => webViewCapable.set(false)}
+          />
+        </View>
+      </If>
+
+      {/* Mode 1: Photo Album Picker */}
+      <If when={activeMode() === "album"}>
+        <InsetCard class="p-4 gap-3">
+          <SubheadText>
+            从手机或电脑相册选择一张或多张 2FA 二维码截图（支持 Google Authenticator 批量导出二维码），完全本地离线解码。
+          </SubheadText>
+          <ActionButton
+            disabled={busy()}
+            icon={qrcodeIcon}
+            onPress={() => void handlePickImages()}
+            label={busy() ? "正在离线识别..." : "从相册选择二维码图片"}
+          />
+        </InsetCard>
+      </If>
+
+      {/* Mode 2: Live Camera Scanner */}
+      <If when={activeMode() === "camera"}>
+        <InsetCard class="p-3">
+          <If
+            when={webViewCapable()}
+            else={
+              <View class="items-center gap-2 py-6">
+                <SubheadText class="text-center">
+                  当前环境不支持 WebView 摄像头，请使用「相册选图」或「粘贴 / 文本」。
+                </SubheadText>
+              </View>
+            }
+          >
+            <View class="h-56 w-full overflow-hidden rounded-xl bg-black">
+              <WebView
+                ref={(r) => {
+                  cameraWebViewRef = r;
+                }}
+                html={CAMERA_SCANNER_HTML}
+                javaScriptEnabled
+                onMessage={(e) => handleCameraMessage(e.data)}
+                onError={(e) =>
+                  statusMsg.set({
+                    kind: "error",
+                    text: e.message || "摄像头扫码组件加载失败",
+                  })
+                }
+              />
+            </View>
+          </If>
+        </InsetCard>
+      </If>
+
+      {/* Mode 3: Clipboard / Text Import */}
+      <If when={activeMode() === "text"}>
+        <InsetCard class="gap-3">
+          <View class="flex-row items-center justify-between gap-2">
+            <BodyText class="flex-1 font-medium">
+              粘贴 otpauth:// 链接、迁移 URI 或 Base32 密钥
+            </BodyText>
+            <CompactButton
+              label="读取剪贴板"
+              variant="card"
+              onPress={() => void handleReadClipboard()}
+            />
+          </View>
+          <AppInput
+            testID="qr-paste-input"
+            surface="canvas"
+            multiline
+            mono
+            value={pasteText()}
+            onChange={(e) => pasteText.set(e.value)}
+            placeholder="otpauth://totp/GitHub:alice?secret=... 或 otpauth-migration://offline?data=..."
+          />
+          <CompactButton
+            label="解析预览"
+            variant="tonal"
+            onPress={handleParseManualText}
+            class="self-end"
+          />
+        </InsetCard>
+      </If>
+
+      {/* Status Feedback */}
+      <If when={statusMsg()}>
+        {(msg) => <FeedbackBanner kind={msg().kind} text={msg().text} />}
+      </If>
+
+      {/* Parsed Entries Preview */}
+      <If when={entries().length > 0}>
+        <View class="gap-3">
+          <If when={props.mode === "import" && props.vaults.length > 1}>
+            <FormField label="导入目标保险库">
+              <AppSelect
+                surface="card"
+                accessibilityLabel="选择导入目标保险库"
+                items={props.vaults.map((v) => ({
+                  value: v.id,
+                  title: v.metadata.name,
+                }))}
+                value={targetVaultId()}
+                onChange={(val) => targetVaultId.set(val)}
+              />
+            </FormField>
+          </If>
+
+          <SectionHeader title={`待导入条目 (${entries().length})`} />
+
+          <GroupedList surface="sheet">
+            <Each of={importPlan()}>
+              {(step, idx) => {
+                const titleLabel = () =>
+                  step().entry.issuer || step().entry.account || "2FA 账号";
+                const badgeTone = () =>
+                  step().action === "skip_duplicate"
+                    ? ("neutral" as const)
+                    : step().action === "attach"
+                      ? ("primary" as const)
+                      : ("success" as const);
+                const badgeLabel = () =>
+                  step().action === "skip_duplicate"
+                    ? "跳过重复"
+                    : step().action === "attach"
+                      ? "绑定已有登录"
+                      : "新建条目";
+                return (
+                  <GroupedRow
+                    last={idx() === importPlan().length - 1}
+                    class="flex-row items-center justify-between gap-3"
+                  >
+                    <ItemAvatar title={titleLabel()} size="sm" />
+                    <View class="flex-1 gap-1">
+                      <Text class="line-clamp-1 text-[15px] font-semibold text-foreground">
+                        {titleLabel()}
+                      </Text>
+                      <If when={step().entry.account}>
+                        <SubheadText lineClamp={1}>{step().entry.account}</SubheadText>
+                      </If>
+                    </View>
+                    <BadgePill label={badgeLabel()} tone={badgeTone()} />
+                  </GroupedRow>
+                );
+              }}
+            </Each>
+          </GroupedList>
+        </View>
+      </If>
+    </SheetContainer>
   );
 }

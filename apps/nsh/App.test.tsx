@@ -751,6 +751,7 @@ describe("NonePwd App Headless UI & End-to-End Flows", () => {
     await desktopApp.press("解析预览");
     await desktopApp.waitFor("text:Cloudflare");
     await desktopApp.press("关闭");
+    await desktopApp.waitFor("text:导入 2FA 验证器", { state: "gone" });
 
     // 3. Vault Tab filters, opens detail, and creates a new encrypted item
     await desktopApp.press("密码库");
@@ -762,6 +763,7 @@ describe("NonePwd App Headless UI & End-to-End Flows", () => {
     await desktopApp.type("id:item-title-input", "OpenAI");
     await desktopApp.press("生成强密码");
     await desktopApp.press("加密并保存");
+    await desktopApp.waitFor("text:新建条目", { state: "gone" });
     await desktopApp.waitFor("text:OpenAI");
 
     // 4. Inbox Tab shows decrypted email OTP & multi-mailbox filter & Sync
@@ -784,6 +786,7 @@ describe("NonePwd App Headless UI & End-to-End Flows", () => {
     await desktopApp.type("you@gmail.com", "third@gmail.com");
     await desktopApp.type("输入授权码", "app-pass-3");
     await desktopApp.press("保存账号");
+    await desktopApp.waitFor("text:添加 IMAP 收信邮箱", { state: "gone" });
     await desktopApp.waitFor("text:third@gmail.com · imap.gmail.com:993");
     expect(fx.imapAccounts).toHaveLength(3);
 
@@ -791,13 +794,15 @@ describe("NonePwd App Headless UI & End-to-End Flows", () => {
     expect(fx.getFilterConfig().otpOnly).toBe(true);
     expect(desktopApp.texts()).toContain("弱密码");
     expect(desktopApp.texts()).toContain("未开 2FA");
+    expect(desktopApp.texts()).toContain("系统自动填充");
+    expect(desktopApp.shows("id:enable-autofill-btn")).toBe(true);
 
     // Lock returns to unlock screen
     await desktopApp.press("id:lock-vault-btn");
     await desktopApp.waitFor("id:unlock-button");
   });
 
-  test("mobile iOS and Android flows: unlock, live TOTP copy, Picker QR trigger, and back-button sheet dismiss", async () => {
+  test("mobile iOS, Android (TabBar + Autofill host bridge), and mobile-web Tabs flows", async () => {
     const fx = await buildTestVaultFixture();
 
     const iosApp = await open("./App.tsx", {
@@ -825,18 +830,119 @@ describe("NonePwd App Headless UI & End-to-End Flows", () => {
     await iosApp.back();
     await iosApp.waitFor("text:导入 2FA 验证器", { state: "gone" });
 
-    // Android platform unlock + back-button modal dismiss
+    // Android platform unlock + SearchBar + back-button modal dismiss + Autofill host bridge
+    const syncPayloads: Array<{
+      unlocked?: boolean;
+      credentials?: Array<{ title: string; domains: string[]; totp: string }>;
+      latestOtpCode?: string;
+    }> = [];
     const androidApp = await open("./App.tsx", {
       platform: "android",
       network: fx.networkRoutes,
+      host: {
+        handlers: {
+          "autofill.status": () =>
+            JSON.stringify({ available: true, supported: true, enabled: false }),
+          "autofill.enable": () => JSON.stringify({ launched: true }),
+          "autofill.sync": (raw: unknown) => {
+            const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+            syncPayloads.push(parsed as (typeof syncPayloads)[number]);
+            return JSON.stringify({ ok: true });
+          },
+          "autofill.takePendingSaves": () => JSON.stringify({ saves: [] }),
+        },
+      },
     });
     await androidApp.type("id:secret-key-input", fx.sk);
     await androidApp.type("id:master-password-input", fx.masterPassword);
     await androidApp.press("id:unlock-button");
     await androidApp.waitFor("text:GitHub");
+    await androidApp.waitUntil(() => syncPayloads.some((p) => p.unlocked === true));
+    const latestSync = syncPayloads.find((p) => p.unlocked === true)!;
+    expect(latestSync.latestOtpCode).toBe("839204");
+    expect(
+      latestSync.credentials?.some(
+        (c) => c.title === "GitHub" && c.domains.includes("github.com")
+      )
+    ).toBe(true);
+
+    // SearchBar filters TOTP entries and clears cleanly
+    await androidApp.type("id:totp-search-input", "nonexistent");
+    await androidApp.waitFor("text:暂无 2FA 验证码");
+    await androidApp.press("label:清除搜索");
+    await androidApp.waitFor("text:GitHub");
+
     await androidApp.press("id:totp-import-btn");
     await androidApp.waitFor("text:导入 2FA 验证器");
     await androidApp.back();
     await androidApp.waitFor("text:导入 2FA 验证器", { state: "gone" });
+
+    // Mobile web fallback (<Tabs>/<Tab> bar) switches all 4 tabs, handles pending Android save, item detail, theme & Autofill enable + lock wipe
+    const webSyncPayloads: Array<{ unlocked?: boolean }> = [];
+    const mobileWebApp = await open("./App.tsx", {
+      platform: "web",
+      width: 390,
+      height: 844,
+      network: fx.networkRoutes,
+      host: {
+        handlers: {
+          "autofill.status": () =>
+            JSON.stringify({ available: true, supported: true, enabled: false }),
+          "autofill.enable": () => JSON.stringify({ launched: true }),
+          "autofill.sync": (raw: unknown) => {
+            const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+            webSyncPayloads.push(parsed as { unlocked?: boolean });
+            return JSON.stringify({ ok: true });
+          },
+          "autofill.takePendingSaves": () =>
+            JSON.stringify({
+              saves: [
+                {
+                  id: "save-1",
+                  domain: "linear.app",
+                  username: "dev@linear.app",
+                  password: "pw-linear-123",
+                },
+              ],
+            }),
+        },
+      },
+    });
+    await mobileWebApp.type("id:secret-key-input", fx.sk);
+    await mobileWebApp.type("id:master-password-input", fx.masterPassword);
+    await mobileWebApp.press("id:unlock-button");
+    await mobileWebApp.waitFor("text:GitHub");
+    expect(mobileWebApp.shows("id:mobile-tab-bar")).toBe(true);
+
+    await mobileWebApp.press("密码库");
+    await mobileWebApp.waitFor("text:LegacyForum");
+    expect(mobileWebApp.texts()).toContain("系统自动填充尚未开启");
+    await mobileWebApp.waitFor("text:linear.app");
+    await mobileWebApp.press("保存到密码库");
+    await mobileWebApp.waitFor("text:dev@linear.app");
+    await mobileWebApp.press("GitHub");
+    await mobileWebApp.waitFor("text:一次性动态验证码 (点击复制)");
+    await mobileWebApp.back();
+    await mobileWebApp.waitFor("text:一次性动态验证码 (点击复制)", { state: "gone" });
+
+    await mobileWebApp.press("收件箱");
+    await mobileWebApp.waitFor("text:839204");
+
+    await mobileWebApp.press("设置");
+    await mobileWebApp.waitFor("text:多邮箱 IMAP 收信");
+    expect(mobileWebApp.shows("id:enable-autofill-btn")).toBe(true);
+    await mobileWebApp.press("id:enable-autofill-btn");
+    expect(mobileWebApp.host.calls().some((c) => c.name === "autofill.enable")).toBe(true);
+    await mobileWebApp.press("深色");
+    await mobileWebApp.press("浅色");
+
+    await mobileWebApp.press("验证码");
+    await mobileWebApp.waitFor("text:GitHub");
+
+    await mobileWebApp.press("设置");
+    await mobileWebApp.waitFor("id:lock-vault-btn");
+    await mobileWebApp.press("id:lock-vault-btn");
+    await mobileWebApp.waitFor("id:unlock-button");
+    await mobileWebApp.waitUntil(() => webSyncPayloads.some((p) => p.unlocked === false));
   });
 });

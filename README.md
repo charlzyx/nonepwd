@@ -51,7 +51,7 @@
 | 平台 / 载体 | 技术栈与目录 | 发行产物 | 核心能力与说明 |
 | :--- | :--- | :--- | :--- |
 | **macOS Desktop** | SwiftUI + `libnonepwd_core.dylib` (`apps/desktop`) | `NonePwd-macos-arm64.zip` (`NonePwd.app`) | Touch ID 解锁、菜单栏快速访问、多账号 IMAP 配置、`⌘V`/框选屏幕/拖拽二维码导入、内嵌扩展包 |
-| **Android** | NSH TSX/QuickJS (`apps/nsh`) | `NonePwd-android.apk` | 零知识加密同步（PBKDF2/HKDF/AES-GCM/X25519）、多邮箱 OTP 收件、2FA 相机/相册/剪贴板导入 |
+| **Android** | NSH TSX/QuickJS + 原生 `AutofillService` (`apps/nsh`) | `NonePwd-android.apk` | 零知识加密同步、Android 系统级自动填充（账号/密码/TOTP/邮箱验证码 + Keystore AES-GCM）、多邮箱 OTP、2FA 扫码导入 |
 | **iOS** | NSH TSX/QuickJS (`apps/nsh`) | `NonePwd-ios-unsigned.ipa` / `NonePwd-ios-sim-arm64.app.zip` | 提供未签名 `.ipa`（适用于 sideload / PiperPlay）及 arm64 Simulator `.app` 包 |
 | **Windows** | NSH (`apps/nsh`) + Rust CLI (`crates/nonepwd-cli`) | `NonePwd-windows-x64.zip` + `np-windows-x64.exe` | 原生 Windows 应用包与独立 `np.exe` 命令行工具 |
 | **Linux** | Rust 静态链接 CLI (`crates/nonepwd-cli`) + Docker | `np-linux-x86_64` / `np-linux-arm64` | Linux 以无依赖静态 CLI `np` 与容器化服务端部署为主（不单独构建桌面 GUI） |
@@ -149,9 +149,9 @@ nsh check
 nsh test
 
 # 2. 按目标平台打包
-# Android APK
-nsh package --target android -o dist-android .
-# 输出: dist-android/NonePwd.apk
+# Android APK（含原生 AutofillService 与 Material TabBar 矢量图标，默认输出到 dist/NonePwd-android.apk）
+./apps/nsh/scripts/package-android.sh
+# 或指定输出路径：./apps/nsh/scripts/package-android.sh /path/to/NonePwd-android.apk
 
 # iOS 真机未签名 .app（可封装为 Payload/NonePwd.app -> NonePwd-ios-unsigned.ipa）
 nsh component add ios
@@ -165,6 +165,14 @@ nsh package --target ios-simulator -o dist-ios-sim .
 # Windows（在 Windows x64 环境运行）
 nsh package --target windows -o dist-win .
 ```
+
+**Android 系统级自动填充（`AutofillService`，API 26+）**：
+1. 安装 `NonePwd-android.apk` 并登录解锁一次密码库。
+2. 打开 App 内 **设置 → 系统自动填充 → 开启系统自动填充**（或在 Android 系统设置 → **密码与自动填充 / 自动填充服务** 中选择 **NonePwd**）。
+3. 在 Chrome、WebView 或任意第三方 Android App 的登录框中即可直接唤起 NonePwd 填充面板：
+   - **锁定时保护**：点击「解锁 NonePwd 自动填充」跳转解锁后返回，凭据与动态码由 **Android Keystore (`AES-256-GCM`)** 加密缓存，并在锁定或会话到期（`expiresAtMs`）后自动擦除。
+   - **全字段智能匹配**：自动匹配网页域名与 App 包名，支持填充账号、密码、离线实时 RFC 6238 **TOTP** 与收件箱最新**邮箱验证码**。
+   - **新密码捕获**：登录新网站或新账号时触发系统保存提示，加密暂存并在下次回到 NonePwd 时一键写入对应 Vault。
 
 **PiperPlay 本地安装调试（macOS）**：
 - 若本机已安装 [PiperPlay](/Applications/PiperPlay.app)（含 Simulator / 真机设备桥接）：
