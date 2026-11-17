@@ -203,7 +203,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
   const [cliTab, setCliTab] = useState<CliTab>('run');
 
   const primaryCtaLabel =
-    phase === 'uninitialized'
+    phase === 'standalone'
+      ? '私有部署与快速上手'
+      : phase === 'uninitialized'
       ? '立即初始化密码库'
       : phase === 'unlocked'
       ? '进入已解锁密码库'
@@ -273,7 +275,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
             <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-indigo-500/35 bg-indigo-500/10 px-3.5 py-1 text-xs font-medium text-indigo-200">
               <span
                 className={`h-2 w-2 rounded-full ${
-                  phase === 'unlocked'
+                  phase === 'unlocked' || phase === 'standalone'
                     ? 'bg-emerald-400'
                     : phase === 'locked'
                     ? 'bg-amber-400'
@@ -281,7 +283,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 }`}
               />
               <span>
-                {phase === 'uninitialized'
+                {phase === 'standalone'
+                  ? '零知识自建密码库官网 · 浏览器端 Rust WASM 实时运行中'
+                  : phase === 'uninitialized'
                   ? '单人私有化自建实例已就绪 · 等待初始化'
                   : phase === 'unlocked'
                   ? `密码库已解锁 (${knownEmail ?? 'owner'})`
@@ -949,32 +953,56 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 现代命令行密钥体验：环境变量零落盘、Service Account 分库隔离、本地 Connect REST API，还能直接阻塞等待邮箱验证码，为 E2E 测试和 AI Agent 补齐登录最后一公里。
               </p>
 
-              {/* Real Downloads */}
-              <div className="space-y-2.5 pt-2">
-                <a
-                  href="/downloads/np-darwin-arm64"
-                  download="np-darwin-arm64"
-                  className="flex items-center justify-between rounded-xl border border-slate-700/80 bg-[#121622] px-4 py-3 transition hover:border-indigo-500/60"
-                >
-                  <div>
-                    <div className="text-xs font-semibold text-white">macOS (Apple Silicon arm64)</div>
-                    <div className="text-[11px] text-slate-400">Mach-O 64-bit 原生可执行文件 · np-darwin-arm64</div>
+              {/* Real Downloads / Standalone CLI Install */}
+              {phase === 'standalone' ? (
+                <div className="space-y-2.5 pt-2">
+                  <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-700/80 bg-[#121622] px-4 py-3">
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-white">一键安装脚本 (macOS / Linux)</div>
+                      <code className="block truncate font-mono text-[11px] text-indigo-300">
+                        curl -fsSL {origin}/install.sh | bash
+                      </code>
+                    </div>
+                    <CopyButton value={`curl -fsSL ${origin}/install.sh | bash`} label="复制" />
                   </div>
-                  <Download className="h-4 w-4 text-indigo-400" />
-                </a>
 
-                <a
-                  href="/downloads/np-linux-x86_64"
-                  download="np-linux-x86_64"
-                  className="flex items-center justify-between rounded-xl border border-slate-700/80 bg-[#121622] px-4 py-3 transition hover:border-emerald-500/60"
-                >
-                  <div>
-                    <div className="text-xs font-semibold text-white">Linux (x86_64 musl 静态二进制)</div>
-                    <div className="text-[11px] text-slate-400">静态链接 ELF · np-linux-x86_64，Ubuntu / Alpine 拷贝即用</div>
+                  <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-700/80 bg-[#121622] px-4 py-3">
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-white">npm 全局安装 (@nonepwd/cli)</div>
+                      <code className="block truncate font-mono text-[11px] text-emerald-300">
+                        npm install -g @nonepwd/cli
+                      </code>
+                    </div>
+                    <CopyButton value="npm install -g @nonepwd/cli" label="复制" />
                   </div>
-                  <Download className="h-4 w-4 text-emerald-400" />
-                </a>
-              </div>
+                </div>
+              ) : (
+                <div className="space-y-2.5 pt-2">
+                  <a
+                    href="/downloads/np-darwin-arm64"
+                    download="np-darwin-arm64"
+                    className="flex items-center justify-between rounded-xl border border-slate-700/80 bg-[#121622] px-4 py-3 transition hover:border-indigo-500/60"
+                  >
+                    <div>
+                      <div className="text-xs font-semibold text-white">macOS (Apple Silicon arm64)</div>
+                      <div className="text-[11px] text-slate-400">Mach-O 64-bit 原生可执行文件 · np-darwin-arm64</div>
+                    </div>
+                    <Download className="h-4 w-4 text-indigo-400" />
+                  </a>
+
+                  <a
+                    href="/downloads/np-linux-x86_64"
+                    download="np-linux-x86_64"
+                    className="flex items-center justify-between rounded-xl border border-slate-700/80 bg-[#121622] px-4 py-3 transition hover:border-emerald-500/60"
+                  >
+                    <div>
+                      <div className="text-xs font-semibold text-white">Linux (x86_64 musl 静态二进制)</div>
+                      <div className="text-[11px] text-slate-400">静态链接 ELF · np-linux-x86_64，Ubuntu / Alpine 拷贝即用</div>
+                    </div>
+                    <Download className="h-4 w-4 text-emerald-400" />
+                  </a>
+                </div>
+              )}
             </div>
 
             <div className="rounded-2xl border border-slate-800 bg-[#121622] p-5 lg:col-span-7">
@@ -1047,16 +1075,21 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
 
               <div className="rounded-2xl border border-slate-800 bg-[#0b0e14] p-4 lg:col-span-6">
                 <div className="mb-2 flex items-center justify-between text-xs text-slate-400">
-                  <span>docker-compose.yml 一键启动</span>
-                  <CopyButton value="docker compose up -d --build" label="复制" />
+                  <span>npm 一键启动 / Docker 常驻部署</span>
+                  <CopyButton value="npx @nonepwd/server" label="复制" />
                 </div>
-                <pre className="overflow-x-auto font-mono text-xs leading-relaxed text-slate-200">{`git clone <your-nonepwd-repo> && cd nonepwd
+                <pre className="overflow-x-auto font-mono text-xs leading-relaxed text-slate-200">{`# 方式 1：免克隆零配置直接启动本地私有 Vault（推荐快速体验）
+npx @nonepwd/server
+# 浏览器访问 http://127.0.0.1:8787/vault 初始化并保存 NP3-... Secret Key
+
+# 方式 2：全局安装 CLI 与服务端
+npm install -g @nonepwd/cli @nonepwd/server
+
+# 方式 3：Docker Compose 常驻部署
 docker compose up -d --build
 
-# 浏览器访问 Web Vault 初始化与管理：
-#   http://127.0.0.1:8787/vault
-# 命令行一键安装跨平台原生 np CLI：
-#   curl -fsSL http://127.0.0.1:8787/install.sh | bash`}</pre>
+# 命令行一键安装跨平台原生 Rust np CLI：
+curl -fsSL ${origin}/install.sh | bash`}</pre>
               </div>
             </div>
           </div>

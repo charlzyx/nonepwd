@@ -57,7 +57,7 @@ export interface AccountInfo {
   aliasDomain: string;
 }
 
-export type AuthPhase = 'loading' | 'uninitialized' | 'locked' | 'unlocked';
+export type AuthPhase = 'loading' | 'uninitialized' | 'locked' | 'unlocked' | 'standalone';
 
 const TRUSTED_DEVICE_KEY = 'nonepwd.trusted_device.v1';
 
@@ -350,9 +350,20 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     async function init() {
       try {
         const res = await fetch('/api/auth/params');
-        const data = (await res.json()) as { initialized: boolean; email?: string };
+        const contentType = res.headers.get('content-type') ?? '';
+        if (!res.ok || !contentType.includes('application/json')) {
+          if (!cancelled) setPhase('standalone');
+          return;
+        }
+        const data = (await res.json()) as {
+          initialized?: boolean;
+          email?: string;
+          staticSite?: boolean;
+        };
         if (cancelled) return;
-        if (!data.initialized) {
+        if (data.staticSite) {
+          setPhase('standalone');
+        } else if (!data.initialized) {
           setPhase('uninitialized');
         } else {
           setKnownEmail(data.email ?? loadTrustedDevice()?.email ?? null);
@@ -360,8 +371,13 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Unable to reach nonepwd server');
-          setPhase('locked');
+          const host = typeof window !== 'undefined' ? window.location.hostname : '';
+          if (host.endsWith('.workers.dev') || host.endsWith('.pages.dev')) {
+            setPhase('standalone');
+          } else {
+            setError(err instanceof Error ? err.message : 'Unable to reach nonepwd server');
+            setPhase('locked');
+          }
         }
       }
     }

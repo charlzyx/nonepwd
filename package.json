@@ -6,6 +6,7 @@
   "scripts": {
     "build:rust": "node scripts/build-rust.mjs",
     "build": "pnpm build:rust && pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && pnpm --filter @nonepwd/server build && pnpm --filter @nonepwd/cli build && pnpm --filter @nonepwd/cf-email-worker build",
+    "build:site": "pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && node scripts/build-cf-site.mjs",
     "dev:server": "pnpm --filter @nonepwd/server dev",
     "dev:web": "pnpm --filter @nonepwd/web dev",
     "test": "vitest run",

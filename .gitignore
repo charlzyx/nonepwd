@@ -13,3 +13,6 @@ coverage
 .npmrc
 packages/server/web-dist
 packages/server/bin-dist
+site/public
+site/.cloudflare
+site/dist
