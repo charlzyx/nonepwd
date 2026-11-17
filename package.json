@@ -1,0 +1,21 @@
+{
+  "name": "nonepwd-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:rust": "node scripts/build-rust.mjs",
+    "build": "pnpm build:rust && pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/server build && pnpm --filter @nonepwd/cli build && pnpm --filter @nonepwd/cf-email-worker build && pnpm --filter @nonepwd/extension build",
+    "dev:server": "pnpm --filter @nonepwd/server dev",
+    "dev:web": "pnpm --filter @nonepwd/web dev",
+    "test": "vitest run",
+    "typecheck": "pnpm -r typecheck",
+    "np": "./dist/bin/np"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.8"
+  }
+}

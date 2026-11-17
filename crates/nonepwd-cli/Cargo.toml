@@ -1,0 +1,18 @@
+[package]
+name = "nonepwd-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "np"
+path = "src/main.rs"
+
+[dependencies]
+nonepwd-core = { path = "../nonepwd-core" }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = "0.0.2-alpha"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tungstenite = { version = "0.26", default-features = false, features = ["handshake", "url"] }
+url = "2"
+webpki-roots = "0.26"

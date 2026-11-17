@@ -1,0 +1,13 @@
+services:
+  nonepwd:
+    build: .
+    container_name: nonepwd-vault
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/data
+    environment:
+      NONEPWD_PORT: "8787"
+      NONEPWD_HOST: "0.0.0.0"
+      NONEPWD_DATA_DIR: "/data"

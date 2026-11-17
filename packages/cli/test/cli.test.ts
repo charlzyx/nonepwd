@@ -1,0 +1,222 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { createNonePwdServer, type NonePwdServerInstance } from '../../server/src/app.js';
+import { NonePwdCliClient } from '../src/client.js';
+import { runCli } from '../src/commands.js';
+import { startConnectServer } from '../src/connect-server.js';
+
+const cleanups: Array<{ close: () => Promise<void>; dirs: string[] }> = [];
+
+afterEach(async () => {
+  while (cleanups.length > 0) {
+    const entry = cleanups.pop()!;
+    await entry.close();
+    for (const d of entry.dirs) {
+      fs.rmSync(d, { recursive: true, force: true });
+    }
+  }
+});
+
+async function execCli(args: string[], configDir: string, env?: Record<string, string | undefined>) {
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = await runCli(args, {
+    configDir,
+    env: { ...process.env, ...env },
+    stdout: (s) => out.push(s),
+    stderr: (s) => err.push(s),
+  });
+  return { code, stdout: out.join('\n'), stderr: err.join('\n') };
+}
+
+describe('@nonepwd/cli & Connect API', () => {
+  it('runs setup, item create, read, otp, inject, run, mail otp --wait, service-account isolation, and connect HTTP API', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nonepwd-cli-srv-'));
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nonepwd-cli-cfg-'));
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nonepwd-cli-work-'));
+
+    const srv: NonePwdServerInstance = createNonePwdServer({ dataDir });
+    const { url } = await srv.start(0, '127.0.0.1');
+    cleanups.push({ close: () => srv.close(), dirs: [dataDir, configDir, workDir] });
+
+    // 1. np setup
+    const setupRes = await execCli(
+      [
+        'setup',
+        '--server',
+        url,
+        '--email',
+        'cli@example.com',
+        '--password',
+        'CliMasterPass#2026',
+        '--alias-domain',
+        'mail.example.com',
+        '--kdf-iterations',
+        '10000',
+        '--json',
+      ],
+      configDir
+    );
+    expect(setupRes.code).toBe(0);
+    const setupData = JSON.parse(setupRes.stdout) as { secretKey: string; email: string };
+    expect(setupData.secretKey.startsWith('NP3-')).toBe(true);
+
+    // 2. Create items in Personal and DevOps vaults
+    const personalItem = await execCli(
+      [
+        'item',
+        'create',
+        '--vault',
+        'Personal',
+        '--title',
+        'GitHub',
+        '--url',
+        'https://github.com/login',
+        '--username',
+        'octocat',
+        '--password',
+        'gh-personal-pass',
+        '--totp',
+        'JBSWY3DPEHPK3PXP',
+        '--auto-alias',
+        '--json',
+      ],
+      configDir
+    );
+    expect(personalItem.code).toBe(0);
+
+    const devItem = await execCli(
+      [
+        'item',
+        'create',
+        '--vault',
+        'DevOps',
+        '--title',
+        'OpenAI',
+        '--category',
+        'api_credential',
+        '--password',
+        'sk-live-secret-999',
+        '--field',
+        'api_key=sk-field-abc',
+        '--json',
+      ],
+      configDir
+    );
+    expect(devItem.code).toBe(0);
+
+    // 3. np read & np otp
+    const readPass = await execCli(['read', 'np://DevOps/OpenAI/api_key'], configDir);
+    expect(readPass.code).toBe(0);
+    expect(readPass.stdout.trim()).toBe('sk-field-abc');
+
+    const otpRes = await execCli(['otp', 'GitHub', '--vault', 'Personal'], configDir);
+    expect(otpRes.code).toBe(0);
+    expect(otpRes.stdout.trim()).toMatch(/^\d{6}$/);
+
+    const readTotp = await execCli(['read', 'np://Personal/GitHub/totp'], configDir);
+    expect(readTotp.code).toBe(0);
+    expect(readTotp.stdout.trim()).toMatch(/^\d{6}$/);
+
+    // 4. np inject & np run --env-file
+    const tplPath = path.join(workDir, 'config.tpl.txt');
+    const outPath = path.join(workDir, 'config.out.txt');
+    fs.writeFileSync(tplPath, 'KEY={{ np://DevOps/OpenAI/password }}', 'utf8');
+    const injectRes = await execCli(['inject', '-i', tplPath, '-o', outPath], configDir);
+    expect(injectRes.code).toBe(0);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('KEY=sk-live-secret-999');
+
+    const envTplPath = path.join(workDir, '.env.tpl');
+    fs.writeFileSync(envTplPath, 'MY_API_KEY=np://DevOps/OpenAI/api_key\n', 'utf8');
+    const outputFile = path.join(workDir, 'injected-env.txt');
+    const runRes = await execCli(
+      [
+        'run',
+        '--env-file',
+        envTplPath,
+        '--',
+        process.execPath,
+        '-e',
+        `require('fs').writeFileSync(${JSON.stringify(outputFile)}, process.env.MY_API_KEY)`,
+      ],
+      configDir
+    );
+    expect(runRes.code).toBe(0);
+    expect(fs.readFileSync(outputFile, 'utf8')).toBe('sk-field-abc');
+
+    // 5. np mail otp --domain github.com --wait 5 (simulated async incoming email via WS)
+    const cfgJson = JSON.parse(fs.readFileSync(path.join(configDir, 'config.json'), 'utf8')) as {
+      session: { token: string };
+    };
+    setTimeout(() => {
+      void fetch(`${url}/api/emails/simulate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${cfgJson.session.token}`,
+        },
+        body: JSON.stringify({
+          from: 'GitHub <noreply@github.com>',
+          to: 'github.test@mail.example.com',
+          subject: '[GitHub] Verification code',
+          text: 'Your GitHub verification code is: 918273',
+        }),
+      });
+    }, 150);
+
+    const mailOtpRes = await execCli(
+      ['mail', 'otp', '--domain', 'github.com', '--wait', '5'],
+      configDir
+    );
+    expect(mailOtpRes.code).toBe(0);
+    expect(mailOtpRes.stdout.trim()).toBe('918273');
+
+    // 6. Service Account token scoped ONLY to DevOps
+    const saRes = await execCli(
+      ['service-account', 'create', 'ci-agent', '--vault', 'DevOps', '--json'],
+      configDir
+    );
+    expect(saRes.code).toBe(0);
+    const { token: pstToken } = JSON.parse(saRes.stdout) as { token: string };
+    expect(pstToken.startsWith('npst_v1_')).toBe(true);
+
+    const isolatedCfgDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nonepwd-cli-sa-'));
+    cleanups[cleanups.length - 1].dirs.push(isolatedCfgDir);
+
+    const saReadDev = await execCli(['read', 'np://DevOps/OpenAI/password'], isolatedCfgDir, {
+      NONEPWD_TOKEN: pstToken,
+    });
+    expect(saReadDev.code).toBe(0);
+    expect(saReadDev.stdout.trim()).toBe('sk-live-secret-999');
+
+    const saReadPersonal = await execCli(['read', 'np://Personal/GitHub/password'], isolatedCfgDir, {
+      NONEPWD_TOKEN: pstToken,
+    });
+    expect(saReadPersonal.code).toBe(1);
+
+    // 7. Connect HTTP Server using Service Account client
+    const saClient = new NonePwdCliClient({ serviceAccountToken: pstToken });
+    const connectSrv = await startConnectServer({
+      client: saClient,
+      host: '127.0.0.1',
+      port: 0,
+      connectToken: 'connect-secret-123',
+    });
+    try {
+      const badRes = await fetch(`${connectSrv.url}/v1/vaults`);
+      expect(badRes.status).toBe(401);
+
+      const resolveRes = await fetch(
+        `${connectSrv.url}/v1/resolve?ref=${encodeURIComponent('np://DevOps/OpenAI/password')}`,
+        { headers: { Authorization: 'Bearer connect-secret-123' } }
+      );
+      expect(resolveRes.status).toBe(200);
+      const resolveJson = (await resolveRes.json()) as { value: string };
+      expect(resolveJson.value).toBe('sk-live-secret-999');
+    } finally {
+      await connectSrv.close();
+    }
+  });
+});

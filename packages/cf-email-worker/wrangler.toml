@@ -1,0 +1,17 @@
+name = "nonepwd-email-router"
+main = "dist/index.js"
+compatibility_date = "2025-03-01"
+
+[vars]
+# Your publicly reachable nonepwd Server URL (e.g. via Cloudflare Tunnel / Reverse Proxy)
+NONEPWD_SERVER_URL = "https://vault.yourdomain.com"
+
+# Optional: Set your X25519 Email Public Key from nonepwd Settings -> Cloudflare Worker
+# to enable Edge Zero-Knowledge sealing (server never sees plaintext email even in RAM!)
+# RECIPIENT_X25519_PUBLIC_KEY = ""
+
+# Optional: Forward a copy of incoming emails to your primary inbox
+# FORWARD_TO_EMAIL = "you@gmail.com"
+
+# Required secret (configure via `wrangler secret put WEBHOOK_SECRET`):
+# WEBHOOK_SECRET = "<cfWebhookSecret from nonepwd Settings>"
