@@ -6,6 +6,29 @@ function renderInstallScript(origin: string): string {
   return `#!/usr/bin/env bash
 set -euo pipefail
 
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+BIN_NAME=""
+
+case "$OS:$ARCH" in
+  Darwin:arm64|Darwin:aarch64) BIN_NAME="np-darwin-arm64" ;;
+  Linux:x86_64|Linux:amd64) BIN_NAME="np-linux-x86_64" ;;
+esac
+
+if [[ -n "$BIN_NAME" ]] && command -v curl >/dev/null 2>&1; then
+  PREFIX="\${PREFIX:-$HOME/.local/bin}"
+  mkdir -p "$PREFIX"
+  TMP_BIN="$(mktemp)"
+  if curl -fsSL "${origin}/downloads/\${BIN_NAME}" -o "$TMP_BIN"; then
+    mv "$TMP_BIN" "$PREFIX/np"
+    chmod 755 "$PREFIX/np"
+    echo "Installed native nonepwd CLI -> $PREFIX/np"
+    "$PREFIX/np" version || true
+    exit 0
+  fi
+  rm -f "$TMP_BIN"
+fi
+
 if command -v npm >/dev/null 2>&1; then
   echo "Installing nonepwd CLI (@nonepwd/cli) via npm..."
   npm install -g @nonepwd/cli
@@ -14,8 +37,8 @@ if command -v npm >/dev/null 2>&1; then
   exit 0
 fi
 
-echo "Node.js/npm not detected. Install Node.js >= 22 and run: npm install -g @nonepwd/cli" >&2
-echo "Or self-host nonepwd server and download native binaries from ${origin}" >&2
+echo "Could not install native binary or detect Node.js/npm." >&2
+echo "Download binaries from https://github.com/charlzyx/nonepwd/releases/latest or install Node.js >= 22 and run: npm install -g @nonepwd/cli" >&2
 exit 1
 `;
 }

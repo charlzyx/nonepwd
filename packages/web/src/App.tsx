@@ -122,12 +122,30 @@ cd packages/cf-server && pnpm run db:migrate:remote && pnpm run deploy`}
                 <span>打开本地实例 (127.0.0.1:8787/vault)</span>
               </a>
               <a
-                href="/downloads/nonepwd-extension.zip"
-                download="nonepwd-extension.zip"
-                className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-border bg-background px-4 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
+                href="https://github.com/charlzyx/nonepwd/releases/download/v0.2.0/NonePwd-macos-arm64.zip"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-border bg-background px-3.5 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
               >
                 <Download className="size-3.5" />
-                <span>下载浏览器插件包</span>
+                <span>macOS 桌面端</span>
+              </a>
+              <a
+                href="https://github.com/charlzyx/nonepwd/releases/download/v0.2.0/NonePwd-android.apk"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-border bg-background px-3.5 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
+              >
+                <Download className="size-3.5" />
+                <span>Android APK</span>
+              </a>
+              <a
+                href="/downloads/nonepwd-extension.zip"
+                download="nonepwd-extension.zip"
+                className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-border bg-background px-3.5 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
+              >
+                <Download className="size-3.5" />
+                <span>MV3 浏览器插件</span>
               </a>
             </div>
           </div>

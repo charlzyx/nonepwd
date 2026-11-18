@@ -8,13 +8,17 @@ import {
   Download,
   ExternalLink,
   FolderLock,
+  Globe,
   HardDrive,
   KeyRound,
+  Laptop,
   Layers,
   Lock,
   MailCheck,
   Moon,
+  QrCode,
   Shield,
+  Smartphone,
   Sun,
   Terminal,
   Zap,
@@ -27,13 +31,17 @@ interface LandingPageProps {
   onOpenVault: () => void;
 }
 
+const RELEASE_TAG = 'v0.2.0';
+const RELEASE_URL = `https://github.com/charlzyx/nonepwd/releases/tag/${RELEASE_TAG}`;
+const RELEASE_DOWNLOAD_BASE = `https://github.com/charlzyx/nonepwd/releases/download/${RELEASE_TAG}`;
+
 type CliTab = 'run' | 'mail' | 'sa' | 'connect';
 
 const CLI_EXAMPLES: Record<CliTab, { title: string; cmd: string }> = {
   run: {
-    title: '环境变量零落盘注入（告别明文 .env）',
-    cmd: `# .env.tpl 仅保存引用路径，绝不存放明文密钥
-OPENAI_API_KEY=np://DevOps/OpenAI/api_key
+    title: '环境变量零落盘注入（原生兼容 op:// 与 np://）',
+    cmd: `# .env.tpl 仅保存引用路径，绝不存放明文密钥（100% 兼容 1Password op://）
+OPENAI_API_KEY=op://DevOps/OpenAI/credential
 DB_PASSWORD=np://DevOps/Postgres/password
 
 # 内存解密注入子进程，硬盘永不落盘
@@ -65,27 +73,27 @@ curl -H "Authorization: Bearer my-connect-secret" \\
 const FAQ_ITEMS = [
   {
     q: '服务端真的拿不到我的任何密码或邮件内容吗？',
-    a: '是的。主密码与 Secret Key (NP3-...) 仅在本地浏览器 WASM 或原生 Rust CLI 内存中完成 60 万次 PBKDF2 派生；每条条目再以独立的 256-bit VaultKey + AES-256-GCM 加密，并绑定 AAD(vaultId, itemId)。收到的验证码邮件也会被 X25519 公钥当场密封落库。',
+    a: '是的。主密码与 Secret Key (NP3-...) 仅在本地浏览器 WASM、原生客户端或 Rust CLI 内存中完成 60 万次 PBKDF2 派生；每条条目再以独立的 256-bit VaultKey + AES-256-GCM 加密，并绑定 AAD(vaultId, itemId)。收到的验证码邮件也会被 X25519 公钥当场密封落库。',
   },
   {
-    q: '邮箱验证码和自动填充是怎么串起来的？',
-    a: '主力邮箱走 IMAP IDLE 长连接，自有域名别名走 Cloudflare Email Routing Worker。服务端解析验证码并密封后通过 WebSocket 秒级推送到已解锁的浏览器扩展和 np CLI；多步登录在第 1 步填完账密后，第 2 步会自动弹出 2FA TOTP 或刚收到的 6 位邮箱码一次填满验证码输入框。',
+    q: '多账号 IMAP 邮箱验证码和自动填充是怎么串起来的？',
+    a: '你可以同时挂载 Gmail、QQ、163/126、iCloud、Outlook 等多条 IMAP IDLE 长连接（支持按收件邮箱筛选），自有域名别名走 Cloudflare Email Routing Worker。服务端解析验证码并密封后通过 WebSocket 秒级推送到已解锁的桌面/移动端、浏览器扩展和 np CLI；第 1 步填完账密后，第 2 步会自动弹出 2FA TOTP 或刚收到的 6 位邮箱码一键填入六宫格。',
   },
   {
-    q: '浏览器扩展和原生命令行共用一套加密核心吗？',
-    a: '完全同源。核心密码学、RFC 6238 TOTP、邮件验证码清洗与 np:// 引用解析全部由 crates/nonepwd-core 用纯 Rust 编写：同一份代码编译为 nonepwd_core.wasm 驱动 Web 与浏览器插件，同时静态链接产出 macOS arm64 / Linux x86_64 原生 np 单二进制。',
+    q: 'Android、iOS、macOS 客户端和浏览器扩展安全边界一致吗？',
+    a: '完全同源。核心密码学、RFC 6238 TOTP、邮件验证码清洗与引用解析均由纯 Rust crates/nonepwd-core 驱动：编译为 WASM 供 Web 与扩展共用、链接为 libnonepwd_core.dylib 驱动 SwiftUI macOS，并为 iOS 与 Android 提供端到端密文同步（Android 原生 AutofillService 额外使用 Keystore AES-256-GCM 加密会话缓存，锁定时自动擦除）。',
+  },
+  {
+    q: '支持哪些方式导入 2FA 二维码与历史密码？',
+    a: '支持 Chrome/1Password CSV 批量导入以及标准 otpauth:// 与 Google Authenticator otpauth-migration:// 批量二维码；macOS 桌面端与浏览器扩展支持屏幕/网页直接框选截图识别与 ⌘V 粘贴图片，iOS / Android 与 Web Vault 支持相机实时扫码及相册图片选取。',
   },
   {
     q: '自建支持哪些运行方式？需要重型数据库或按年付费吗？',
-    a: '不需要重型依赖，永久 0 订阅费。你可以用纯 Rust 单二进制 np server + 内置 SQLite 在本机或 VPS 一键运行；也可以使用新版 @nonepwd/cf-server 直接部署到 Cloudflare Workers + D1 + R2 + Durable Objects，绑定自有域名并免服务器运维。',
-  },
-  {
-    q: '绑定自有域名部署 Cloudflare Worker + D1 + R2 安全吗？费用如何？',
-    a: '零知识边界完全不变：主密码与 VaultKey 仍在你本地浏览器/客户端内存中派生与解密，D1 与 R2 仅存储 AES-256-GCM 密文与 X25519 密封邮件；Worker、D1、R2、Email Routing 与 SQLite-backed Durable Objects 均有个人免费额度，且支持 Web 管理台一键 R2 快照备份与恢复。',
+    a: '永久 0 订阅费，无重型依赖。你可以用纯 Rust 单二进制 np server + 内置 SQLite 在本机或 VPS 一键启动；也可将 @nonepwd/cf-server 一键部署到 Cloudflare Workers + D1 + R2 + Durable Objects，绑定自有域名实现免服务器运行与每 6 小时 R2 加密快照恢复。',
   },
   {
     q: '和商业云密码管理器有什么区别？',
-    a: '没有云端账户体系、没有按年订阅费，所有密文、别名策略与邮箱收信通道全部掌握在你自己的设备或服务器上，同时原生补齐了开发者和 AI Agent 最常卡住的「阻塞等待实时邮箱验证码」最后一公里。',
+    a: '没有云端账户绑定、没有按年订阅费，全平台客户端（macOS / iOS / Android / MV3 扩展 / CLI / Web）的数据通道与域名别名全部掌握在你自己的设备或服务端中，同时原生补齐了开发者和 AI Agent 最常卡住的「阻塞等待实时邮箱验证码」与 op:// 零落盘注入最后一公里。',
   },
 ];
 
@@ -121,12 +129,12 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
 
   const statusPillText =
     phase === 'standalone'
-      ? 'Zero-knowledge · Self-hosted · 0 订阅费'
+      ? `${RELEASE_TAG} · Zero-knowledge · Self-hosted · 0 订阅费`
       : phase === 'uninitialized'
-      ? '私有实例已就绪 · 等待初始化'
+      ? `${RELEASE_TAG} · 私有实例已就绪 · 等待初始化`
       : phase === 'unlocked'
-      ? 'Vault 已解锁 · 双密钥零知识保护'
-      : '私有实例已就绪 · 双密钥零知识保护';
+      ? `${RELEASE_TAG} · Vault 已解锁 · 双密钥零知识保护`
+      : `${RELEASE_TAG} · 私有实例已就绪 · 双密钥零知识保护`;
 
   return (
     <div className="min-h-dvh bg-background text-foreground antialiased">
@@ -143,6 +151,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               <a href="#features" className="transition-colors hover:text-foreground">
                 核心能力
               </a>
+              <a href="#clients" className="transition-colors hover:text-foreground">
+                全端下载
+              </a>
               <a href="#cli" className="transition-colors hover:text-foreground">
                 命令行
               </a>
@@ -150,11 +161,13 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 Cloudflare 部署
               </a>
               <a
-                href="/downloads/nonepwd-extension.zip"
-                download="nonepwd-extension.zip"
-                className="transition-colors hover:text-foreground"
+                href={RELEASE_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 transition-colors hover:text-foreground"
               >
-                浏览器插件
+                <span>GitHub</span>
+                <ExternalLink className="size-3" />
               </a>
             </nav>
 
@@ -192,10 +205,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               一个私有实例，接管你的全部密码与验证码。
             </h1>
 
-            <p className="mt-5 max-w-[42rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
-              双密钥零知识加密（<code className="font-mono text-[15px] text-foreground">NP3-...</code>）、Rust 单二进制服务端{' '}
-              <code className="font-mono text-[15px] text-foreground">np server</code>、自有域名{' '}
-              <code className="font-mono text-[15px] text-foreground">Cloudflare Worker + D1 + R2</code> Serverless 部署、macOS 原生 SwiftUI 客户端（菜单栏 2FA / 邮箱码 · Touch ID · AI 提取）与 MV3 自动填充扩展 — 完全掌握在你自己手中。
+            <p className="mt-5 max-w-[44rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
+              双密钥零知识加密（<code className="font-mono text-[15px] text-foreground">NP3-...</code>）、Rust 单二进制{' '}
+              <code className="font-mono text-[15px] text-foreground">np server</code> 与自有域名{' '}
+              <code className="font-mono text-[15px] text-foreground">Cloudflare Worker + D1 + R2</code> Serverless 部署，搭配通用多账号 IMAP 实时验证码提取 — 全端覆盖{' '}
+              <strong className="font-medium text-foreground">macOS SwiftUI / Android（系统 AutofillService）/ iOS / Chrome MV3 扩展 / np CLI</strong>，数据 100% 掌握在你手中。
             </p>
 
             <div className="mt-8 flex flex-wrap items-center gap-x-3.5 gap-y-3">
@@ -209,12 +223,19 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               </button>
 
               <a
-                href="/downloads/nonepwd-extension.zip"
-                download="nonepwd-extension.zip"
+                href="#clients"
                 className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-4 text-sm font-medium text-foreground transition-colors hover:bg-muted/60"
               >
                 <Download className="size-4" />
-                <span>下载浏览器插件</span>
+                <span>全端客户端下载</span>
+              </a>
+
+              <a
+                href="/downloads/nonepwd-extension.zip"
+                download="nonepwd-extension.zip"
+                className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-3.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+              >
+                <span>MV3 浏览器插件</span>
               </a>
 
               <div className="inline-flex h-10 items-center gap-2.5 rounded-lg border border-border bg-muted/40 px-3 font-mono text-xs text-muted-foreground">
@@ -227,15 +248,16 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               <div className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground/80 uppercase">
                 Built on one pure-Rust core across every surface
               </div>
-              <div className="mt-4 flex flex-wrap items-center gap-x-7 gap-y-2.5 font-mono text-xs text-muted-foreground">
-                <span>Rust + WASM + C ABI</span>
-                <span>CF Worker + D1 + R2</span>
-                <span>np server (SQLite)</span>
-                <span>macOS Native (SwiftUI)</span>
-                <span>AES-256-GCM</span>
-                <span>X25519 Sealed Box</span>
+              <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2.5 font-mono text-xs text-muted-foreground">
+                <span>macOS (SwiftUI + Touch ID)</span>
+                <span>Android (AutofillService)</span>
+                <span>iOS Native</span>
                 <span>Chrome / Brave MV3</span>
-                <span>IMAP + Email Routing</span>
+                <span>Multi-Account IMAP + Email Routing</span>
+                <span>CF Worker + D1 + R2</span>
+                <span>AES-256-GCM + X25519</span>
+                <span>Rust + WASM + C ABI</span>
+                <span>np server (SQLite)</span>
               </div>
             </div>
           </section>
@@ -260,29 +282,32 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
 
             <div className="grid grid-cols-1 gap-px bg-border/70 md:grid-cols-12">
               {/* Column 1: Vaults Sidebar */}
-              <div className="space-y-4 bg-card/60 p-5 md:col-span-3">
-                <div className="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
-                  Vaults
-                </div>
-                <div className="space-y-1 text-xs">
-                  <div className="flex items-center justify-between rounded-md bg-muted px-2.5 py-1.5 font-medium text-foreground">
-                    <span className="flex items-center gap-2">
-                      <FolderLock className="size-3.5 text-muted-foreground" />
-                      Personal
-                    </span>
-                    <span className="font-mono text-[11px] text-muted-foreground">14</span>
+              <div className="flex flex-col justify-between space-y-4 bg-card/60 p-5 md:col-span-3">
+                <div className="space-y-4">
+                  <div className="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
+                    Vaults
                   </div>
-                  <div className="flex items-center justify-between rounded-md px-2.5 py-1.5 text-muted-foreground">
-                    <span className="flex items-center gap-2">
-                      <Terminal className="size-3.5" />
-                      DevOps
-                    </span>
-                    <span className="font-mono text-[11px]">9</span>
+                  <div className="space-y-1 text-xs">
+                    <div className="flex items-center justify-between rounded-md bg-muted px-2.5 py-1.5 font-medium text-foreground">
+                      <span className="flex items-center gap-2">
+                        <FolderLock className="size-3.5 text-muted-foreground" />
+                        Personal
+                      </span>
+                      <span className="font-mono text-[11px] text-muted-foreground">14</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-md px-2.5 py-1.5 text-muted-foreground">
+                      <span className="flex items-center gap-2">
+                        <Terminal className="size-3.5" />
+                        DevOps
+                      </span>
+                      <span className="font-mono text-[11px]">9</span>
+                    </div>
                   </div>
                 </div>
 
-                <div className="border-t border-border/70 pt-3 font-mono text-[11px] text-muted-foreground">
-                  IMAP IDLE: listening
+                <div className="border-t border-border/70 pt-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                  <div>IMAP IDLE: 3 mailboxes listening</div>
+                  <div className="text-[10px] text-muted-foreground/80">Gmail · QQ · iCloud</div>
                 </div>
               </div>
 
@@ -293,12 +318,13 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 </div>
                 {[
                   { title: 'GitHub', sub: 'github.a8f2@mail.domain', tag: '2FA · OTP', active: true },
+                  { title: 'OpenAI Platform', sub: 'sk-proj-••••••••••••', tag: 'op:// · API', active: false },
+                  { title: 'Prod Bastion', sub: 'ssh-ed25519 · root@prod', tag: 'Ed25519 · SSH', active: false },
                   { title: '招商银行 Visa', sub: '•••• 4242 · 08/28', tag: '银行卡', active: false },
-                  { title: 'OpenAI Platform', sub: 'sk-proj-••••••••••••', tag: 'np://', active: false },
                 ].map((row) => (
                   <div
                     key={row.title}
-                    className={`flex items-center justify-between rounded-md border px-3 py-2.5 text-xs ${
+                    className={`flex items-center justify-between rounded-md border px-3 py-2 text-xs ${
                       row.active
                         ? 'border-foreground/25 bg-muted/50 text-foreground'
                         : 'border-border/70 bg-background text-muted-foreground'
@@ -318,42 +344,51 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               </div>
 
               {/* Column 3: Item Detail + Live OTP */}
-              <div className="space-y-3 bg-background p-5 md:col-span-5">
-                <div className="flex items-center justify-between border-b border-border/70 pb-3">
-                  <div>
-                    <div className="text-sm font-semibold text-foreground">GitHub</div>
-                    <div className="font-mono text-[11px] text-muted-foreground">
-                      Personal / github.com
+              <div className="flex flex-col justify-between space-y-3 bg-background p-5 md:col-span-5">
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between border-b border-border/70 pb-3">
+                    <div>
+                      <div className="text-sm font-semibold text-foreground">GitHub</div>
+                      <div className="font-mono text-[11px] text-muted-foreground">
+                        Personal / github.com
+                      </div>
+                    </div>
+                    <span className="rounded border border-border bg-muted/40 px-2 py-0.5 font-mono text-[11px] text-foreground">
+                      已实时关联邮件码
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between rounded-md border border-border bg-muted/35 px-3.5 py-2.5">
+                    <div>
+                      <div className="font-mono text-[10px] text-muted-foreground uppercase">
+                        X25519 Sealed Email OTP
+                      </div>
+                      <div className="mt-0.5 font-mono text-xl font-semibold tracking-[0.2em] text-foreground">
+                        839204
+                      </div>
+                    </div>
+                    <span className="font-mono text-[11px] text-muted-foreground">WebSocket 秒级推送</span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
+                      <div className="flex items-center justify-between font-mono text-[10px] text-muted-foreground">
+                        <span>2FA TOTP</span>
+                        <span>QR 框选导入</span>
+                      </div>
+                      <div className="mt-0.5 font-mono font-medium text-foreground">482 910</div>
+                    </div>
+                    <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
+                      <div className="font-mono text-[10px] text-muted-foreground">SECRET REF</div>
+                      <div className="mt-0.5 truncate font-mono text-foreground">
+                        np://Personal/GitHub
+                      </div>
                     </div>
                   </div>
-                  <span className="rounded border border-border bg-muted/40 px-2 py-0.5 font-mono text-[11px] text-foreground">
-                    已实时关联邮件码
-                  </span>
                 </div>
 
-                <div className="flex items-center justify-between rounded-md border border-border bg-muted/35 px-3.5 py-2.5">
-                  <div>
-                    <div className="font-mono text-[10px] text-muted-foreground uppercase">
-                      X25519 Sealed Email OTP
-                    </div>
-                    <div className="mt-0.5 font-mono text-xl font-semibold tracking-[0.2em] text-foreground">
-                      839204
-                    </div>
-                  </div>
-                  <span className="font-mono text-[11px] text-muted-foreground">WebSocket 推送</span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
-                    <div className="font-mono text-[10px] text-muted-foreground">2FA TOTP</div>
-                    <div className="mt-0.5 font-mono font-medium text-foreground">482 910</div>
-                  </div>
-                  <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
-                    <div className="font-mono text-[10px] text-muted-foreground">SECRET REF</div>
-                    <div className="mt-0.5 truncate font-mono text-foreground">
-                      np://Personal/GitHub
-                    </div>
-                  </div>
+                <div className="border-t border-border/70 pt-2.5 font-mono text-[11px] text-muted-foreground">
+                  Synced: macOS · iOS · Android Autofill · MV3 · CLI
                 </div>
               </div>
             </div>
@@ -372,32 +407,32 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 {
                   icon: Lock,
                   title: '双密钥零知识加密',
-                  desc: 'Master Password + Secret Key (NP3-...) 本地 60 万次 PBKDF2 派生，Per-Vault 独立密钥与 AAD 绑定，数据库失窃也不泄露明文。',
+                  desc: 'Master Password + Secret Key (NP3-...) 本地 60 万次 PBKDF2-SHA256 派生，Per-Vault 独立 AES-256-GCM 密钥与 AAD 绑定，数据库失窃也不泄露明文。',
                 },
                 {
                   icon: MailCheck,
-                  title: '邮箱验证码提取 & 正则过滤',
-                  desc: '支持 IMAP IDLE 与 Cloudflare Email Routing；内置 Allow/Deny 多字段正则过滤与仅保留验证码模式，X25519 密封后经 WebSocket 秒级推送。',
+                  title: '通用多账号 IMAP & 域名别名',
+                  desc: '同时监听 Gmail / QQ / 163 / iCloud / Outlook 等多条邮箱连接并按收件箱筛选，结合 Cloudflare Email Routing 无限别名，X25519 密封后经 WebSocket 秒级推送。',
+                },
+                {
+                  icon: QrCode,
+                  title: '全端 2FA 二维码框选与扫码',
+                  desc: '支持标准 otpauth:// 与 Google Authenticator otpauth-migration:// 批量迁移；macOS 与浏览器扩展支持屏幕/网页直接框选识别，移动端与 Web 支持相机和相册扫码。',
                 },
                 {
                   icon: Zap,
-                  title: '账密、银行卡、地址与 2FA 填充',
-                  desc: 'MV3 扩展通过闭合 Shadow DOM 自动填充账密、2FA、银行卡与地址身份（CVV 仅点击时填充）；支持浏览器 CSV 与 2FA 验证器导出导入。',
-                },
-                {
-                  icon: Terminal,
-                  title: 'macOS 原生客户端 & np CLI',
-                  desc: '原生 SwiftUI macOS 桌面应用（Liquid Glass 视觉、菜单栏 2FA/邮箱码 Cron + AI 提取、Touch ID 与可配置免密时长），配合 np run 零落盘注入与 Service Account 隔离。',
+                  title: 'Android 系统自动填充 & MV3 扩展',
+                  desc: 'Android 8.0+ 原生 AutofillService 经 Keystore AES-GCM 加密缓存，智能匹配 App 包名与域名填充账密/TOTP/邮箱码并捕获新密码；MV3 扩展支持第 2 步六宫格接力填充。',
                 },
                 {
                   icon: Shield,
-                  title: '无限域名邮箱别名',
-                  desc: '注册页聚焦输入框一键为当前站点派生专属 Masked Email 与 20 位强密码，并支持按别名一键拒收骚扰邮件。',
+                  title: '全品类密钥库 & op 兼容 CLI',
+                  desc: '覆盖登录凭据、API 密钥、SSH 密钥、银行卡、身份地址、安全笔记与多分组标签；原生 Rust np CLI 兼容 op:// 与 np://，支持 np run 零落盘注入与 Service Account 隔离。',
                 },
                 {
                   icon: Layers,
-                  title: '单二进制或 Cloudflare Serverless',
-                  desc: '既可用纯 Rust 单二进制 np server + SQLite 在本机或 VPS 运行，也可部署为 Cloudflare Worker + D1 + R2 + Durable Objects 绑定自有域名，永久 0 订阅费。',
+                  title: 'Rust 单二进制或 Cloudflare Serverless',
+                  desc: '既可用纯 Rust 单二进制 np server + SQLite 在本机或 VPS 启动，也可一键部署 @nonepwd/cf-server（Worker + D1 + R2 定时快照 + Durable Objects）绑定自有域名，永久 0 订阅费。',
                 },
               ].map((item) => {
                 const Icon = item.icon;
@@ -413,6 +448,183 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                   </div>
                 );
               })}
+            </div>
+          </section>
+
+          {/* All-Platform Native Clients Matrix */}
+          <section id="clients" className="border-t border-border/70 px-5 py-16 md:px-10 md:py-20">
+            <div className="flex flex-wrap items-end justify-between gap-4">
+              <div>
+                <div className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground/80 uppercase">
+                  All-Platform Native Clients
+                </div>
+                <h2 className="mt-3 text-2xl font-semibold tracking-tight">
+                  全平台客户端矩阵
+                </h2>
+              </div>
+              <a
+                href={RELEASE_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/40 px-3 py-1 font-mono text-xs text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <span>GitHub Release {RELEASE_TAG}</span>
+                <ExternalLink className="size-3" />
+              </a>
+            </div>
+
+            <div className="mt-8 grid grid-cols-1 gap-px border border-border/70 bg-border/70 sm:grid-cols-2 lg:grid-cols-3">
+              {/* 1. macOS Desktop */}
+              <div className="flex flex-col justify-between bg-background p-6">
+                <div>
+                  <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+                    <span>MACOS 14+ · APPLE SILICON</span>
+                    <Laptop className="size-3.5" />
+                  </div>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">macOS Desktop</h3>
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    SwiftUI 原生桌面端（链接 <code className="font-mono text-foreground">libnonepwd_core.dylib</code>），支持 Touch ID 解锁、菜单栏实时 2FA / 邮箱码、屏幕区域框选识别二维码与多账号 IMAP 配置。
+                  </p>
+                </div>
+                <div className="mt-5">
+                  <a
+                    href={`${RELEASE_DOWNLOAD_BASE}/NonePwd-macos-arm64.zip`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
+                  >
+                    <Download className="size-3.5" />
+                    <span>下载 NonePwd-macos-arm64.zip</span>
+                  </a>
+                </div>
+              </div>
+
+              {/* 2. Android */}
+              <div className="flex flex-col justify-between bg-background p-6">
+                <div>
+                  <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+                    <span>ANDROID 8.0+ · AUTOFILL SERVICE</span>
+                    <Smartphone className="size-3.5" />
+                  </div>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">Android</h3>
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    原生系统级自动填充服务（Keystore AES-GCM 加密缓存、App 包名与网页域名智能匹配、新密码捕获）、单屏极速解锁与相机扫码导入 2FA。
+                  </p>
+                </div>
+                <div className="mt-5">
+                  <a
+                    href={`${RELEASE_DOWNLOAD_BASE}/NonePwd-android.apk`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
+                  >
+                    <Download className="size-3.5" />
+                    <span>下载 NonePwd-android.apk</span>
+                  </a>
+                </div>
+              </div>
+
+              {/* 3. iOS */}
+              <div className="flex flex-col justify-between bg-background p-6">
+                <div>
+                  <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+                    <span>IOS · IPA &amp; SIMULATOR</span>
+                    <Smartphone className="size-3.5" />
+                  </div>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">iOS</h3>
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    与桌面端一致的零知识加密同步、单屏极速解锁、实时 TOTP 倒计时、多邮箱验证码流，以及相机与相册二维码导入。
+                  </p>
+                </div>
+                <div className="mt-5 grid grid-cols-2 gap-2">
+                  <a
+                    href={`${RELEASE_DOWNLOAD_BASE}/NonePwd-ios-unsigned.ipa`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center justify-center gap-1 rounded-md border border-border bg-background px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
+                  >
+                    <Download className="size-3" />
+                    <span>未签名 IPA</span>
+                  </a>
+                  <a
+                    href={`${RELEASE_DOWNLOAD_BASE}/NonePwd-ios-sim-arm64.app.zip`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center justify-center gap-1 rounded-md border border-border bg-background px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
+                  >
+                    <Download className="size-3" />
+                    <span>Simulator .app</span>
+                  </a>
+                </div>
+              </div>
+
+              {/* 4. Browser Extension */}
+              <div id="extension" className="flex flex-col justify-between bg-background p-6">
+                <div>
+                  <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+                    <span>CHROME / BRAVE / ARC / EDGE · MV3</span>
+                    <KeyRound className="size-3.5" />
+                  </div>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">Browser Extension</h3>
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    闭合 Shadow DOM 自动填充、多步登录六宫格验证码接力、网页框选识别 2FA 二维码，以及注册页专属邮箱别名与强密码派生。
+                  </p>
+                </div>
+                <div className="mt-5">
+                  <a
+                    href="/downloads/nonepwd-extension.zip"
+                    download="nonepwd-extension.zip"
+                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
+                  >
+                    <Download className="size-3.5" />
+                    <span>下载 nonepwd-extension.zip</span>
+                  </a>
+                </div>
+              </div>
+
+              {/* 5. Native Rust CLI */}
+              <div className="flex flex-col justify-between bg-background p-6">
+                <div>
+                  <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+                    <span>MACOS / LINUX MUSL / WINDOWS</span>
+                    <Terminal className="size-3.5" />
+                  </div>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">Native Rust CLI</h3>
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    零依赖单二进制 <code className="font-mono text-foreground">np</code>，兼容 <code className="font-mono text-foreground">op://</code> &amp; <code className="font-mono text-foreground">np://</code> 寻址、<code className="font-mono text-foreground">np run</code> 环境变量内存注入与 <code className="font-mono text-foreground">np mail otp --wait</code> 阻塞等待。
+                  </p>
+                </div>
+                <div className="mt-5">
+                  <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 font-mono text-[11px] text-foreground">
+                    <span className="truncate">curl -fsSL {origin}/install.sh | bash</span>
+                    <CopyButton value={`curl -fsSL ${origin}/install.sh | bash`} variant="minimal" />
+                  </div>
+                </div>
+              </div>
+
+              {/* 6. Web Vault */}
+              <div className="flex flex-col justify-between bg-background p-6">
+                <div>
+                  <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+                    <span>BUILT-IN /VAULT · ZERO INSTALL</span>
+                    <Globe className="size-3.5" />
+                  </div>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">Web Vault</h3>
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    服务端自带响应式三栏管理台，内置 WebSocket 实时推送、摄像头扫码、Chrome/1Password CSV 与 2FA 批量迁移及 R2 快照恢复。
+                  </p>
+                </div>
+                <div className="mt-5">
+                  <button
+                    type="button"
+                    onClick={onOpenVault}
+                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/85"
+                  >
+                    <span>{primaryCtaLabel}</span>
+                    <ArrowRight className="size-3.5" />
+                  </button>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -625,27 +837,36 @@ pnpm run db:migrate:remote && pnpm run deploy`}
                 </div>
               </div>
 
-              {/* 02 Desktop & Browser Extension */}
-              <div id="extension" className="flex flex-col justify-between bg-background p-6">
+              {/* 02 Clients & Browser Extension */}
+              <div className="flex flex-col justify-between bg-background p-6">
                 <div>
                   <div className="flex items-center justify-between font-mono text-xs text-muted-foreground">
-                    <span>02 / DESKTOP &amp; EXTENSION</span>
+                    <span>02 / CLIENTS &amp; EXTENSION</span>
                     <KeyRound className="size-4" />
                   </div>
-                  <h3 className="mt-3 text-sm font-medium text-foreground">macOS 原生客户端 &amp; MV3 插件</h3>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">
+                    安装全平台客户端与浏览器扩展
+                  </h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    基于 SwiftUI 打造的原生 macOS 桌面端（菜单栏 2FA / 邮箱码、Touch ID、AI 提取），搭配 Chrome / Brave / Arc MV3 插件自动填充。
+                    安装 macOS 原生应用、Android（支持系统级自动填充）或 iOS 客户端，搭配 Chrome / Brave / Arc MV3 扩展，扫码与多邮箱验证码全端同步。
                   </p>
                 </div>
 
-                <div className="mt-5">
+                <div className="mt-5 grid grid-cols-2 gap-2">
+                  <a
+                    href="#clients"
+                    className="inline-flex items-center justify-center gap-1 rounded-md border border-border bg-background px-2.5 py-2 text-xs font-medium text-foreground hover:bg-muted/60"
+                  >
+                    <Download className="size-3.5" />
+                    <span>全端下载矩阵</span>
+                  </a>
                   <a
                     href="/downloads/nonepwd-extension.zip"
                     download="nonepwd-extension.zip"
-                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground hover:bg-muted/60"
+                    className="inline-flex items-center justify-center gap-1 rounded-md border border-border bg-background px-2.5 py-2 text-xs font-medium text-foreground hover:bg-muted/60"
                   >
                     <Download className="size-3.5" />
-                    <span>下载 nonepwd-extension.zip</span>
+                    <span>MV3 扩展包</span>
                   </a>
                 </div>
               </div>
@@ -742,10 +963,18 @@ pnpm run db:migrate:remote && pnpm run deploy`}
             <span>© 2026 nonepwd · Zero-Knowledge Self-Hosted Vault</span>
           </div>
 
-          <div className="flex items-center gap-5 font-mono text-[11px]">
+          <div className="flex flex-wrap items-center gap-5 font-mono text-[11px]">
             <button type="button" onClick={onOpenVault} className="hover:text-foreground">
               /vault
             </button>
+            <a
+              href={RELEASE_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="hover:text-foreground"
+            >
+              releases/{RELEASE_TAG}
+            </a>
             <a href="/install.sh" className="hover:text-foreground">
               /install.sh
             </a>
