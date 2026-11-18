@@ -5,11 +5,11 @@ import {
   Download,
   KeyRound,
   Moon,
-  ShieldCheck,
   Sun,
 } from 'lucide-react';
 import { useTheme } from '../state/theme';
 import { useVault } from '../state/VaultContext';
+import { BrandMark } from './BrandMark';
 import { CopyButton } from './CopyButton';
 
 function calcStrength(pw: string): { score: number; label: string; color: string } {
@@ -122,9 +122,7 @@ export const SetupWizard: React.FC<{ onBackHome?: () => void }> = ({ onBackHome 
         </div>
 
         <div className="mb-6 flex items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-border bg-background text-foreground">
-            <ShieldCheck className="h-5 w-5" />
-          </div>
+          <BrandMark className="size-11" />
           <div>
             <h1 className="text-xl font-semibold tracking-tight text-foreground">
               初始化密码库

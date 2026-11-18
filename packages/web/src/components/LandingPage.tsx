@@ -23,6 +23,7 @@ import {
 import { type Locale, useLocale } from '../state/locale';
 import { useTheme } from '../state/theme';
 import { useVault } from '../state/VaultContext';
+import { BrandMark } from './BrandMark';
 import { CopyButton } from './CopyButton';
 
 interface LandingPageProps {
@@ -435,19 +436,6 @@ curl -H "Authorization: Bearer my-connect-secret" \\
 
 const CORE_ICONS = [Lock, MailCheck, QrCode, Zap, Shield, Layers];
 
-const BrandMark: React.FC<{ className?: string }> = ({ className = 'size-8' }) => (
-  <span
-    className={`inline-flex shrink-0 items-center justify-center rounded-[6px] bg-primary text-primary-foreground ${className}`}
-    aria-hidden="true"
-  >
-    <svg viewBox="0 0 24 24" className="size-[58%]" fill="none" stroke="currentColor" strokeWidth="2.1">
-      <circle cx="12" cy="9.5" r="3.2" />
-      <path d="M12 12.7v5.3" strokeLinecap="round" />
-      <path d="M12 15.5h2.5" strokeLinecap="round" />
-    </svg>
-  </span>
-);
-
 export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
   const { phase } = useVault();
   const { isDark, toggleTheme } = useTheme();
@@ -546,9 +534,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
           {/* Hero */}
           <section className="px-5 pt-16 pb-16 md:px-10 md:pt-24 md:pb-20">
             <div className="mb-7 inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
-              <span className="flex size-3.5 items-center justify-center rounded-[3px] bg-foreground text-[10px] font-bold text-background">
-                N
-              </span>
+              <span className="size-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
               <span>{statusPillText}</span>
             </div>
 
@@ -1128,7 +1114,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
         {/* Footer */}
         <footer className="flex flex-wrap items-center justify-between gap-4 border-t border-border/70 px-5 py-10 text-xs text-muted-foreground md:px-10">
           <div className="flex items-center gap-2">
-            <BrandMark className="size-4 rounded-[4px] opacity-80 grayscale" />
+            <BrandMark className="size-5" />
             <span>© 2026 nonepwd · Zero-Knowledge Self-Hosted Vault</span>
           </div>
 

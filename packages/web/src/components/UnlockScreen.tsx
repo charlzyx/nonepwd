@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { KeyRound, Lock, Moon, Shield, Sun, Trash2 } from 'lucide-react';
+import { KeyRound, Lock, Moon, Sun, Trash2 } from 'lucide-react';
 import { useTheme } from '../state/theme';
 import { useVault } from '../state/VaultContext';
+import { BrandMark } from './BrandMark';
 
 export const UnlockScreen: React.FC<{ onBackHome?: () => void }> = ({ onBackHome }) => {
   const { knownEmail, trustedSecretKey, unlock, forgetTrustedDevice } = useVault();
@@ -56,9 +57,7 @@ export const UnlockScreen: React.FC<{ onBackHome?: () => void }> = ({ onBackHome
         </div>
 
         <div className="mb-6 flex flex-col items-center text-center">
-          <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-background text-foreground">
-            <Shield className="h-6 w-6" />
-          </div>
+          <BrandMark className="mb-3 size-12" />
           <h1 className="text-xl font-semibold tracking-tight text-foreground">解锁密码库</h1>
           <p className="mt-1 text-xs text-muted-foreground">
             {knownEmail ? knownEmail : '输入主密码解锁'}

@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { useTheme } from '../state/theme';
 import { useVault } from '../state/VaultContext';
+import { BrandMark } from './BrandMark';
 
 export type SettingsFocusTab = 'alias' | 'imap' | 'filter' | 'backup';
 
@@ -287,9 +288,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       {/* Header: Brand + email + Live/Sync pill + Theme switch */}
       <div className="flex items-center justify-between gap-2 border-b border-border/70 px-3 py-3">
         <div className="flex min-w-0 items-center gap-2">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-            <ShieldCheck className="h-4 w-4" />
-          </div>
+          <BrandMark className="size-8" />
           <div className="min-w-0">
             <div className="text-sm font-semibold tracking-tight text-foreground">nonepwd</div>
             <div className="max-w-[105px] truncate font-mono text-[10px] text-muted-foreground">

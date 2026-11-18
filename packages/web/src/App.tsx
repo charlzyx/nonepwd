@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { type ItemCategory, type VaultItemPayload } from '@nonepwd/core';
 import { Download, ExternalLink, Moon, Sun } from 'lucide-react';
+import { BrandMark } from './components/BrandMark';
 import { CopyButton } from './components/CopyButton';
 import { DeveloperView } from './components/DeveloperView';
 import { EmailOtpView } from './components/EmailOtpView';
@@ -33,9 +34,10 @@ const StandaloneVaultGuide: React.FC<{ onBackHome: () => void }> = ({ onBackHome
           <button
             type="button"
             onClick={onBackHome}
-            className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+            className="inline-flex items-center gap-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
           >
-            {isZh ? '← 返回 nonepwd 官网' : '← Back to nonepwd'}
+            <BrandMark className="size-6" />
+            <span>{isZh ? '← 返回 nonepwd 官网' : '← Back to nonepwd'}</span>
           </button>
           <div className="flex items-center gap-3">
             <span className="rounded-full border border-border px-2.5 py-0.5 font-mono text-[11px] text-muted-foreground">
