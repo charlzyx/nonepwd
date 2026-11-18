@@ -615,7 +615,7 @@ export function OtpHeroText(props: {
   class?: string;
 }) {
   const parts = () => formatOtpGroups(props.code);
-  const colorClass = () => (props.expiring ? "text-destructive" : "text-foreground");
+  const colorClass = () => (props.expiring ? "text-destructive" : "text-primary");
   return (
     <View
       accessibilityLabel={props.code}
@@ -624,7 +624,7 @@ export function OtpHeroText(props: {
       <Each of={parts()} key="index">
         {(part) => (
           <Text
-            class={`shrink-0 font-mono font-semibold ${colorClass()} px-0.5 ${
+            class={`shrink-0 font-mono font-bold ${colorClass()} px-0.5 ${
               props.size === "compact" ? "text-[24px]" : "text-[26px]"
             }`}
             style={{
@@ -1085,7 +1085,7 @@ export function GroupedRow(props: {
   class?: string;
 }) {
   const border = () => (props.last ? "" : "border-b border-border");
-  const sel = () => (props.selected ? "bg-accent" : "");
+  const sel = () => (props.selected ? "bg-primary/12" : "");
   const cls = () => `min-h-[52px] px-4 py-3 ${border()} ${sel()} ${props.class ?? ""}`;
 
   if (props.onPress) {
@@ -1119,7 +1119,7 @@ export interface SurfaceCardProps {
 export function SurfaceCard(props: SurfaceCardProps) {
   const baseClass = () =>
     `rounded-2xl p-4 gap-3 ${
-      props.selected ? "bg-accent" : "bg-card"
+      props.selected ? "bg-primary/12" : "bg-card"
     } ${props.class ?? ""}`;
 
   if (props.onPress) {
@@ -1179,6 +1179,38 @@ function extractAvatarMonogram(title: string): string {
   return first.toUpperCase();
 }
 
+function avatarColorForCategory(cat: ItemCategory | "email", title: string): string {
+  if (cat === "email") {
+    const emailTokens = [
+      token("chart-1"),
+      token("chart-5"),
+      token("chart-4"),
+      token("chart-2"),
+      token("chart-3"),
+    ];
+    let hash = 0;
+    for (let i = 0; i < title.length; i++) {
+      hash = (hash * 31 + title.charCodeAt(i)) >>> 0;
+    }
+    return emailTokens[hash % emailTokens.length];
+  }
+  switch (cat) {
+    case "api_credential":
+      return token("chart-4");
+    case "ssh_key":
+      return token("muted-foreground");
+    case "card":
+      return token("chart-2");
+    case "identity":
+      return token("chart-5");
+    case "secure_note":
+      return token("chart-3");
+    case "login":
+    default:
+      return token("chart-1");
+  }
+}
+
 export interface ItemAvatarProps {
   title: string;
   category?: ItemCategory | "email";
@@ -1187,6 +1219,7 @@ export interface ItemAvatarProps {
 }
 
 export function ItemAvatar(props: ItemAvatarProps) {
+  const bgColor = () => avatarColorForCategory(props.category ?? "login", props.title);
   const boxClass = () =>
     props.size === "sm"
       ? "h-9 w-9 rounded-[10px]"
@@ -1195,9 +1228,10 @@ export function ItemAvatar(props: ItemAvatarProps) {
 
   return (
     <View
-      class={`shrink-0 ${boxClass()} bg-input border border-border items-center justify-center ${props.class ?? ""}`}
+      class={`shrink-0 ${boxClass()} items-center justify-center ${props.class ?? ""}`}
+      style={{ backgroundColor: bgColor() }}
     >
-      <Text class={`${textClass()} font-semibold text-foreground`}>
+      <Text class={`${textClass()} font-bold text-primary-foreground`}>
         {extractAvatarMonogram(props.title)}
       </Text>
     </View>
@@ -1287,8 +1321,8 @@ export function ScreenHeader(props: ScreenHeaderProps) {
           <PageTitle>{props.title}</PageTitle>
           <If when={props.badge}>
             {(b) => (
-              <View class="shrink-0 rounded-full bg-muted px-3 py-1">
-                <CaptionText numberOfLines={1} class="text-muted-foreground">
+              <View class="shrink-0 rounded-full bg-primary/12 px-3 py-1">
+                <CaptionText numberOfLines={1} class="text-primary">
                   {b()}
                 </CaptionText>
               </View>

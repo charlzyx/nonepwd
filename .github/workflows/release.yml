@@ -5,13 +5,54 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.2.0-rc.1 or v0.2.0)'
+        required: true
+        default: 'v0.2.0-rc.1'
+        type: string
+      prerelease:
+        description: 'Mark GitHub Release as pre-release'
+        required: true
+        default: true
+        type: boolean
+      include_windows:
+        description: 'Also build Windows NSH installer'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
   packages: write
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - name: Resolve release metadata
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+            PRERELEASE="${{ inputs.prerelease }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            if [[ "$TAG" == *-* ]]; then
+              PRERELEASE="true"
+            else
+              PRERELEASE="false"
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag=$TAG prerelease=$PRERELEASE"
+
   build-macos:
+    needs: [prepare]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +62,21 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin,wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos-universal
+          cache-on-failure: true
+
+      - name: Configure Swift module cache path
+        run: |
+          mkdir -p "$HOME/.cache/nonepwd-swift-mc"
+          echo "SWIFT_MODULE_CACHE_DIR=$HOME/.cache/nonepwd-swift-mc" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/nonepwd-swift-mc
+          key: macos-swift-mc-v1-${{ hashFiles('apps/desktop/Sources/**') }}
+          restore-keys: |
+            macos-swift-mc-v1-
 
       - uses: actions/setup-node@v4
         with:
@@ -28,6 +84,17 @@ jobs:
 
       - name: Install pnpm
         run: npm install -g pnpm
+
+      - name: Resolve pnpm store path
+        id: pnpm-cache
+        run: echo "store_path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.store_path }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
 
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
@@ -41,8 +108,12 @@ jobs:
       - name: Build macOS universal CLI binaries
         run: |
           mkdir -p release-assets
-          cargo build -p nonepwd-cli --target aarch64-apple-darwin --release
-          cp target/aarch64-apple-darwin/release/np release-assets/np-darwin-arm64
+          if [ -f dist/bin/np-darwin-arm64 ]; then
+            cp dist/bin/np-darwin-arm64 release-assets/np-darwin-arm64
+          else
+            cargo build -p nonepwd-cli --target aarch64-apple-darwin --release
+            cp target/aarch64-apple-darwin/release/np release-assets/np-darwin-arm64
+          fi
           cargo build -p nonepwd-cli --target x86_64-apple-darwin --release
           cp target/x86_64-apple-darwin/release/np release-assets/np-darwin-x86_64
           chmod 755 release-assets/np-darwin-*
@@ -53,10 +124,51 @@ jobs:
           ./apps/desktop/scripts/build-app.sh
           ditto -c -k --sequesterRsrc --keepParent apps/desktop/dist/NonePwd.app release-assets/NonePwd-macos-arm64.zip
 
-      - name: Install nsh and package iOS artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-assets
+          path: release-assets/*
+
+  build-ios:
+    needs: [prepare]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure NSH cache env
         run: |
-          brew install longbridge/tap/nsh
-          nsh component add ios
+          mkdir -p "$HOME/.cache/nsh"
+          echo "NSH_CACHE=$HOME/.cache/nsh" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /opt/homebrew/Cellar/nsh
+            ~/.nsh
+            ~/.cache/nsh
+          key: macos-nsh-ios-v1
+
+      - name: Install nsh and iOS component
+        run: |
+          NSH_BIN="$(command -v nsh || true)"
+          if [ -z "$NSH_BIN" ]; then
+            NSH_CELLAR_BIN="$(find /opt/homebrew/Cellar/nsh -maxdepth 2 -type d -name bin 2>/dev/null | sort -V | tail -n 1 || true)"
+            if [ -n "$NSH_CELLAR_BIN" ] && [ -x "$NSH_CELLAR_BIN/nsh" ]; then
+              brew link --overwrite nsh >/dev/null 2>&1 || echo "$NSH_CELLAR_BIN" >> "$GITHUB_PATH"
+              NSH_BIN="$NSH_CELLAR_BIN/nsh"
+            fi
+          fi
+          if [ -z "$NSH_BIN" ]; then
+            brew install longbridge/tap/nsh
+            NSH_BIN="$(command -v nsh)"
+          fi
+          if ! "$NSH_BIN" component list 2>/dev/null | grep -qE '^[[:space:]]*ios[[:space:]]+installed'; then
+            "$NSH_BIN" component add ios
+          fi
+          "$NSH_BIN" --version
+
+      - name: Check, test, and package iOS artifacts
+        run: |
           (cd apps/nsh && nsh check && nsh test)
           WORK_DIR="$PWD"
           mkdir -p "$WORK_DIR/dist-ios-sim" "$WORK_DIR/release-assets"
@@ -66,10 +178,11 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-and-ios-assets
+          name: ios-assets
           path: release-assets/*
 
   build-android:
+    needs: [prepare]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,32 +192,80 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK 35
+      - name: Configure Android SDK and NSH cache env
         run: |
+          ANDROID_SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          mkdir -p "$HOME/.cache/nsh"
+          echo "ANDROID_HOME=$ANDROID_SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK" >> "$GITHUB_ENV"
+          echo "NSH_CACHE=$HOME/.cache/nsh" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/platforms/android-35
+            /usr/local/lib/android/sdk/build-tools/35.0.0
+          key: linux-android-sdk-35-v1
+
+      - name: Ensure Android SDK 35
+        run: |
+          if [ -f "$ANDROID_HOME/platforms/android-35/android.jar" ] && [ -x "$ANDROID_HOME/build-tools/35.0.0/aapt2" ]; then
+            echo "Android SDK 35 (platform + build-tools 35.0.0) already available."
+            exit 0
+          fi
+          SDKMANAGER=""
+          if [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 3 -type f -name sdkmanager | sort -V | tail -n 1 || true)"
+          fi
+          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found under $ANDROID_HOME/cmdline-tools" >&2
+            exit 1
+          fi
           set +o pipefail
-          yes | sdkmanager --licenses >/dev/null
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
           set -o pipefail
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "platforms;android-35" "build-tools;35.0.0"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.nsh
+            ~/.local/bin/nsh
+            ~/.local/components
+            ~/.local/runtime
+            ~/.local/share/nsh
+            ~/.cache/nsh
+          key: linux-nsh-android-v1
 
       - name: Install nsh and Android component
         run: |
-          curl -fsSL https://nsh.dev/install.sh | sh
-          if [ -x "$HOME/.nsh/bin/nsh" ]; then
-            NSH_DIR="$HOME/.nsh/bin"
-          elif [ -x "$HOME/.local/bin/nsh" ]; then
-            NSH_DIR="$HOME/.local/bin"
-          elif [ -x "$HOME/.cargo/bin/nsh" ]; then
-            NSH_DIR="$HOME/.cargo/bin"
-          elif command -v nsh >/dev/null 2>&1; then
-            NSH_DIR="$(dirname "$(command -v nsh)")"
-          else
-            echo "ERROR: nsh binary not found after install.sh" >&2
+          find_nsh() {
+            if [ -x "$HOME/.nsh/bin/nsh" ]; then
+              echo "$HOME/.nsh/bin/nsh"
+            elif [ -x "$HOME/.local/bin/nsh" ]; then
+              echo "$HOME/.local/bin/nsh"
+            elif [ -x "$HOME/.cargo/bin/nsh" ]; then
+              echo "$HOME/.cargo/bin/nsh"
+            elif command -v nsh >/dev/null 2>&1; then
+              command -v nsh
+            fi
+          }
+          NSH_BIN="$(find_nsh || true)"
+          if [ -z "$NSH_BIN" ]; then
+            curl -fsSL https://nsh.dev/install.sh | sh
+            NSH_BIN="$(find_nsh || true)"
+          fi
+          if [ -z "$NSH_BIN" ] || [ ! -x "$NSH_BIN" ]; then
+            echo "ERROR: nsh binary not found after install." >&2
             exit 1
           fi
-          "$NSH_DIR/nsh" component add android
-          echo "$NSH_DIR" >> "$GITHUB_PATH"
+          echo "$(dirname "$NSH_BIN")" >> "$GITHUB_PATH"
+          if ! "$NSH_BIN" component list 2>/dev/null | grep -qE '^[[:space:]]*android[[:space:]]+installed'; then
+            "$NSH_BIN" component add android
+          fi
+          "$NSH_BIN" --version
 
       - name: Check, test, and package Android APK
         run: |
@@ -121,6 +282,8 @@ jobs:
           path: release-assets/NonePwd-android.apk
 
   build-windows:
+    needs: [prepare]
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.include_windows == true }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -128,6 +291,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-client
+          cache-on-failure: true
+
+      - name: Configure Windows NSH cache env
+        shell: pwsh
+        run: |
+          $cacheDir = Join-Path $env:USERPROFILE '.nsh-cache'
+          New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+          "NSH_CACHE=$cacheDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.nsh-cache
+            ${{ runner.temp }}/nsh-bin
+          key: windows-nsh-v1
 
       - name: Build Windows CLI binary
         shell: pwsh
@@ -138,58 +318,65 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
           Copy-Item target\release\np.exe -Destination release-assets\np-windows-x64.exe -Force
 
-      - name: Download nsh for Windows
+      - name: Download or restore nsh for Windows
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $headers = @{
-            'User-Agent' = 'nonepwd-ci'
-            'Accept'     = 'application/vnd.github+json'
-          }
-          $release = $null
-          try {
-            $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/longbridge/nsh/releases/latest' -Headers $headers
-          } catch {
-            Write-Warning "GitHub API lookup for longbridge/nsh failed ($($_.Exception.Message)); falling back to latest release URL."
+          $extractDir = Join-Path $env:RUNNER_TEMP 'nsh-bin'
+          $nshExe = $null
+          if (Test-Path $extractDir) {
+            $nshExe = Get-ChildItem -Path $extractDir -Filter 'nsh.exe' -Recurse -File | Select-Object -First 1
           }
 
-          if ($release) {
-            $asset = $release.assets | Where-Object {
-              ($_.name -like '*x86_64-pc-windows*.zip' -or $_.name -like '*windows*x86_64*.zip' -or $_.name -like '*x86_64*windows*.zip') -and
-              $_.name -notlike '*.sha256*'
-            } | Select-Object -First 1
-            if (-not $asset) {
+          if (-not $nshExe) {
+            $headers = @{
+              'User-Agent' = 'nonepwd-ci'
+              'Accept'     = 'application/vnd.github+json'
+            }
+            $release = $null
+            try {
+              $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/longbridge/nsh/releases/latest' -Headers $headers
+            } catch {
+              Write-Warning "GitHub API lookup for longbridge/nsh failed ($($_.Exception.Message)); falling back to latest release URL."
+            }
+
+            if ($release) {
               $asset = $release.assets | Where-Object {
-                $_.name -like '*windows*.zip' -and
-                $_.name -notmatch 'arm64|aarch64' -and
+                ($_.name -like '*x86_64-pc-windows*.zip' -or $_.name -like '*windows*x86_64*.zip' -or $_.name -like '*x86_64*windows*.zip') -and
                 $_.name -notlike '*.sha256*'
               } | Select-Object -First 1
+              if (-not $asset) {
+                $asset = $release.assets | Where-Object {
+                  $_.name -like '*windows*.zip' -and
+                  $_.name -notmatch 'arm64|aarch64' -and
+                  $_.name -notlike '*.sha256*'
+                } | Select-Object -First 1
+              }
+              if (-not $asset) {
+                $available = ($release.assets | ForEach-Object { $_.name }) -join ', '
+                throw "No Windows x86_64 zip asset found in longbridge/nsh $($release.tag_name). Available assets: $available"
+              }
+              $downloadUrl = $asset.browser_download_url
+            } else {
+              $downloadUrl = 'https://github.com/longbridge/nsh/releases/latest/download/nsh-windows-x86_64.zip'
             }
-            if (-not $asset) {
-              $available = ($release.assets | ForEach-Object { $_.name }) -join ', '
-              throw "No Windows x86_64 zip asset found in longbridge/nsh $($release.tag_name). Available assets: $available"
+
+            $zipPath = Join-Path $env:RUNNER_TEMP 'nsh-windows.zip'
+            New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+            try {
+              Invoke-WebRequest -Uri $downloadUrl -Headers @{ 'User-Agent' = 'nonepwd-ci' } -OutFile $zipPath
+            } catch {
+              throw "Failed to download nsh Windows binary from ${downloadUrl}: $($_.Exception.Message)"
             }
-            $downloadUrl = $asset.browser_download_url
-          } else {
-            $downloadUrl = 'https://github.com/longbridge/nsh/releases/latest/download/nsh-windows-x86_64.zip'
+
+            Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+            $nshExe = Get-ChildItem -Path $extractDir -Filter 'nsh.exe' -Recurse -File | Select-Object -First 1
+            if (-not $nshExe) {
+              throw "nsh.exe not found in extracted archive from $downloadUrl"
+            }
           }
 
-          $zipPath = Join-Path $env:RUNNER_TEMP 'nsh-windows.zip'
-          $extractDir = Join-Path $env:RUNNER_TEMP 'nsh-bin'
-          if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
-          try {
-            Invoke-WebRequest -Uri $downloadUrl -Headers @{ 'User-Agent' = 'nonepwd-ci' } -OutFile $zipPath
-          } catch {
-            throw "Failed to download nsh Windows binary from ${downloadUrl}: $($_.Exception.Message)"
-          }
-
-          Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
-          $nshExe = Get-ChildItem -Path $extractDir -Filter 'nsh.exe' -Recurse -File | Select-Object -First 1
-          if (-not $nshExe) {
-            throw "nsh.exe not found in extracted archive from $downloadUrl"
-          }
           $nshExe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
           & $nshExe.FullName --version
           if ($LASTEXITCODE -ne 0) { throw "nsh --version failed" }
           $componentList = (& $nshExe.FullName component list 2>&1) -join "`n"
@@ -233,6 +420,7 @@ jobs:
           path: release-assets/*
 
   build-linux-and-extension:
+    needs: [prepare]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -240,8 +428,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+          components: llvm-tools-preview
+
+      - name: Configure rust-lld on PATH
+        run: |
+          SYSROOT="$(rustc --print sysroot)"
+          HOST="$(rustc -vV | awk '/^host:/ {print $2}')"
+          LLD_BIN_DIR="$SYSROOT/lib/rustlib/$HOST/bin"
+          echo "$LLD_BIN_DIR" >> "$GITHUB_PATH"
+          if [ ! -x "$LLD_BIN_DIR/rust-lld" ] && command -v ld.lld >/dev/null 2>&1; then
+            mkdir -p "$HOME/.local/bin"
+            ln -sf "$(command -v ld.lld)" "$HOME/.local/bin/rust-lld"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-musl-wasm
+          cache-on-failure: true
 
       - uses: actions/setup-node@v4
         with:
@@ -249,6 +453,17 @@ jobs:
 
       - name: Install pnpm
         run: npm install -g pnpm
+
+      - name: Resolve pnpm store path
+        id: pnpm-cache
+        run: echo "store_path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.store_path }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
 
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
@@ -259,13 +474,14 @@ jobs:
       - name: Run full test suite
         run: pnpm test
 
-      - name: Stage Linux binaries and extension archive
+      - name: Stage Linux binaries, extension archive, and CLI installer
         run: |
           mkdir -p release-assets
           cp dist/bin/np-linux-x86_64 release-assets/
           cp dist/bin/np-linux-arm64 release-assets/
           cp dist/bin/nonepwd-extension.zip release-assets/
-          chmod 755 release-assets/np-linux-*
+          cp scripts/install-cli.sh release-assets/
+          chmod 755 release-assets/np-linux-* release-assets/install-cli.sh
 
       - uses: actions/upload-artifact@v4
         with:
@@ -273,14 +489,20 @@ jobs:
           path: release-assets/*
 
   docker-ghcr:
+    needs: [prepare]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set lowercase GHCR image repository
+      - name: Set lowercase GHCR image tags
         run: |
           IMAGE_REPO=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          TAGS="${IMAGE_REPO}:${{ needs.prepare.outputs.tag }}"
+          if [ "${{ needs.prepare.outputs.prerelease }}" != "true" ]; then
+            TAGS="${TAGS},${IMAGE_REPO}:latest"
+          fi
           echo "IMAGE_REPO=$IMAGE_REPO" >> "$GITHUB_ENV"
+          echo "IMAGE_TAGS=$TAGS" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -295,14 +517,14 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
-          tags: |
-            ${{ env.IMAGE_REPO }}:${{ github.ref_name }}
-            ${{ env.IMAGE_REPO }}:latest
+          tags: ${{ env.IMAGE_TAGS }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   publish-npm:
-    needs: [build-linux-and-extension]
+    needs: [prepare, build-linux-and-extension]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && needs.prepare.outputs.prerelease != 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -311,6 +533,9 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-linux-wasm
+          cache-on-failure: true
 
       - uses: actions/setup-node@v4
         with:
@@ -319,6 +544,17 @@ jobs:
 
       - name: Install pnpm
         run: npm install -g pnpm
+
+      - name: Resolve pnpm store path
+        id: pnpm-cache
+        run: echo "store_path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.store_path }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
 
       - name: Install workspace dependencies and build packages
         run: |
@@ -343,7 +579,16 @@ jobs:
           done
 
   publish-release:
-    needs: [build-macos, build-android, build-windows, build-linux-and-extension, docker-ghcr]
+    needs: [prepare, build-macos, build-ios, build-android, build-windows, build-linux-and-extension, docker-ghcr]
+    if: |
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.build-macos.result == 'success' &&
+      needs.build-ios.result == 'success' &&
+      needs.build-android.result == 'success' &&
+      (needs.build-windows.result == 'success' || needs.build-windows.result == 'skipped') &&
+      needs.build-linux-and-extension.result == 'success' &&
+      needs.docker-ghcr.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -351,9 +596,15 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Generate SHA-256 checksums
+      - name: Verify required client assets and generate SHA-256 checksums
         run: |
           cd artifacts
+          for req in NonePwd-macos-arm64.zip NonePwd-ios-unsigned.ipa NonePwd-ios-sim-arm64.app.zip NonePwd-android.apk nonepwd-extension.zip np-darwin-arm64 np-darwin-x86_64 np-linux-x86_64 np-linux-arm64 install-cli.sh; do
+            if [ ! -f "$req" ]; then
+              echo "ERROR: Missing required release asset: $req" >&2
+              exit 1
+            fi
+          done
           rm -f SHA256SUMS.txt
           sha256sum -- * > /tmp/SHA256SUMS.txt
           mv /tmp/SHA256SUMS.txt SHA256SUMS.txt
@@ -361,5 +612,8 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
           files: artifacts/*
           generate_release_notes: true

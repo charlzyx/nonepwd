@@ -18,8 +18,10 @@ COPY packages/core/package.json packages/core/
 COPY packages/server/package.json packages/server/
 COPY packages/cli/package.json packages/cli/
 COPY packages/cf-email-worker/package.json packages/cf-email-worker/
+COPY packages/cf-server/package.json packages/cf-server/
 COPY packages/web/package.json packages/web/
 COPY packages/extension/package.json packages/extension/
+COPY site/package.json site/
 
 RUN pnpm install --frozen-lockfile
 

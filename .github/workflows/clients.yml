@@ -2,6 +2,12 @@ name: Clients
 
 on:
   workflow_dispatch:
+    inputs:
+      include_windows:
+        description: 'Also build Windows NSH client'
+        required: false
+        default: false
+        type: boolean
   push:
     branches:
       - main
@@ -10,6 +16,10 @@ on:
       - 'crates/**'
       - 'packages/extension/**'
       - '.github/workflows/clients.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -25,32 +35,80 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK 35
+      - name: Configure Android SDK and NSH cache env
         run: |
+          ANDROID_SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          mkdir -p "$HOME/.cache/nsh"
+          echo "ANDROID_HOME=$ANDROID_SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK" >> "$GITHUB_ENV"
+          echo "NSH_CACHE=$HOME/.cache/nsh" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/platforms/android-35
+            /usr/local/lib/android/sdk/build-tools/35.0.0
+          key: linux-android-sdk-35-v1
+
+      - name: Ensure Android SDK 35
+        run: |
+          if [ -f "$ANDROID_HOME/platforms/android-35/android.jar" ] && [ -x "$ANDROID_HOME/build-tools/35.0.0/aapt2" ]; then
+            echo "Android SDK 35 (platform + build-tools 35.0.0) already available."
+            exit 0
+          fi
+          SDKMANAGER=""
+          if [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 3 -type f -name sdkmanager | sort -V | tail -n 1 || true)"
+          fi
+          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found under $ANDROID_HOME/cmdline-tools" >&2
+            exit 1
+          fi
           set +o pipefail
-          yes | sdkmanager --licenses >/dev/null
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
           set -o pipefail
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "platforms;android-35" "build-tools;35.0.0"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.nsh
+            ~/.local/bin/nsh
+            ~/.local/components
+            ~/.local/runtime
+            ~/.local/share/nsh
+            ~/.cache/nsh
+          key: linux-nsh-android-v1
 
       - name: Install nsh and Android component
         run: |
-          curl -fsSL https://nsh.dev/install.sh | sh
-          if [ -x "$HOME/.nsh/bin/nsh" ]; then
-            NSH_DIR="$HOME/.nsh/bin"
-          elif [ -x "$HOME/.local/bin/nsh" ]; then
-            NSH_DIR="$HOME/.local/bin"
-          elif [ -x "$HOME/.cargo/bin/nsh" ]; then
-            NSH_DIR="$HOME/.cargo/bin"
-          elif command -v nsh >/dev/null 2>&1; then
-            NSH_DIR="$(dirname "$(command -v nsh)")"
-          else
-            echo "ERROR: nsh binary not found after install.sh" >&2
+          find_nsh() {
+            if [ -x "$HOME/.nsh/bin/nsh" ]; then
+              echo "$HOME/.nsh/bin/nsh"
+            elif [ -x "$HOME/.local/bin/nsh" ]; then
+              echo "$HOME/.local/bin/nsh"
+            elif [ -x "$HOME/.cargo/bin/nsh" ]; then
+              echo "$HOME/.cargo/bin/nsh"
+            elif command -v nsh >/dev/null 2>&1; then
+              command -v nsh
+            fi
+          }
+          NSH_BIN="$(find_nsh || true)"
+          if [ -z "$NSH_BIN" ]; then
+            curl -fsSL https://nsh.dev/install.sh | sh
+            NSH_BIN="$(find_nsh || true)"
+          fi
+          if [ -z "$NSH_BIN" ] || [ ! -x "$NSH_BIN" ]; then
+            echo "ERROR: nsh binary not found after install." >&2
             exit 1
           fi
-          "$NSH_DIR/nsh" component add android
-          echo "$NSH_DIR" >> "$GITHUB_PATH"
+          echo "$(dirname "$NSH_BIN")" >> "$GITHUB_PATH"
+          if ! "$NSH_BIN" component list 2>/dev/null | grep -qE '^[[:space:]]*android[[:space:]]+installed'; then
+            "$NSH_BIN" component add android
+          fi
+          "$NSH_BIN" --version
 
       - name: Check and test NSH app
         working-directory: apps/nsh
@@ -76,10 +134,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Configure NSH cache env
+        run: |
+          mkdir -p "$HOME/.cache/nsh"
+          echo "NSH_CACHE=$HOME/.cache/nsh" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /opt/homebrew/Cellar/nsh
+            ~/.nsh
+            ~/.cache/nsh
+          key: macos-nsh-ios-v1
+
       - name: Install nsh and iOS component
         run: |
-          brew install longbridge/tap/nsh
-          nsh component add ios
+          NSH_BIN="$(command -v nsh || true)"
+          if [ -z "$NSH_BIN" ]; then
+            NSH_CELLAR_BIN="$(find /opt/homebrew/Cellar/nsh -maxdepth 2 -type d -name bin 2>/dev/null | sort -V | tail -n 1 || true)"
+            if [ -n "$NSH_CELLAR_BIN" ] && [ -x "$NSH_CELLAR_BIN/nsh" ]; then
+              brew link --overwrite nsh >/dev/null 2>&1 || echo "$NSH_CELLAR_BIN" >> "$GITHUB_PATH"
+              NSH_BIN="$NSH_CELLAR_BIN/nsh"
+            fi
+          fi
+          if [ -z "$NSH_BIN" ]; then
+            brew install longbridge/tap/nsh
+            NSH_BIN="$(command -v nsh)"
+          fi
+          if ! "$NSH_BIN" component list 2>/dev/null | grep -qE '^[[:space:]]*ios[[:space:]]+installed'; then
+            "$NSH_BIN" component add ios
+          fi
+          "$NSH_BIN" --version
 
       - name: Check and test NSH app
         working-directory: apps/nsh
@@ -115,6 +200,21 @@ jobs:
           targets: aarch64-apple-darwin,wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-desktop
+          cache-on-failure: true
+
+      - name: Configure Swift module cache path
+        run: |
+          mkdir -p "$HOME/.cache/nonepwd-swift-mc"
+          echo "SWIFT_MODULE_CACHE_DIR=$HOME/.cache/nonepwd-swift-mc" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/nonepwd-swift-mc
+          key: macos-swift-mc-v1-${{ hashFiles('apps/desktop/Sources/**') }}
+          restore-keys: |
+            macos-swift-mc-v1-
 
       - uses: actions/setup-node@v4
         with:
@@ -122,6 +222,17 @@ jobs:
 
       - name: Install pnpm
         run: npm install -g pnpm
+
+      - name: Resolve pnpm store path
+        id: pnpm-cache
+        run: echo "store_path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.store_path }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
 
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
@@ -149,6 +260,7 @@ jobs:
           path: release-assets/NonePwd-macos-arm64.zip
 
   windows-client:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_windows == true }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -156,6 +268,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-client
+          cache-on-failure: true
+
+      - name: Configure Windows NSH cache env
+        shell: pwsh
+        run: |
+          $cacheDir = Join-Path $env:USERPROFILE '.nsh-cache'
+          New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+          "NSH_CACHE=$cacheDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.nsh-cache
+            ${{ runner.temp }}/nsh-bin
+          key: windows-nsh-v1
 
       - name: Build Windows CLI binary
         shell: pwsh
@@ -166,58 +295,65 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
           Copy-Item target\release\np.exe -Destination release-assets\np-windows-x64.exe -Force
 
-      - name: Download nsh for Windows
+      - name: Download or restore nsh for Windows
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $headers = @{
-            'User-Agent' = 'nonepwd-ci'
-            'Accept'     = 'application/vnd.github+json'
-          }
-          $release = $null
-          try {
-            $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/longbridge/nsh/releases/latest' -Headers $headers
-          } catch {
-            Write-Warning "GitHub API lookup for longbridge/nsh failed ($($_.Exception.Message)); falling back to latest release URL."
+          $extractDir = Join-Path $env:RUNNER_TEMP 'nsh-bin'
+          $nshExe = $null
+          if (Test-Path $extractDir) {
+            $nshExe = Get-ChildItem -Path $extractDir -Filter 'nsh.exe' -Recurse -File | Select-Object -First 1
           }
 
-          if ($release) {
-            $asset = $release.assets | Where-Object {
-              ($_.name -like '*x86_64-pc-windows*.zip' -or $_.name -like '*windows*x86_64*.zip' -or $_.name -like '*x86_64*windows*.zip') -and
-              $_.name -notlike '*.sha256*'
-            } | Select-Object -First 1
-            if (-not $asset) {
+          if (-not $nshExe) {
+            $headers = @{
+              'User-Agent' = 'nonepwd-ci'
+              'Accept'     = 'application/vnd.github+json'
+            }
+            $release = $null
+            try {
+              $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/longbridge/nsh/releases/latest' -Headers $headers
+            } catch {
+              Write-Warning "GitHub API lookup for longbridge/nsh failed ($($_.Exception.Message)); falling back to latest release URL."
+            }
+
+            if ($release) {
               $asset = $release.assets | Where-Object {
-                $_.name -like '*windows*.zip' -and
-                $_.name -notmatch 'arm64|aarch64' -and
+                ($_.name -like '*x86_64-pc-windows*.zip' -or $_.name -like '*windows*x86_64*.zip' -or $_.name -like '*x86_64*windows*.zip') -and
                 $_.name -notlike '*.sha256*'
               } | Select-Object -First 1
+              if (-not $asset) {
+                $asset = $release.assets | Where-Object {
+                  $_.name -like '*windows*.zip' -and
+                  $_.name -notmatch 'arm64|aarch64' -and
+                  $_.name -notlike '*.sha256*'
+                } | Select-Object -First 1
+              }
+              if (-not $asset) {
+                $available = ($release.assets | ForEach-Object { $_.name }) -join ', '
+                throw "No Windows x86_64 zip asset found in longbridge/nsh $($release.tag_name). Available assets: $available"
+              }
+              $downloadUrl = $asset.browser_download_url
+            } else {
+              $downloadUrl = 'https://github.com/longbridge/nsh/releases/latest/download/nsh-windows-x86_64.zip'
             }
-            if (-not $asset) {
-              $available = ($release.assets | ForEach-Object { $_.name }) -join ', '
-              throw "No Windows x86_64 zip asset found in longbridge/nsh $($release.tag_name). Available assets: $available"
+
+            $zipPath = Join-Path $env:RUNNER_TEMP 'nsh-windows.zip'
+            New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+            try {
+              Invoke-WebRequest -Uri $downloadUrl -Headers @{ 'User-Agent' = 'nonepwd-ci' } -OutFile $zipPath
+            } catch {
+              throw "Failed to download nsh Windows binary from ${downloadUrl}: $($_.Exception.Message)"
             }
-            $downloadUrl = $asset.browser_download_url
-          } else {
-            $downloadUrl = 'https://github.com/longbridge/nsh/releases/latest/download/nsh-windows-x86_64.zip'
+
+            Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+            $nshExe = Get-ChildItem -Path $extractDir -Filter 'nsh.exe' -Recurse -File | Select-Object -First 1
+            if (-not $nshExe) {
+              throw "nsh.exe not found in extracted archive from $downloadUrl"
+            }
           }
 
-          $zipPath = Join-Path $env:RUNNER_TEMP 'nsh-windows.zip'
-          $extractDir = Join-Path $env:RUNNER_TEMP 'nsh-bin'
-          if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
-          try {
-            Invoke-WebRequest -Uri $downloadUrl -Headers @{ 'User-Agent' = 'nonepwd-ci' } -OutFile $zipPath
-          } catch {
-            throw "Failed to download nsh Windows binary from ${downloadUrl}: $($_.Exception.Message)"
-          }
-
-          Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
-          $nshExe = Get-ChildItem -Path $extractDir -Filter 'nsh.exe' -Recurse -File | Select-Object -First 1
-          if (-not $nshExe) {
-            throw "nsh.exe not found in extracted archive from $downloadUrl"
-          }
           $nshExe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
           & $nshExe.FullName --version
           if ($LASTEXITCODE -ne 0) { throw "nsh --version failed" }
           $componentList = (& $nshExe.FullName component list 2>&1) -join "`n"

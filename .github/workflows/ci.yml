@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -16,6 +20,9 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-linux-wasm
+          cache-on-failure: true
 
       - uses: actions/setup-node@v4
         with:
@@ -23,6 +30,17 @@ jobs:
 
       - name: Install pnpm
         run: npm install -g pnpm
+
+      - name: Resolve pnpm store path
+        id: pnpm-cache
+        run: echo "store_path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.store_path }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
 
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
@@ -44,19 +62,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Configure NSH cache directory
+        run: |
+          mkdir -p "$HOME/.cache/nsh"
+          echo "NSH_CACHE=$HOME/.cache/nsh" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.nsh
+            ~/.local/bin/nsh
+            ~/.local/components
+            ~/.local/runtime
+            ~/.local/share/nsh
+            ~/.cache/nsh
+          key: linux-nsh-cli-v1
+
       - name: Install nsh
         run: |
-          curl -fsSL https://nsh.dev/install.sh | sh
-          if [ -x "$HOME/.nsh/bin/nsh" ]; then
-            echo "$HOME/.nsh/bin" >> "$GITHUB_PATH"
-          elif [ -x "$HOME/.local/bin/nsh" ]; then
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          elif [ -x "$HOME/.cargo/bin/nsh" ]; then
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          elif ! command -v nsh >/dev/null 2>&1; then
-            echo "ERROR: nsh binary not found after install.sh" >&2
+          find_nsh() {
+            if [ -x "$HOME/.nsh/bin/nsh" ]; then
+              echo "$HOME/.nsh/bin/nsh"
+            elif [ -x "$HOME/.local/bin/nsh" ]; then
+              echo "$HOME/.local/bin/nsh"
+            elif [ -x "$HOME/.cargo/bin/nsh" ]; then
+              echo "$HOME/.cargo/bin/nsh"
+            elif command -v nsh >/dev/null 2>&1; then
+              command -v nsh
+            fi
+          }
+          NSH_BIN="$(find_nsh || true)"
+          if [ -z "$NSH_BIN" ]; then
+            curl -fsSL https://nsh.dev/install.sh | sh
+            NSH_BIN="$(find_nsh || true)"
+          fi
+          if [ -z "$NSH_BIN" ] || [ ! -x "$NSH_BIN" ]; then
+            echo "ERROR: nsh binary not found after install." >&2
             exit 1
           fi
+          echo "$(dirname "$NSH_BIN")" >> "$GITHUB_PATH"
+          "$NSH_BIN" --version
 
       - name: Check and test NSH app
         working-directory: apps/nsh

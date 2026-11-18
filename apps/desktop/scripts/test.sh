@@ -10,7 +10,7 @@ if [ ! -d "$SDK_PATH" ]; then
   MIN_MACOS="14.0"
 fi
 OUT_BIN="/tmp/nonepwd-swift-tests"
-MC_DIR="/tmp/nonepwd-swift-mc-$(basename "$SDK_PATH")"
+MC_DIR="${SWIFT_MODULE_CACHE_DIR:-/tmp/nonepwd-swift-mc-$(basename "$SDK_PATH")}"
 
 mkdir -p "$MC_DIR"
 swiftc -swift-version 5 \

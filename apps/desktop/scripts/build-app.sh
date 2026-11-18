@@ -25,7 +25,7 @@ resolve_sdk_path() {
 }
 
 SDK_PATH="$(resolve_sdk_path)"
-MC_DIR="/tmp/nonepwd-swift-mc-$(basename "$SDK_PATH")"
+MC_DIR="${SWIFT_MODULE_CACHE_DIR:-/tmp/nonepwd-swift-mc-$(basename "$SDK_PATH")}"
 if [[ "$(basename "$SDK_PATH")" == MacOSX26* || "$(basename "$SDK_PATH")" == MacOSX27* ]]; then
   MIN_MACOS="26.0"
 else

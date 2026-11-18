@@ -2057,7 +2057,7 @@ function App() {
                         <OtpHeroText code={res()?.code ?? "------"} expiring={expiring()} />
                         <BadgePill
                           label={res() ? `${res()!.remainingSeconds}s` : "..."}
-                          tone={expiring() ? "danger" : "neutral"}
+                          tone={expiring() ? "danger" : "primary"}
                         />
                       </View>
                     </View>
@@ -2066,7 +2066,7 @@ function App() {
                       accessibilityLabel={`${it().title} 验证码倒计时`}
                       trackClass="h-1 w-full overflow-hidden rounded-full bg-secondary"
                       indicatorClass={`h-full rounded-full ${
-                        expiring() ? "bg-destructive" : "bg-foreground/30"
+                        expiring() ? "bg-destructive" : "bg-primary"
                       }`}
                     />
                   </SurfaceCard>
@@ -2437,7 +2437,7 @@ function App() {
                         <View class="flex-row flex-wrap items-center gap-2 pt-1">
                           <BadgePill label={em().source.toUpperCase()} tone="neutral" />
                           <If when={recipient()}>
-                            <BadgePill label={`→ ${recipient()}`} tone="neutral" />
+                            <BadgePill label={`→ ${recipient()}`} tone="primary" />
                           </If>
                         </View>
                       </View>
@@ -2490,7 +2490,7 @@ function App() {
                       <SubheadText lineClamp={expanded() ? undefined : 2}>
                         {expanded() ? em().textBody || em().snippet : em().snippet}
                       </SubheadText>
-                      <CaptionText class="text-muted-foreground">
+                      <CaptionText class="text-primary">
                         {expanded() ? "收起正文" : "展开详情"}
                       </CaptionText>
                     </Button>
@@ -2512,7 +2512,7 @@ function App() {
           rightSlot={
             <View class="flex-row items-center gap-2 shrink-0">
               <If when={session()?.isDemo}>
-                <BadgePill label="演示模式" tone="neutral" />
+                <BadgePill label="演示模式" tone="primary" />
               </If>
               <CompactButton
                 label={session()?.isDemo ? "退出演示" : "锁定"}
@@ -2532,7 +2532,7 @@ function App() {
                 <CompactButton
                   label="新建保险库"
                   icon={plusIcon}
-                  variant="neutral"
+                  variant="tonal"
                   onPress={() => newVaultDialogOpen.set(true)}
                 />
               }
@@ -2542,7 +2542,7 @@ function App() {
                 <View class="flex-row items-center justify-between gap-2">
                   <BodyText class="flex-1 min-w-0 font-medium">{session()?.email}</BodyText>
                   <If when={session()?.isDemo}>
-                    <BadgePill label="演示模式" tone="neutral" />
+                    <BadgePill label="演示模式" tone="primary" />
                   </If>
                 </View>
                 <SubheadText>服务端：{session()?.serverUrl}</SubheadText>
@@ -2759,7 +2759,7 @@ function App() {
             <SectionHeader
               title="安全审计总览"
               rightSlot={
-                <BadgePill label={`评分 ${auditSummary().score} / 100`} tone="neutral" />
+                <BadgePill label={`评分 ${auditSummary().score} / 100`} tone="primary" />
               }
             />
             <GroupedList>
