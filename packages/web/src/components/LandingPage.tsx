@@ -20,6 +20,7 @@ import {
   Terminal,
   Zap,
 } from 'lucide-react';
+import { type Locale, useLocale } from '../state/locale';
 import { useTheme } from '../state/theme';
 import { useVault } from '../state/VaultContext';
 import { CopyButton } from './CopyButton';
@@ -34,88 +35,405 @@ const RELEASE_DOWNLOAD_BASE = `https://github.com/charlzyx/nonepwd/releases/down
 
 type CliTab = 'run' | 'mail' | 'sa' | 'connect';
 
-const CLI_EXAMPLES: Record<CliTab, { title: string; cmd: string }> = {
-  run: {
-    title: '内存注入子进程，告别明文 .env',
-    cmd: `# 原生兼容 op:// 与 np:// 引用
+const COPY: Record<
+  Locale,
+  {
+    nav: {
+      features: string;
+      clients: string;
+      cli: string;
+      deploy: string;
+    };
+    themeToggleLabel: string;
+    themeToggleTitle: (isDark: boolean) => string;
+    langToggleLabel: string;
+    langToggleTitle: string;
+    cta: {
+      standalone: string;
+      uninitialized: string;
+      unlocked: string;
+      locked: string;
+    };
+    pill: {
+      standalone: string;
+      uninitialized: string;
+      unlocked: string;
+      locked: string;
+    };
+    hero: {
+      title: string;
+      subtitle: string;
+      downloadApps: string;
+    };
+    preview: {
+      mailboxes: string;
+    };
+    core: {
+      heading: string;
+      items: Array<{ title: string; desc: string }>;
+    };
+    clients: {
+      heading: string;
+      cards: {
+        macos: { desc: string; cta: string };
+        android: { desc: string; cta: string };
+        ios: { desc: string; ipa: string; sim: string };
+        ext: { title: string; desc: string; cta: string };
+        cli: { desc: string };
+        web: { desc: string };
+      };
+    };
+    cli: {
+      heading: string;
+      tabs: Array<[CliTab, string]>;
+      copyLabel: string;
+      examples: Record<CliTab, { title: string; cmd: string }>;
+    };
+    deploy: {
+      heading: string;
+      local: {
+        title: string;
+        desc: string;
+        cmd: string;
+        copyLabel: string;
+      };
+      cf: {
+        title: string;
+        desc: string;
+        button: string;
+        manualTag: string;
+        cmd: string;
+        copyLabel: string;
+      };
+    };
+    faq: Array<{ q: string; a: string }>;
+  }
+> = {
+  zh: {
+    nav: { features: '特性', clients: '下载', cli: 'CLI', deploy: '部署' },
+    themeToggleLabel: '切换亮暗模式',
+    themeToggleTitle: (dark) => (dark ? '切换到亮色模式' : '切换到暗色模式'),
+    langToggleLabel: 'Switch to English',
+    langToggleTitle: 'Switch to English',
+    cta: {
+      standalone: '私有部署与上手',
+      uninitialized: '初始化密码库',
+      unlocked: '进入密码库',
+      locked: '解锁密码库',
+    },
+    pill: {
+      standalone: `${RELEASE_TAG} · Zero-Knowledge · Self-Hosted`,
+      uninitialized: `${RELEASE_TAG} · 实例就绪 · 待初始化`,
+      unlocked: `${RELEASE_TAG} · Vault 已解锁`,
+      locked: `${RELEASE_TAG} · 实例就绪 · 已锁定`,
+    },
+    hero: {
+      title: '一个私有实例，接管你的全部密码与验证码。',
+      subtitle:
+        '纯 Rust 零知识加密核心，内置多邮箱实时接码与域名别名。原生覆盖 macOS、iOS、Android、浏览器扩展与 CLI。',
+      downloadApps: '下载客户端',
+    },
+    preview: {
+      mailboxes: '3 个邮箱监听中',
+    },
+    core: {
+      heading: '核心能力',
+      items: [
+        {
+          title: '双密钥零知识',
+          desc: '主密码 + Secret Key 本地派生，Per-Vault AES-256-GCM 独立加密，服务端零明文。',
+        },
+        {
+          title: '实时邮箱接码',
+          desc: '多账号 IMAP 与 Cloudflare 邮件路由双通道，X25519 密封后经 WebSocket 秒级推送。',
+        },
+        {
+          title: '框选与扫码 2FA',
+          desc: '支持桌面屏幕框选、网页划区识别与手机相机扫码，一键迁移 Google Authenticator。',
+        },
+        {
+          title: '全端自动填充',
+          desc: 'Android 系统级 AutofillService 与 Shadow DOM 浏览器扩展，支持六宫格接力填充。',
+        },
+        {
+          title: '全品类密钥与别名',
+          desc: '统一托管密码、API Key、SSH 密钥、银行卡与无限域名别名，骚扰邮件一键拒收。',
+        },
+        {
+          title: '零订阅费自建',
+          desc: '单二进制 np server 开箱即用，或一键部署至 Cloudflare Worker + D1 + R2。',
+        },
+      ],
+    },
+    clients: {
+      heading: '全端下载',
+      cards: {
+        macos: {
+          desc: 'SwiftUI 原生，Touch ID、菜单栏接码与屏幕框选扫码。',
+          cta: '下载 .zip',
+        },
+        android: {
+          desc: '系统级自动填充服务、Keystore 加密缓存与相机扫码。',
+          cta: '下载 .apk',
+        },
+        ios: {
+          desc: '原生端到端同步、实时 TOTP 倒计时与相册/相机扫码。',
+          ipa: '未签名 IPA',
+          sim: 'Simulator',
+        },
+        ext: {
+          title: '浏览器扩展',
+          desc: '内联自动填充、六宫格验证码接力与网页框选 2FA。',
+          cta: '下载 .zip',
+        },
+        cli: {
+          desc: '零依赖单二进制，兼容 op:// 语法、内存注入与邮件接码。',
+        },
+        web: {
+          desc: '服务端内置响应式三栏工作台，免安装管理密码库与快照。',
+        },
+      },
+    },
+    cli: {
+      heading: '兼容 op:// 的原生命令行',
+      tabs: [
+        ['run', 'np run 零落盘注入'],
+        ['mail', 'np mail otp 等待接码'],
+        ['sa', 'Service Account 隔离'],
+        ['connect', 'Connect HTTP API'],
+      ],
+      copyLabel: '复制',
+      examples: {
+        run: {
+          title: '内存注入子进程，告别明文 .env',
+          cmd: `# 原生兼容 op:// 与 np:// 引用
 OPENAI_API_KEY=op://DevOps/OpenAI/credential
 DB_PASSWORD=np://DevOps/Postgres/password
 
 np run --env-file .env.tpl -- npm run dev`,
-  },
-  mail: {
-    title: '阻塞等待最新邮箱验证码并本地解密',
-    cmd: `# 通过纯 Rust TLS + WebSocket 实时等待并 X25519 解密
+        },
+        mail: {
+          title: '阻塞等待最新邮箱验证码并本地解密',
+          cmd: `# 通过纯 Rust TLS + WebSocket 实时等待并 X25519 解密
 OTP=$(np mail otp --domain github.com --wait 30s)
 echo "$OTP"`,
-  },
-  sa: {
-    title: '签发仅限 DevOps 库的最小权限令牌',
-    cmd: `np service-account create ci-runner --vault DevOps
+        },
+        sa: {
+          title: '签发仅限 DevOps 库的最小权限令牌',
+          cmd: `np service-account create ci-runner --vault DevOps
 export NONEPWD_TOKEN="npst_v1_..."
 
 np read "np://DevOps/OpenAI/api_key"`,
-  },
-  connect: {
-    title: '启动本地 HTTP 密钥解析网关',
-    cmd: `np serve --connect --port 8788 --token my-connect-secret
+        },
+        connect: {
+          title: '启动本地 HTTP 密钥解析网关',
+          cmd: `np serve --connect --port 8788 --token my-connect-secret
 
 curl -H "Authorization: Bearer my-connect-secret" \\
   "http://127.0.0.1:8788/v1/resolve?ref=np://DevOps/OpenAI/api_key"`,
+        },
+      },
+    },
+    deploy: {
+      heading: '两种自建方式，永久 0 订阅费',
+      local: {
+        title: 'Rust 单二进制',
+        desc: '单文件内置 SQLite、多账号 IMAP 与 Web Vault，一条命令启动。',
+        cmd: `npx @nonepwd/server\n# 或已安装原生 CLI：\nnp server`,
+        copyLabel: '复制',
+      },
+      cf: {
+        title: 'Worker + D1 + R2 自有域名',
+        desc: '点击按钮自动 Fork 仓库并创建 Worker + D1 + R2，绑定自有域名即用。',
+        button: '一键 Fork 并部署到 Cloudflare',
+        manualTag: 'Fork / Clone 手动部署',
+        cmd: `pnpm install && pnpm build:cf-server\ncd packages/cf-server && npx wrangler deploy`,
+        copyLabel: '复制',
+      },
+    },
+    faq: [
+      {
+        q: '服务端能看到我的密码或邮件内容吗？',
+        a: '不能。主密码与 NP3 密钥仅在本地内存派生，密码库采用 AES-256-GCM 独立加密，验证码邮件以 X25519 公钥密封存储。',
+      },
+      {
+        q: '实时邮箱验证码支持哪些收信方式？',
+        a: '支持同时挂载 Gmail、QQ、163、iCloud、Outlook 等多账号 IMAP，以及绑定自有域名的 Cloudflare Email Routing 无限别名。',
+      },
+      {
+        q: '如何从其他密码器或验证器迁移？',
+        a: '支持 Chrome / 1Password CSV 批量导入，以及 Google Authenticator 导出二维码、桌面屏幕框选与手机扫码导入。',
+      },
+      {
+        q: 'Cloudflare 部署会产生费用吗？',
+        a: '个人日常使用完全在 Workers、D1、R2 与 Email Routing 免费额度内，无需购买服务器或订阅服务。',
+      },
+    ],
+  },
+  en: {
+    nav: { features: 'Features', clients: 'Downloads', cli: 'CLI', deploy: 'Deploy' },
+    themeToggleLabel: 'Toggle color theme',
+    themeToggleTitle: (dark) => (dark ? 'Switch to light mode' : 'Switch to dark mode'),
+    langToggleLabel: '切换到中文',
+    langToggleTitle: '切换到中文',
+    cta: {
+      standalone: 'Self-Host Guide',
+      uninitialized: 'Initialize Vault',
+      unlocked: 'Open Vault',
+      locked: 'Unlock Vault',
+    },
+    pill: {
+      standalone: `${RELEASE_TAG} · Zero-Knowledge · Self-Hosted`,
+      uninitialized: `${RELEASE_TAG} · Instance Ready · Setup Required`,
+      unlocked: `${RELEASE_TAG} · Vault Unlocked`,
+      locked: `${RELEASE_TAG} · Instance Ready · Locked`,
+    },
+    hero: {
+      title: 'One private instance for all your passwords and OTPs.',
+      subtitle:
+        'Pure-Rust zero-knowledge core with live multi-mailbox OTP extraction and domain aliases. Native across macOS, iOS, Android, Browser Extension, and CLI.',
+      downloadApps: 'Download Apps',
+    },
+    preview: {
+      mailboxes: '3 mailboxes listening',
+    },
+    core: {
+      heading: 'Core Capabilities',
+      items: [
+        {
+          title: 'Dual-Key Zero-Knowledge',
+          desc: 'Master Password + Secret Key derived locally with per-vault AES-256-GCM keys. Zero plaintext on server.',
+        },
+        {
+          title: 'Live Email OTPs',
+          desc: 'Multi-account IMAP IDLE and Cloudflare Email Routing sealed with X25519 and pushed over WebSocket.',
+        },
+        {
+          title: 'Snip & Scan 2FA',
+          desc: 'Desktop screen snip, web region capture, mobile camera scan, and Google Authenticator migration.',
+        },
+        {
+          title: 'Native Autofill',
+          desc: 'Android system AutofillService plus Shadow DOM browser extension with multi-step 6-digit OTP relay.',
+        },
+        {
+          title: 'Secrets & Aliases',
+          desc: 'Store logins, API credentials, SSH keys, cards, and unlimited masked email aliases with instant blocking.',
+        },
+        {
+          title: 'Zero-Subscription Hosting',
+          desc: 'Run a single np server binary locally or deploy to Cloudflare Workers + D1 + R2 on your own domain.',
+        },
+      ],
+    },
+    clients: {
+      heading: 'Downloads',
+      cards: {
+        macos: {
+          desc: 'Native SwiftUI app with Touch ID, menu bar OTPs, and screen QR snip.',
+          cta: 'Download .zip',
+        },
+        android: {
+          desc: 'System AutofillService, Keystore-encrypted cache, and camera QR scan.',
+          cta: 'Download .apk',
+        },
+        ios: {
+          desc: 'Zero-knowledge sync, live TOTP countdown, and camera/photo QR import.',
+          ipa: 'Unsigned IPA',
+          sim: 'Simulator',
+        },
+        ext: {
+          title: 'Browser Extension',
+          desc: 'Inline Shadow DOM autofill, 6-box OTP relay, and web page QR snip.',
+          cta: 'Download .zip',
+        },
+        cli: {
+          desc: 'Zero-dependency binary with op:// syntax, secret injection, and OTP wait.',
+        },
+        web: {
+          desc: 'Built-in responsive 3-column vault workspace with zero installation.',
+        },
+      },
+    },
+    cli: {
+      heading: 'op:// Compatible Native CLI',
+      tabs: [
+        ['run', 'np run injection'],
+        ['mail', 'np mail otp --wait'],
+        ['sa', 'Service Accounts'],
+        ['connect', 'Connect HTTP API'],
+      ],
+      copyLabel: 'Copy',
+      examples: {
+        run: {
+          title: 'Inject secrets into memory — zero plaintext .env files',
+          cmd: `# Compatible with both op:// and np:// references
+OPENAI_API_KEY=op://DevOps/OpenAI/credential
+DB_PASSWORD=np://DevOps/Postgres/password
+
+np run --env-file .env.tpl -- npm run dev`,
+        },
+        mail: {
+          title: 'Block for live email verification codes with X25519 decrypt',
+          cmd: `# Streams and decrypts incoming codes over Rust TLS + WebSocket
+OTP=$(np mail otp --domain github.com --wait 30s)
+echo "$OTP"`,
+        },
+        sa: {
+          title: 'Least-privilege Service Account scoped to one vault',
+          cmd: `np service-account create ci-runner --vault DevOps
+export NONEPWD_TOKEN="npst_v1_..."
+
+np read "np://DevOps/OpenAI/api_key"`,
+        },
+        connect: {
+          title: 'Local HTTP secret resolution gateway',
+          cmd: `np serve --connect --port 8788 --token my-connect-secret
+
+curl -H "Authorization: Bearer my-connect-secret" \\
+  "http://127.0.0.1:8788/v1/resolve?ref=np://DevOps/OpenAI/api_key"`,
+        },
+      },
+    },
+    deploy: {
+      heading: 'Two ways to self-host, $0 forever',
+      local: {
+        title: 'Single Rust Binary',
+        desc: 'Built-in SQLite vault, multi-account IMAP, and Web Vault in one command.',
+        cmd: `npx @nonepwd/server\n# Or with the native CLI installed:\nnp server`,
+        copyLabel: 'Copy',
+      },
+      cf: {
+        title: 'Worker + D1 + R2 Custom Domain',
+        desc: 'Auto-fork the repo and provision Worker + D1 + R2 on your own Cloudflare account.',
+        button: 'Fork & Deploy to Cloudflare',
+        manualTag: 'Fork / Clone via Wrangler',
+        cmd: `pnpm install && pnpm build:cf-server\ncd packages/cf-server && npx wrangler deploy`,
+        copyLabel: 'Copy',
+      },
+    },
+    faq: [
+      {
+        q: 'Can the server ever see my passwords or emails?',
+        a: 'No. Master Password and NP3 Secret Key stay in local memory, each vault is encrypted with its own AES-256-GCM key, and incoming emails are sealed with your X25519 public key.',
+      },
+      {
+        q: 'Which email providers work for live verification codes?',
+        a: 'Connect multiple Gmail, QQ, 163, iCloud, Outlook, or custom IMAP accounts concurrently, alongside Cloudflare Email Routing catch-all aliases.',
+      },
+      {
+        q: 'How do I migrate from existing password managers or authenticators?',
+        a: 'Import Chrome/1Password CSV exports in bulk, and scan Google Authenticator migration QRs via desktop screen snip, webcam, or mobile camera.',
+      },
+      {
+        q: 'Does Cloudflare serverless deployment cost anything?',
+        a: 'Personal daily usage fits comfortably inside the free tiers of Workers, D1, R2, Durable Objects, and Email Routing.',
+      },
+    ],
   },
 };
 
-const FAQ_ITEMS = [
-  {
-    q: '服务端能看到我的密码或邮件内容吗？',
-    a: '不能。主密码与 NP3 密钥仅在本地内存派生，密码库采用 AES-256-GCM 独立加密，验证码邮件以 X25519 公钥密封存储。',
-  },
-  {
-    q: '实时邮箱验证码支持哪些收信方式？',
-    a: '支持同时挂载 Gmail、QQ、163、iCloud、Outlook 等多账号 IMAP，以及绑定自有域名的 Cloudflare Email Routing 无限别名。',
-  },
-  {
-    q: '如何从其他密码器或验证器迁移？',
-    a: '支持 Chrome / 1Password CSV 批量导入，以及 Google Authenticator 导出二维码、桌面屏幕框选与手机扫码导入。',
-  },
-  {
-    q: 'Cloudflare 部署会产生费用吗？',
-    a: '个人日常使用完全在 Workers、D1、R2 与 Email Routing 免费额度内，无需购买服务器或订阅服务。',
-  },
-];
-
-const FEATURES = [
-  {
-    icon: Lock,
-    title: '双密钥零知识',
-    desc: '主密码 + Secret Key 本地派生，Per-Vault AES-256-GCM 独立加密，服务端零明文。',
-  },
-  {
-    icon: MailCheck,
-    title: '实时邮箱接码',
-    desc: '多账号 IMAP 与 Cloudflare 邮件路由双通道，X25519 密封后经 WebSocket 秒级推送。',
-  },
-  {
-    icon: QrCode,
-    title: '框选与扫码 2FA',
-    desc: '支持桌面屏幕框选、网页划区识别与手机相机扫码，一键迁移 Google Authenticator。',
-  },
-  {
-    icon: Zap,
-    title: '全端自动填充',
-    desc: 'Android 系统级 AutofillService 与 Shadow DOM 浏览器扩展，支持六宫格接力填充。',
-  },
-  {
-    icon: Shield,
-    title: '全品类密钥与别名',
-    desc: '统一托管密码、API Key、SSH 密钥、银行卡与无限域名别名，骚扰邮件一键拒收。',
-  },
-  {
-    icon: Layers,
-    title: '零订阅费自建',
-    desc: '单二进制 np server 开箱即用，或一键部署至 Cloudflare Worker + D1 + R2。',
-  },
-];
+const CORE_ICONS = [Lock, MailCheck, QrCode, Zap, Shield, Layers];
 
 const BrandMark: React.FC<{ className?: string }> = ({ className = 'size-8' }) => (
   <span
@@ -133,28 +451,31 @@ const BrandMark: React.FC<{ className?: string }> = ({ className = 'size-8' }) =
 export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
   const { phase } = useVault();
   const { isDark, toggleTheme } = useTheme();
+  const { locale, isZh, toggleLocale } = useLocale();
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:8787';
 
   const [cliTab, setCliTab] = useState<CliTab>('run');
   const [openFaq, setOpenFaq] = useState<number | null>(null);
 
+  const t = COPY[locale];
+
   const primaryCtaLabel =
     phase === 'standalone'
-      ? '私有部署与上手'
+      ? t.cta.standalone
       : phase === 'uninitialized'
-      ? '初始化密码库'
+      ? t.cta.uninitialized
       : phase === 'unlocked'
-      ? '进入密码库'
-      : '解锁密码库';
+      ? t.cta.unlocked
+      : t.cta.locked;
 
   const statusPillText =
     phase === 'standalone'
-      ? `${RELEASE_TAG} · Zero-Knowledge · Self-Hosted`
+      ? t.pill.standalone
       : phase === 'uninitialized'
-      ? `${RELEASE_TAG} · 实例就绪 · 待初始化`
+      ? t.pill.uninitialized
       : phase === 'unlocked'
-      ? `${RELEASE_TAG} · Vault 已解锁`
-      : `${RELEASE_TAG} · 实例就绪 · 已锁定`;
+      ? t.pill.unlocked
+      : t.pill.locked;
 
   return (
     <div className="min-h-dvh bg-background text-foreground antialiased">
@@ -166,19 +487,19 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
             <span className="text-[15px] font-semibold tracking-tight">nonepwd</span>
           </a>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3 md:gap-4">
             <nav className="hidden items-center gap-5 text-[13px] text-muted-foreground sm:flex">
               <a href="#features" className="transition-colors hover:text-foreground">
-                特性
+                {t.nav.features}
               </a>
               <a href="#clients" className="transition-colors hover:text-foreground">
-                下载
+                {t.nav.clients}
               </a>
               <a href="#cli" className="transition-colors hover:text-foreground">
-                CLI
+                {t.nav.cli}
               </a>
               <a href="#deploy" className="transition-colors hover:text-foreground">
-                部署
+                {t.nav.deploy}
               </a>
               <a
                 href={RELEASE_URL}
@@ -193,9 +514,19 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
 
             <button
               type="button"
+              onClick={toggleLocale}
+              aria-label={t.langToggleLabel}
+              title={t.langToggleTitle}
+              className="inline-flex h-7 items-center justify-center rounded-md border border-border/80 bg-background px-2 font-mono text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              {isZh ? 'EN' : '中'}
+            </button>
+
+            <button
+              type="button"
               onClick={toggleTheme}
-              aria-label="切换亮暗模式"
-              title={isDark ? '切换到亮色模式' : '切换到暗色模式'}
+              aria-label={t.themeToggleLabel}
+              title={t.themeToggleTitle(isDark)}
               className="inline-flex size-7 items-center justify-center rounded-md border border-border/80 bg-background text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
               {isDark ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
@@ -222,11 +553,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
             </div>
 
             <h1 className="max-w-3xl text-4xl font-semibold tracking-[-0.03em] text-balance md:text-[3.35rem] md:leading-[1.08]">
-              一个私有实例，接管你的全部密码与验证码。
+              {t.hero.title}
             </h1>
 
-            <p className="mt-5 max-w-[36rem] text-[16px] leading-relaxed text-pretty text-muted-foreground">
-              纯 Rust 零知识加密核心，内置多邮箱实时接码与域名别名。原生覆盖 macOS、iOS、Android、浏览器扩展与 CLI。
+            <p className="mt-5 max-w-[38rem] text-[16px] leading-relaxed text-pretty text-muted-foreground">
+              {t.hero.subtitle}
             </p>
 
             <div className="mt-9 flex flex-wrap items-center gap-3.5">
@@ -244,7 +575,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-4 text-sm font-medium text-foreground transition-colors hover:bg-muted/60"
               >
                 <Download className="size-4" />
-                <span>下载客户端</span>
+                <span>{t.hero.downloadApps}</span>
               </a>
 
               <div className="inline-flex h-10 items-center gap-2.5 rounded-lg border border-border bg-muted/40 px-3 font-mono text-xs text-muted-foreground">
@@ -298,7 +629,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 </div>
 
                 <div className="border-t border-border/70 pt-3 font-mono text-[11px] text-muted-foreground">
-                  3 个邮箱监听中
+                  {t.preview.mailboxes}
                 </div>
               </div>
 
@@ -383,12 +714,12 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               <div className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground/80 uppercase">
                 Core
               </div>
-              <h2 className="mt-2.5 text-2xl font-semibold tracking-tight">核心能力</h2>
+              <h2 className="mt-2.5 text-2xl font-semibold tracking-tight">{t.core.heading}</h2>
             </div>
 
             <div className="mt-8 grid grid-cols-1 gap-px border-t border-border/70 bg-border/70 sm:grid-cols-2 lg:grid-cols-3">
-              {FEATURES.map((item) => {
-                const Icon = item.icon;
+              {t.core.items.map((item, idx) => {
+                const Icon = CORE_ICONS[idx];
                 return (
                   <div key={item.title} className="bg-background p-7 md:p-9">
                     <div className="flex items-center gap-2.5">
@@ -411,7 +742,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                 <div className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground/80 uppercase">
                   Clients
                 </div>
-                <h2 className="mt-2.5 text-2xl font-semibold tracking-tight">全端下载</h2>
+                <h2 className="mt-2.5 text-2xl font-semibold tracking-tight">{t.clients.heading}</h2>
               </div>
               <a
                 href={RELEASE_URL}
@@ -434,7 +765,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                   </div>
                   <h3 className="mt-3 text-sm font-medium text-foreground">macOS</h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    SwiftUI 原生，Touch ID、菜单栏接码与屏幕框选扫码。
+                    {t.clients.cards.macos.desc}
                   </p>
                 </div>
                 <div className="mt-6">
@@ -445,7 +776,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                     className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
                   >
                     <Download className="size-3.5" />
-                    <span>下载 .zip</span>
+                    <span>{t.clients.cards.macos.cta}</span>
                   </a>
                 </div>
               </div>
@@ -459,7 +790,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                   </div>
                   <h3 className="mt-3 text-sm font-medium text-foreground">Android</h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    系统级自动填充服务、Keystore 加密缓存与相机扫码。
+                    {t.clients.cards.android.desc}
                   </p>
                 </div>
                 <div className="mt-6">
@@ -470,7 +801,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                     className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
                   >
                     <Download className="size-3.5" />
-                    <span>下载 .apk</span>
+                    <span>{t.clients.cards.android.cta}</span>
                   </a>
                 </div>
               </div>
@@ -484,7 +815,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                   </div>
                   <h3 className="mt-3 text-sm font-medium text-foreground">iOS</h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    原生端到端同步、实时 TOTP 倒计时与相册/相机扫码。
+                    {t.clients.cards.ios.desc}
                   </p>
                 </div>
                 <div className="mt-6 grid grid-cols-2 gap-2">
@@ -495,7 +826,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                     className="inline-flex items-center justify-center gap-1 rounded-md border border-border bg-background px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
                   >
                     <Download className="size-3" />
-                    <span>未签名 IPA</span>
+                    <span>{t.clients.cards.ios.ipa}</span>
                   </a>
                   <a
                     href={`${RELEASE_DOWNLOAD_BASE}/NonePwd-ios-sim-arm64.app.zip`}
@@ -504,7 +835,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                     className="inline-flex items-center justify-center gap-1 rounded-md border border-border bg-background px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
                   >
                     <Download className="size-3" />
-                    <span>Simulator</span>
+                    <span>{t.clients.cards.ios.sim}</span>
                   </a>
                 </div>
               </div>
@@ -516,9 +847,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                     <span>CHROME / ARC / BRAVE · MV3</span>
                     <KeyRound className="size-3.5" />
                   </div>
-                  <h3 className="mt-3 text-sm font-medium text-foreground">浏览器扩展</h3>
+                  <h3 className="mt-3 text-sm font-medium text-foreground">
+                    {t.clients.cards.ext.title}
+                  </h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    内联自动填充、六宫格验证码接力与网页框选 2FA。
+                    {t.clients.cards.ext.desc}
                   </p>
                 </div>
                 <div className="mt-6">
@@ -528,7 +861,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                     className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
                   >
                     <Download className="size-3.5" />
-                    <span>下载 .zip</span>
+                    <span>{t.clients.cards.ext.cta}</span>
                   </a>
                 </div>
               </div>
@@ -542,7 +875,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                   </div>
                   <h3 className="mt-3 text-sm font-medium text-foreground">np CLI</h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    零依赖单二进制，兼容 op:// 语法、内存注入与邮件接码。
+                    {t.clients.cards.cli.desc}
                   </p>
                 </div>
                 <div className="mt-6 space-y-2">
@@ -582,7 +915,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                   </div>
                   <h3 className="mt-3 text-sm font-medium text-foreground">Web Vault</h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    服务端内置响应式三栏工作台，免安装管理密码库与快照。
+                    {t.clients.cards.web.desc}
                   </p>
                 </div>
                 <div className="mt-6">
@@ -607,7 +940,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                   CLI &amp; Agent
                 </div>
                 <h2 className="mt-2.5 text-2xl font-semibold tracking-tight">
-                  兼容 op:// 的原生命令行
+                  {t.cli.heading}
                 </h2>
               </div>
               <div className="flex items-center gap-2 font-mono text-xs">
@@ -634,14 +967,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
 
             <div className="mt-8 grid grid-cols-1 gap-px border border-border/70 bg-border/70 lg:grid-cols-12">
               <div className="space-y-2 bg-background p-5 lg:col-span-5">
-                {(
-                  [
-                    ['run', 'np run 零落盘注入'],
-                    ['mail', 'np mail otp 等待接码'],
-                    ['sa', 'Service Account 隔离'],
-                    ['connect', 'Connect HTTP API'],
-                  ] as const
-                ).map(([key, label]) => (
+                {t.cli.tabs.map(([key, label]) => (
                   <button
                     key={key}
                     type="button"
@@ -661,12 +987,16 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               <div className="bg-background p-5 lg:col-span-7">
                 <div className="mb-3 flex items-center justify-between">
                   <span className="text-xs font-medium text-muted-foreground">
-                    {CLI_EXAMPLES[cliTab].title}
+                    {t.cli.examples[cliTab].title}
                   </span>
-                  <CopyButton value={CLI_EXAMPLES[cliTab].cmd} label="复制" variant="minimal" />
+                  <CopyButton
+                    value={t.cli.examples[cliTab].cmd}
+                    label={t.cli.copyLabel}
+                    variant="minimal"
+                  />
                 </div>
                 <pre className="overflow-x-auto rounded-lg border border-border bg-muted/30 p-4 font-mono text-xs leading-relaxed text-foreground">
-                  {CLI_EXAMPLES[cliTab].cmd}
+                  {t.cli.examples[cliTab].cmd}
                 </pre>
               </div>
             </div>
@@ -678,7 +1008,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               Deploy
             </div>
             <h2 className="mt-2.5 text-2xl font-semibold tracking-tight">
-              两种自建方式，永久 0 订阅费
+              {t.deploy.heading}
             </h2>
 
             <div className="mt-8 grid grid-cols-1 gap-px border border-border/70 bg-border/70 lg:grid-cols-2">
@@ -688,9 +1018,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                   <div className="font-mono text-[10px] tracking-[0.08em] text-muted-foreground uppercase">
                     LOCAL / DOCKER / VPS
                   </div>
-                  <h3 className="mt-2.5 text-base font-medium text-foreground">Rust 单二进制</h3>
+                  <h3 className="mt-2.5 text-base font-medium text-foreground">
+                    {t.deploy.local.title}
+                  </h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    单文件内置 SQLite、多账号 IMAP 与 Web Vault，一条命令启动。
+                    {t.deploy.local.desc}
                   </p>
                 </div>
 
@@ -700,15 +1032,13 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                       127.0.0.1:8787
                     </span>
                     <CopyButton
-                      value={`npx @nonepwd/server\n# 或已安装原生 CLI：\nnp server`}
-                      label="复制"
+                      value={t.deploy.local.cmd}
+                      label={t.deploy.local.copyLabel}
                       variant="minimal"
                     />
                   </div>
                   <pre className="overflow-x-auto font-mono text-xs leading-relaxed text-foreground">
-{`npx @nonepwd/server
-# 或已安装原生 CLI：
-np server`}
+                    {t.deploy.local.cmd}
                   </pre>
                 </div>
               </div>
@@ -720,10 +1050,10 @@ np server`}
                     CLOUDFLARE SERVERLESS
                   </div>
                   <h3 className="mt-2.5 text-base font-medium text-foreground">
-                    Worker + D1 + R2 自有域名
+                    {t.deploy.cf.title}
                   </h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    点击按钮自动 Fork 仓库并创建 Worker + D1 + R2，绑定自有域名即用。
+                    {t.deploy.cf.desc}
                   </p>
                 </div>
 
@@ -735,24 +1065,23 @@ np server`}
                     className="inline-flex h-9 items-center gap-1.5 rounded-md bg-primary px-3.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/85"
                   >
                     <Cloud className="size-3.5" />
-                    <span>一键 Fork 并部署到 Cloudflare</span>
+                    <span>{t.deploy.cf.button}</span>
                     <ExternalLink className="size-3" />
                   </a>
 
                   <div className="rounded-lg border border-border bg-muted/30 p-3.5">
                     <div className="mb-2 flex items-center justify-between">
                       <span className="font-mono text-[11px] text-muted-foreground">
-                        Fork / Clone 手动部署
+                        {t.deploy.cf.manualTag}
                       </span>
                       <CopyButton
-                        value={`pnpm install && pnpm build:cf-server\ncd packages/cf-server && npx wrangler deploy`}
-                        label="复制"
+                        value={t.deploy.cf.cmd}
+                        label={t.deploy.cf.copyLabel}
                         variant="minimal"
                       />
                     </div>
                     <pre className="overflow-x-auto font-mono text-xs leading-relaxed text-foreground">
-{`pnpm install && pnpm build:cf-server
-cd packages/cf-server && npx wrangler deploy`}
+                      {t.deploy.cf.cmd}
                     </pre>
                   </div>
                 </div>
@@ -767,7 +1096,7 @@ cd packages/cf-server && npx wrangler deploy`}
             </div>
 
             <div className="mt-6 flex w-full max-w-2xl flex-col">
-              {FAQ_ITEMS.map((item, idx) => {
+              {t.faq.map((item, idx) => {
                 const opened = openFaq === idx;
                 return (
                   <div key={item.q} className="border-b border-border/70 last:border-b-0">

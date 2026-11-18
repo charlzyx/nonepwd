@@ -25,6 +25,17 @@
         var isDark = saved === 'dark';
         document.documentElement.classList.toggle('dark', isDark);
         document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
+
+        var params = new URLSearchParams(window.location.search);
+        var qLang = (params.get('lang') || '').toLowerCase();
+        var sLang = (localStorage.getItem('nonepwd.locale') || '').toLowerCase();
+        var bLang = ((navigator.languages && navigator.languages[0]) || navigator.language || '').toLowerCase();
+        var pick = qLang || sLang || bLang;
+        var isZh = pick.indexOf('zh') === 0;
+        document.documentElement.lang = isZh ? 'zh-CN' : 'en';
+        document.title = isZh
+          ? 'nonepwd — 私有化零知识密码库与实时验证码引擎'
+          : 'nonepwd — Self-Hosted Zero-Knowledge Vault & Live OTP Engine';
       } catch (e) {}
     </script>
   </head>

@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { Check, Copy } from 'lucide-react';
+import { useLocale } from '../state/locale';
 
 interface CopyButtonProps {
   value: string;
   label?: string;
+  copiedLabel?: string;
   className?: string;
   variant?: 'default' | 'minimal';
 }
@@ -11,9 +13,11 @@ interface CopyButtonProps {
 export const CopyButton: React.FC<CopyButtonProps> = ({
   value,
   label,
+  copiedLabel,
   className = '',
   variant = 'default',
 }) => {
+  const { isZh } = useLocale();
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async (e: React.MouseEvent) => {
@@ -38,7 +42,7 @@ export const CopyButton: React.FC<CopyButtonProps> = ({
       {copied ? (
         <>
           <Check className="h-3.5 w-3.5 text-foreground" />
-          <span className="text-foreground">已复制</span>
+          <span className="text-foreground">{copiedLabel ?? (isZh ? '已复制' : 'Copied')}</span>
         </>
       ) : (
         <>

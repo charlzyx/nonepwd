@@ -13,15 +13,18 @@ import { SettingsView } from './components/SettingsView';
 import { SetupWizard } from './components/SetupWizard';
 import { Sidebar, type ActiveSection } from './components/Sidebar';
 import { UnlockScreen } from './components/UnlockScreen';
+import { useLocale } from './state/locale';
 import { useTheme } from './state/theme';
 import { useVault, VaultProvider } from './state/VaultContext';
 
 const StandaloneVaultGuide: React.FC<{ onBackHome: () => void }> = ({ onBackHome }) => {
   const { isDark, toggleTheme } = useTheme();
+  const { isZh, toggleLocale } = useLocale();
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
   const cliInstallCmd = origin
     ? `curl -fsSL ${origin}/install.sh | bash`
     : 'npm install -g @nonepwd/cli';
+  const copyLabel = isZh ? '复制' : 'Copy';
 
   return (
     <div className="min-h-dvh bg-background text-foreground antialiased">
@@ -32,7 +35,7 @@ const StandaloneVaultGuide: React.FC<{ onBackHome: () => void }> = ({ onBackHome
             onClick={onBackHome}
             className="text-xs text-muted-foreground transition-colors hover:text-foreground"
           >
-            ← 返回 nonepwd 官网
+            {isZh ? '← 返回 nonepwd 官网' : '← Back to nonepwd'}
           </button>
           <div className="flex items-center gap-3">
             <span className="rounded-full border border-border px-2.5 py-0.5 font-mono text-[11px] text-muted-foreground">
@@ -40,8 +43,17 @@ const StandaloneVaultGuide: React.FC<{ onBackHome: () => void }> = ({ onBackHome
             </span>
             <button
               type="button"
+              onClick={toggleLocale}
+              aria-label={isZh ? 'Switch to English' : '切换到中文'}
+              title={isZh ? 'Switch to English' : '切换到中文'}
+              className="inline-flex h-7 items-center justify-center rounded-md border border-border/80 bg-background px-2 font-mono text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              {isZh ? 'EN' : '中'}
+            </button>
+            <button
+              type="button"
               onClick={toggleTheme}
-              aria-label="切换亮暗模式"
+              aria-label={isZh ? '切换亮暗模式' : 'Toggle color theme'}
               className="inline-flex size-7 items-center justify-center rounded-md border border-border/80 bg-background text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
               {isDark ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
@@ -55,21 +67,25 @@ const StandaloneVaultGuide: React.FC<{ onBackHome: () => void }> = ({ onBackHome
               Self-Hosted Quickstart
             </div>
             <h1 className="mt-3 text-3xl font-semibold tracking-tight text-foreground">
-              启动你的私有密码库
+              {isZh ? '启动你的私有密码库' : 'Start your private vault'}
             </h1>
             <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-              公开官网不托管任何密文或密钥。选择以下任一方式在本地或自有域名启动实例。
+              {isZh
+                ? '公开官网不托管任何密文或密钥。选择以下任一方式在本地或自有域名启动实例。'
+                : 'This public site stores no user data or keys. Launch your zero-knowledge instance locally or on Cloudflare.'}
             </p>
 
             <div className="mt-8 grid grid-cols-1 gap-px border border-border/70 bg-border/70">
               <div className="bg-background p-5">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="font-mono text-xs font-medium text-foreground">
-                    01A · Cloudflare Worker + D1 + R2（Fork 后部署）
+                    {isZh
+                      ? '01A · Cloudflare Worker + D1 + R2（Fork 后部署）'
+                      : '01A · Cloudflare Worker + D1 + R2 (Fork & Deploy)'}
                   </span>
                   <CopyButton
                     value={`pnpm install && pnpm build:cf-server\ncd packages/cf-server && npx wrangler deploy`}
-                    label="复制"
+                    label={copyLabel}
                     variant="minimal"
                   />
                 </div>
@@ -78,34 +94,38 @@ const StandaloneVaultGuide: React.FC<{ onBackHome: () => void }> = ({ onBackHome
 cd packages/cf-server && npx wrangler deploy`}
                 </pre>
                 <p className="mt-2 text-xs text-muted-foreground">
-                  点击官网「一键 Fork 并部署到 Cloudflare」或 Fork 仓库后运行上方命令，无需安装 Rust。
+                  {isZh
+                    ? '点击官网「一键 Fork 并部署到 Cloudflare」或 Fork 仓库后运行上方命令，无需安装 Rust。'
+                    : 'Use the "Fork & Deploy to Cloudflare" button on the homepage, or run the commands above from your fork (no Rust required).'}
                 </p>
               </div>
 
               <div className="bg-background p-5">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="font-mono text-xs font-medium text-foreground">
-                    01B · 本地 Rust 单二进制服务端
+                    {isZh ? '01B · 本地 Rust 单二进制服务端' : '01B · Local Single-Binary Server'}
                   </span>
-                  <CopyButton value="np server" label="复制" variant="minimal" />
+                  <CopyButton value="np server" label={copyLabel} variant="minimal" />
                 </div>
                 <pre className="overflow-x-auto rounded-md border border-border bg-muted/30 px-3 py-2 font-mono text-xs text-foreground">
                   np server
                 </pre>
                 <p className="mt-2 text-xs text-muted-foreground">
-                  在 127.0.0.1:8787 运行内置 SQLite 密文库与 Web 管理台。
+                  {isZh
+                    ? '在 127.0.0.1:8787 运行内置 SQLite 密文库与 Web 管理台。'
+                    : 'Serves the local SQLite vault and Web UI at 127.0.0.1:8787.'}
                 </p>
               </div>
 
               <div className="bg-background p-5">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="font-mono text-xs font-medium text-foreground">
-                    02 · 安装原生 np CLI
+                    {isZh ? '02 · 安装原生 np CLI' : '02 · Install Native np CLI'}
                   </span>
-                  <CopyButton value={cliInstallCmd} label="复制" variant="minimal" />
+                  <CopyButton value={cliInstallCmd} label={copyLabel} variant="minimal" />
                 </div>
                 <pre className="overflow-x-auto rounded-md border border-border bg-muted/30 px-3 py-2 font-mono text-xs text-foreground">
-                  {`${cliInstallCmd}\n# 或 npm 全局安装：\nnpm install -g @nonepwd/cli`}
+                  {`${cliInstallCmd}\n${isZh ? '# 或 npm 全局安装：' : '# Or install globally via npm:'}\nnpm install -g @nonepwd/cli`}
                 </pre>
               </div>
             </div>
@@ -118,7 +138,9 @@ cd packages/cf-server && npx wrangler deploy`}
                 className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-primary px-4 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/85"
               >
                 <ExternalLink className="size-3.5" />
-                <span>打开本地实例 (127.0.0.1:8787/vault)</span>
+                <span>
+                  {isZh ? '打开本地实例 (127.0.0.1:8787/vault)' : 'Open Local Vault (127.0.0.1:8787/vault)'}
+                </span>
               </a>
               <a
                 href="https://github.com/charlzyx/nonepwd/releases/download/v0.2.0/NonePwd-macos-arm64.zip"
@@ -127,7 +149,7 @@ cd packages/cf-server && npx wrangler deploy`}
                 className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-border bg-background px-3.5 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
               >
                 <Download className="size-3.5" />
-                <span>macOS 桌面端</span>
+                <span>{isZh ? 'macOS 桌面端' : 'macOS App'}</span>
               </a>
               <a
                 href="https://github.com/charlzyx/nonepwd/releases/download/v0.2.0/NonePwd-android.apk"
@@ -144,7 +166,7 @@ cd packages/cf-server && npx wrangler deploy`}
                 className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-border bg-background px-3.5 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
               >
                 <Download className="size-3.5" />
-                <span>MV3 浏览器插件</span>
+                <span>{isZh ? 'MV3 浏览器插件' : 'MV3 Extension'}</span>
               </a>
             </div>
           </div>
