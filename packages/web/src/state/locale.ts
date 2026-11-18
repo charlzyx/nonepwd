@@ -43,14 +43,14 @@ export function detectInitialLocale(): Locale {
 
 const SEO_META: Record<Locale, { title: string; description: string }> = {
   zh: {
-    title: 'nonepwd — 免费开源密码管理器 · 自建 1Password 平替与实时验证码',
+    title: 'nonepwd — 免费自建密码管理器 · 1Password 零订阅平替与实时验证码',
     description:
-      '免费开源的自建零知识密码管理器（1Password / Bitwarden 零订阅费平替）。纯 Rust 加密核心，内置 2FA 验证器、多邮箱实时接码、域名别名与 op:// 兼容 CLI，支持 macOS、iOS、Android 与浏览器扩展。',
+      '源码公开、个人免费自建的零知识密码管理器（1Password / Bitwarden 零订阅费平替）。纯 Rust 加密核心，内置 2FA 验证器、多邮箱实时接码、域名别名与 op:// 兼容 CLI，支持 macOS、iOS、Android 与浏览器扩展。',
   },
   en: {
-    title: 'nonepwd — Free Open-Source Password Manager & Self-Hosted 1Password Alternative',
+    title: 'nonepwd — Free Self-Hosted Password Manager & 1Password Alternative',
     description:
-      'Free open-source, self-hosted password manager and 1Password alternative. Pure-Rust zero-knowledge AES-256-GCM vault with 2FA TOTP authenticator, live email OTPs, masked aliases, op:// compatible CLI, macOS, iOS, Android, and browser extension.',
+      'Free self-hosted, source-available password manager and 1Password alternative. Pure-Rust zero-knowledge AES-256-GCM vault with 2FA TOTP authenticator, live email OTPs, masked aliases, op:// compatible CLI, macOS, iOS, Android, and browser extension.',
   },
 };
 

@@ -126,7 +126,7 @@ const COPY: Record<
       locked: '解锁密码库',
     },
     pill: {
-      standalone: `${RELEASE_TAG} · 免费开源 · 自建零知识密码库`,
+      standalone: `${RELEASE_TAG} · 个人免费自建 · 零知识密码库`,
       uninitialized: `${RELEASE_TAG} · 实例就绪 · 待初始化`,
       unlocked: `${RELEASE_TAG} · Vault 已解锁`,
       locked: `${RELEASE_TAG} · 实例就绪 · 已锁定`,
@@ -277,7 +277,7 @@ curl -H "Authorization: Bearer my-connect-secret" \\
         a: '个人日常使用完全在 Workers、D1、R2 与 Email Routing 免费额度内，无需购买服务器或订阅服务。',
       },
     ],
-    footerTagline: '© 2026 nonepwd · 免费开源自建密码管理器',
+    footerTagline: '© 2026 nonepwd · 源码公开 · 个人免费自建（非商用许可）',
   },
   en: {
     nav: { features: 'Features', clients: 'Downloads', cli: 'CLI', deploy: 'Deploy' },
@@ -292,7 +292,7 @@ curl -H "Authorization: Bearer my-connect-secret" \\
       locked: 'Unlock Vault',
     },
     pill: {
-      standalone: `${RELEASE_TAG} · Free & Open-Source · Self-Hosted Password Manager`,
+      standalone: `${RELEASE_TAG} · Free Self-Hosted · Zero-Knowledge Password Manager`,
       uninitialized: `${RELEASE_TAG} · Instance Ready · Setup Required`,
       unlocked: `${RELEASE_TAG} · Vault Unlocked`,
       locked: `${RELEASE_TAG} · Instance Ready · Locked`,
@@ -443,7 +443,7 @@ curl -H "Authorization: Bearer my-connect-secret" \\
         a: 'Personal daily usage fits comfortably inside the free tiers of Workers, D1, R2, Durable Objects, and Email Routing.',
       },
     ],
-    footerTagline: '© 2026 nonepwd · Free Open-Source Self-Hosted Password Manager',
+    footerTagline: '© 2026 nonepwd · Source-Available · Free for Noncommercial Use',
   },
 };
 

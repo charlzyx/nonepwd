@@ -1,6 +1,7 @@
 {
   "name": "nonepwd-monorepo",
   "version": "0.1.0",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,6 +9,8 @@
     "build": "pnpm build:rust && pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && pnpm --filter @nonepwd/server build && pnpm --filter @nonepwd/cli build && pnpm --filter @nonepwd/cf-email-worker build && pnpm --filter @nonepwd/cf-server build",
     "build:cf-server": "pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && pnpm --filter @nonepwd/cf-server build",
     "build:site": "pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && node scripts/build-cf-site.mjs",
+    "deploy:cf-server": "pnpm build:cf-server && pnpm --filter @nonepwd/cf-server run deploy",
+    "deploy:site": "pnpm build:site && pnpm --dir site exec cf deploy",
     "dev:server": "pnpm --filter @nonepwd/server dev",
     "dev:web": "pnpm --filter @nonepwd/web dev",
     "test": "vitest run",

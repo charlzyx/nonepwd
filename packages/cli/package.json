@@ -2,7 +2,7 @@
   "name": "@nonepwd/cli",
   "version": "0.1.0",
   "description": "Zero-knowledge np / nonepwd CLI, secret injector, live Email OTP waiter, and Connect HTTP API gateway.",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -2,7 +2,7 @@
   "name": "@nonepwd/cf-email-worker",
   "version": "0.1.0",
   "description": "Cloudflare Email Routing Worker for nonepwd with HMAC verification and optional edge X25519 zero-knowledge encryption.",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -2,7 +2,7 @@
   "name": "@nonepwd/server",
   "version": "0.1.0",
   "description": "Self-hosted zero-knowledge vault server with SQLite, WebSocket live OTP relay, IMAP IDLE, Cloudflare Email webhook, Web UI, and MV3 extension bundle.",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

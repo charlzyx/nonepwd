@@ -89,4 +89,4 @@ pnpm release:local v0.2.0                    # 全平台本地打包与发布校
 
 ## License
 
-[MIT](./LICENSE) © 2026 charlzyx
+[PolyForm Noncommercial License 1.0.0](./LICENSE) © 2026 charlzyx — 源码公开，允许个人、学习、研究与非商业机构免费使用、修改与自建部署；**未经作者书面授权，禁止任何商业用途**（含付费 SaaS 托管、商业打包分发或企业营利使用）。

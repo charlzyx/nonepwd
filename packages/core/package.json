@@ -2,7 +2,7 @@
   "name": "@nonepwd/core",
   "version": "0.1.0",
   "description": "Rust WASM zero-knowledge cryptography, RFC 6238 TOTP, Email OTP extractor, and np:// secret reference engine for nonepwd.",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -9,8 +9,11 @@ data
 *.db-shm
 .wrangler
 .cloudflare
+packages/cf-server/.cloudflare
 .env
 .env.local
+wrangler.local.json
+wrangler.local.jsonc
 coverage
 .npmrc
 packages/server/web-dist
