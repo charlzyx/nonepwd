@@ -64,7 +64,7 @@ const StandaloneVaultGuide: React.FC<{ onBackHome: () => void }> = ({ onBackHome
         </header>
 
         <main className="flex flex-1 flex-col justify-center px-5 py-14 md:px-10">
-          <div className="max-w-2xl">
+          <div className="w-full">
             <div className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground/80 uppercase">
               Self-Hosted Quickstart
             </div>

@@ -1081,7 +1081,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               Questions
             </div>
 
-            <div className="mt-6 flex w-full max-w-2xl flex-col">
+            <div className="mt-6 flex w-full flex-col">
               {t.faq.map((item, idx) => {
                 const opened = openFaq === idx;
                 return (
