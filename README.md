@@ -8,7 +8,7 @@
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/charlzyx/nonepwd/tree/main/packages/cf-server)
 
-> 点击上方按钮可将 `@nonepwd/cf-server`（Worker + D1 + R2 + Durable Objects）一键部署到你自己的 Cloudflare 账号；部署后绑定自定义域名与 Email Routing Catch-All 即可使用。
+> 点击上方按钮会引导在**你自己的 GitHub 账号下自动 Fork 本仓库**，并一键创建 `@nonepwd/cf-server`（Worker + D1 + R2 + Durable Objects，仓库已内置预编译 WASM，云端构建无需安装 Rust）；部署完成后在 Cloudflare Dashboard 绑定自定义域名与 Email Routing Catch-All 即可使用。详情见 [方式七](#方式七cloudflare-worker--d1--r2-自有域名无服务器部署nonepwdcf-server)。
 
 ---
 
@@ -87,6 +87,17 @@ nonepwd/
     ├── clients.yml            # 多端客户端独立构建工作流（Android / iOS / macOS / Windows）
     └── release.yml            # v* 标签全平台发布（多端应用 + CLI + npm + GHCR + SHA256SUMS.txt）
 ```
+
+---
+
+## 直接下载预构建安装包
+
+前往 [GitHub Releases](https://github.com/charlzyx/nonepwd/releases/latest) 直接获取各平台预构建产物（均附带 `SHA256SUMS.txt`）：
+- **macOS Desktop**：`NonePwd-macos-arm64.zip`（解压后拖入 `/Applications`）
+- **Android**：`NonePwd-android.apk`（含系统级 `AutofillService`）
+- **iOS**：`NonePwd-ios-unsigned.ipa` & `NonePwd-ios-sim-arm64.app.zip`
+- **浏览器扩展（Chrome / Arc / Brave / Edge）**：`nonepwd-extension.zip`
+- **原生 Rust `np` CLI**：`np-darwin-arm64` / `np-linux-x86_64` / `install-cli.sh`
 
 ---
 
@@ -246,13 +257,19 @@ docker compose up -d --build
 
 适合拥有自己域名的场景：将静态官网与 Web Vault、`/api/*` 零知识接口、**D1 数据库**、**R2 加密快照与邮件归档**、**Durable Objects (WebSocket Hibernation)** 与 **Cloudflare Email Routing Catch-All** 全部运行在自有域名（如 `https://vault.yourdomain.com`）上：
 
+#### 方式 A（推荐）：一键自动 Fork 并部署到你的 Cloudflare
+
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/charlzyx/nonepwd/tree/main/packages/cf-server)
 
-> 点击按钮即可自动克隆并创建 Worker + D1 + R2 + Durable Objects；部署完成后在 Cloudflare Dashboard 绑定自定义域名与 Email Routing Catch-All 即可。如需手动 CLI 部署：
+1. 点击上方 **Deploy to Cloudflare** 按钮，授权后 Cloudflare 会在**你的 GitHub 账号下自动 Fork 本仓库**；
+2. Cloudflare Workers Builds 会自动安装依赖并用仓库内置的预编译 WASM 完成构建，自动创建 Worker、`nonepwd-db` (D1)、`nonepwd-vault-blobs` (R2) 与 `VaultWsHub`（首次访问会自动初始化 D1 表结构，全程无需安装 Rust）；
+3. 部署完成后，在 Cloudflare Dashboard → Worker → **Settings → Domains & Routes** 添加自定义域名（如 `vault.yourdomain.com`）。
+
+#### 方式 B：Fork / Clone 后使用 Wrangler CLI 手动部署
 
 ```bash
-# 1. 构建 Rust WASM 与 Cloudflare 全栈产物
-pnpm run build:rust
+# 1. Fork 并克隆你自己的仓库，安装依赖并构建 Cloudflare 全栈产物（无需安装 Rust）
+pnpm install
 pnpm run build:cf-server
 
 # 2. 创建 D1 与 R2，并执行远端建表
@@ -262,11 +279,11 @@ npx wrangler d1 create nonepwd-db          # 把输出的 database_id 填入 wra
 npx wrangler r2 bucket create nonepwd-vault-blobs
 pnpm run db:migrate:remote
 
-# 3. 绑定 custom_domain 后发布
-pnpm run deploy
+# 3. 取消 wrangler.jsonc 中 routes 注释绑定自定义域名后发布
+pnpm run deploy:wrangler
 ```
 
-然后在 Cloudflare Dashboard → **Email → Email Routing → Catch-all address** 直接选择发送到 Worker **`nonepwd-cf-server`**，自有域名别名邮件就会在边缘提取验证码并按你的 X25519 公钥密封存库及推送（macOS 桌面端、MV3 插件、NSH 客户端、`np` CLI 均直连该域名即可）。
+然后在 Cloudflare Dashboard → **Email → Email Routing → Catch-all address** 直接选择发送到 Worker **`nonepwd-cf-server`**，自有域名别名邮件就会在边缘提取验证码并按你的 X25519 公钥密封存库及推送（macOS 桌面端、MV3 插件、Android/iOS 客户端、`np` CLI 均直连该域名即可）。完整说明见 [`packages/cf-server/README.md`](./packages/cf-server/README.md)。
 
 ---
 
@@ -284,15 +301,11 @@ pnpm run deploy
 
 ---
 
-## GitHub Actions CI/CD 与发布工作流
+## GitHub Actions 与本地发布
 
-- **`.github/workflows/ci.yml` (`CI`)**：在 `push` (`main`) 与 `pull_request` 时并行执行 Rust + Node/pnpm 全量构建测试（`cargo test --workspace`、`pnpm build`、`pnpm -r typecheck`、`pnpm test`）以及 NSH 客户端静态检查与测试（`nsh check`、`nsh test`）。
-- **`.github/workflows/clients.yml` (`Clients`)**：支持手动 `workflow_dispatch`，以及推送到 `main` 且修改 `apps/**`、`crates/**`、`packages/extension/**` 或自身时自动构建并上传全部客户端 Artifacts：
-  - `NonePwd-android.apk`（`ubuntu-latest` + Java 17 + Android SDK 35 + NSH）
-  - `NonePwd-ios-unsigned.ipa` & `NonePwd-ios-sim-arm64.app.zip`（`macos-latest` + NSH）
-  - `NonePwd-macos-arm64.zip`（`macos-latest` + SwiftUI + `libnonepwd_core.dylib`）
-  - `np-windows-x64.exe` & `NonePwd-windows-x64.zip`（`windows-latest` + Rust CLI + NSH）
-- **`.github/workflows/release.yml` (`Release`)**：在推送 `v*` 标签或手动触发时并行运行 `build-macos`、`build-android`、`build-windows`、`build-linux-and-extension`、`docker-ghcr` 与 `publish-npm`，最终汇总全部产物并生成 `SHA256SUMS.txt` 发布到 GitHub Releases。
+- **`.github/workflows/ci.yml` (`CI`)**：在 `pull_request` 及手动 `workflow_dispatch` 时运行 Rust 单测、`pnpm build`、`pnpm -r typecheck`、`pnpm test` 与 NSH 静态检查/测试（内置 pnpm/Rust/NSH 缓存）。
+- **`.github/workflows/clients.yml` (`Clients`)**：支持通过 `workflow_dispatch` 手动按平台构建 Android / iOS / macOS / Windows 客户端产物。
+- **`.github/workflows/release.yml` (`Release`)**：支持通过 `workflow_dispatch` 触发全平台发布流，或在本机直接运行 `pnpm release:local <tag>` 一键完成全量本地构建、`SHA256SUMS.txt` 校验并发布到 GitHub Releases。
 
 ---
 
@@ -306,3 +319,9 @@ pnpm test
 (cd apps/nsh && nsh check && nsh test)
 ./apps/desktop/scripts/test.sh
 ```
+
+---
+
+## License
+
+[MIT](./LICENSE) © 2026 charlzyx

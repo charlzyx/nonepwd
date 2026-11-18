@@ -173,9 +173,10 @@ public enum PrefsStore {
         let fm = FileManager.default
         let dest = appSupportDir.appendingPathComponent("browser-extension", isDirectory: true)
         let bundled = Bundle.main.resourceURL?.appendingPathComponent("browser-extension", isDirectory: true)
-        let repoFallback = URL(fileURLWithPath: "/workspace/nonepwd/packages/extension/dist", isDirectory: true)
+        let envFallback = ProcessInfo.processInfo.environment["NONEPWD_EXTENSION_DIST"]
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
 
-        let source = [bundled, repoFallback]
+        let source = [bundled, envFallback]
             .compactMap { $0 }
             .first { fm.fileExists(atPath: $0.appendingPathComponent("manifest.json").path) }
 

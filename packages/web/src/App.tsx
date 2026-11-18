@@ -65,21 +65,20 @@ const StandaloneVaultGuide: React.FC<{ onBackHome: () => void }> = ({ onBackHome
               <div className="bg-background p-5">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="font-mono text-xs font-medium text-foreground">
-                    01A · Cloudflare Worker + D1 + R2
+                    01A · Cloudflare Worker + D1 + R2（Fork 后部署）
                   </span>
                   <CopyButton
-                    value={`pnpm run build:rust && pnpm run build:cf-server
-cd packages/cf-server && pnpm run db:migrate:remote && pnpm run deploy`}
+                    value={`pnpm install && pnpm build:cf-server\ncd packages/cf-server && npx wrangler deploy`}
                     label="复制"
                     variant="minimal"
                   />
                 </div>
                 <pre className="overflow-x-auto rounded-md border border-border bg-muted/30 px-3 py-2 font-mono text-xs text-foreground">
-{`pnpm run build:rust && pnpm run build:cf-server
-cd packages/cf-server && pnpm run db:migrate:remote && pnpm run deploy`}
+{`pnpm install && pnpm build:cf-server
+cd packages/cf-server && npx wrangler deploy`}
                 </pre>
                 <p className="mt-2 text-xs text-muted-foreground">
-                  免服务器部署至自有域名，集成 D1 密文库、Email Routing 与 R2 快照。
+                  点击官网「一键 Fork 并部署到 Cloudflare」或 Fork 仓库后运行上方命令，无需安装 Rust。
                 </p>
               </div>
 

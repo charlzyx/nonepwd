@@ -12,6 +12,7 @@
     "typecheck": "node scripts/prepare-assets.mjs --pre && tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "deploy": "pnpm run build && pnpm exec cf deploy",
+    "deploy:wrangler": "pnpm run build && npx wrangler deploy",
     "db:migrate:remote": "npx wrangler d1 execute nonepwd-db --remote --file=./migrations/0001_init.sql",
     "db:migrate:local": "npx wrangler d1 execute nonepwd-db --local --file=./migrations/0001_init.sql"
   },

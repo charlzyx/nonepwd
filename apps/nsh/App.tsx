@@ -1453,7 +1453,7 @@ function App() {
                   testID="server-url-input"
                   value={serverUrl()}
                   onChange={(e) => serverUrl.set(e.value)}
-                  placeholder="http://127.0.0.1:8787"
+                  placeholder="https://vault.yourdomain.com"
                   keyboardType="url"
                   autoCapitalize="none"
                   autoCorrect={false}

@@ -698,7 +698,7 @@ async function buildTestVaultFixture() {
 }
 
 describe("NonePwd App Headless UI & End-to-End Flows", () => {
-  test("renders Unlock screen with default vault.yourdomain.com server and remember-duration selector", async () => {
+  test("renders Unlock screen with default 127.0.0.1:8787 server and remember-duration selector", async () => {
     const app = await open("./App.tsx", {
       platform: "ios",
       network: {},

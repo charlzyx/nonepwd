@@ -4,7 +4,7 @@
   "compatibility_date": "2025-10-01",
   "workers_dev": true,
   "build": {
-    "command": "pnpm --filter @nonepwd/web build && pnpm run build"
+    "command": "pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && pnpm run build"
   },
   // 部署后可在 Cloudflare Dashboard 绑定自有域名，或取消下方注释启用 custom_domain
   // "routes": [

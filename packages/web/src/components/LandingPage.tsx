@@ -723,7 +723,7 @@ np server`}
                     Worker + D1 + R2 自有域名
                   </h3>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    免服务器与证书运维，集成 D1 密文库、Email Routing 收信与 R2 定时快照。
+                    点击按钮自动 Fork 仓库并创建 Worker + D1 + R2，绑定自有域名即用。
                   </p>
                 </div>
 
@@ -735,24 +735,24 @@ np server`}
                     className="inline-flex h-9 items-center gap-1.5 rounded-md bg-primary px-3.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/85"
                   >
                     <Cloud className="size-3.5" />
-                    <span>一键部署到 Cloudflare</span>
+                    <span>一键 Fork 并部署到 Cloudflare</span>
                     <ExternalLink className="size-3" />
                   </a>
 
                   <div className="rounded-lg border border-border bg-muted/30 p-3.5">
                     <div className="mb-2 flex items-center justify-between">
                       <span className="font-mono text-[11px] text-muted-foreground">
-                        packages/cf-server
+                        Fork / Clone 手动部署
                       </span>
                       <CopyButton
-                        value={`pnpm build:rust && pnpm build:cf-server\ncd packages/cf-server && pnpm db:migrate:remote && pnpm deploy`}
+                        value={`pnpm install && pnpm build:cf-server\ncd packages/cf-server && npx wrangler deploy`}
                         label="复制"
                         variant="minimal"
                       />
                     </div>
                     <pre className="overflow-x-auto font-mono text-xs leading-relaxed text-foreground">
-{`pnpm build:rust && pnpm build:cf-server
-cd packages/cf-server && pnpm db:migrate:remote && pnpm deploy`}
+{`pnpm install && pnpm build:cf-server
+cd packages/cf-server && npx wrangler deploy`}
                     </pre>
                   </div>
                 </div>
