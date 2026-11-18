@@ -17,8 +17,490 @@ import { Button, Input, Select, Sheet, Tab, Tabs, type SelectItem } from "nsh/ba
 import { Haptics } from "nsh/mobile";
 import type { ItemCategory } from "./crypto";
 import chevronDownIcon from "./icons/chevron-down.png";
+import chevronRightIcon from "./icons/chevron-right.png";
+import copyIcon from "./icons/copy.png";
+import plusIcon from "./icons/plus.png";
+import qrcodeIcon from "./icons/qrcode.png";
+import refreshIcon from "./icons/refresh.png";
 import searchIcon from "./icons/search.png";
 import xIcon from "./icons/x.png";
+
+// ---------- Platform-Safe Vector Icons & Brand Logo ----------
+
+export type UiIconKind =
+  | "plus"
+  | "x"
+  | "chevron-right"
+  | "chevron-down"
+  | "search"
+  | "copy"
+  | "qrcode"
+  | "refresh";
+
+/** Resolves a static PNG icon asset to its geometric vector kind for Android rendering. */
+export function resolveUiIconKind(asset: ImageAsset): UiIconKind {
+  if (asset === plusIcon) return "plus";
+  if (asset === xIcon) return "x";
+  if (asset === chevronRightIcon) return "chevron-right";
+  if (asset === chevronDownIcon) return "chevron-down";
+  if (asset === searchIcon) return "search";
+  if (asset === copyIcon) return "copy";
+  if (asset === qrcodeIcon) return "qrcode";
+  if (asset === refreshIcon) return "refresh";
+
+  const url = (asset?.url ?? "").toLowerCase();
+  if (url.includes("chevron-down") || url.includes("chevron_down")) return "chevron-down";
+  if (url.includes("chevron-right") || url.includes("chevron_right")) return "chevron-right";
+  if (url.includes("qrcode")) return "qrcode";
+  if (url.includes("refresh")) return "refresh";
+  if (url.includes("search")) return "search";
+  if (url.includes("copy")) return "copy";
+  if (url.includes("plus")) return "plus";
+  if (/(?:^|[/_-])x(?:[._@-]|$)/.test(url) || url.includes("close")) return "x";
+  return "plus";
+}
+
+function vectorBarStyle(
+  cx: number,
+  cy: number,
+  length: number,
+  thickness: number,
+  rotateDeg?: string
+): ViewStyle {
+  return {
+    position: "absolute",
+    left: cx - length / 2,
+    top: cy - thickness / 2,
+    width: length,
+    height: thickness,
+    borderRadius: thickness / 2,
+    ...(rotateDeg ? { rotate: rotateDeg } : {}),
+  };
+}
+
+function renderAndroidVectorIcon(kind: UiIconKind, s: number, color: () => string): JSX.Element {
+  const sw = Math.max(1.5, Math.round(s * 0.1125 * 10) / 10);
+  const half = s / 2;
+
+  switch (kind) {
+    case "plus": {
+      const len = s * 0.72;
+      return (
+        <>
+          <View style={[vectorBarStyle(half, half, len, sw), { backgroundColor: color() }]} />
+          <View
+            style={{
+              position: "absolute",
+              left: (s - sw) / 2,
+              top: (s - len) / 2,
+              width: sw,
+              height: len,
+              borderRadius: sw / 2,
+              backgroundColor: color(),
+            }}
+          />
+        </>
+      );
+    }
+    case "x": {
+      const len = s * 0.8;
+      return (
+        <>
+          <View style={[vectorBarStyle(half, half, len, sw, "45deg"), { backgroundColor: color() }]} />
+          <View style={[vectorBarStyle(half, half, len, sw, "-45deg"), { backgroundColor: color() }]} />
+        </>
+      );
+    }
+    case "chevron-right": {
+      const len = s * 0.48;
+      const d = ((len - sw) / 2) * Math.SQRT1_2;
+      const vx = half + d;
+      const vy = half;
+      return (
+        <>
+          <View style={[vectorBarStyle(vx - d, vy - d, len, sw, "45deg"), { backgroundColor: color() }]} />
+          <View style={[vectorBarStyle(vx - d, vy + d, len, sw, "-45deg"), { backgroundColor: color() }]} />
+        </>
+      );
+    }
+    case "chevron-down": {
+      const len = s * 0.48;
+      const d = ((len - sw) / 2) * Math.SQRT1_2;
+      const vx = half;
+      const vy = half + d;
+      return (
+        <>
+          <View style={[vectorBarStyle(vx - d, vy - d, len, sw, "45deg"), { backgroundColor: color() }]} />
+          <View style={[vectorBarStyle(vx + d, vy - d, len, sw, "-45deg"), { backgroundColor: color() }]} />
+        </>
+      );
+    }
+    case "search": {
+      const pad = s * 0.1;
+      const ring = s * 0.6;
+      const cx = pad + ring / 2;
+      const rMid = (ring - sw) / 2;
+      const start = cx + rMid * Math.SQRT1_2;
+      const end = s - pad - sw / 2;
+      const handleLen = (end - start) / Math.SQRT1_2 + sw;
+      const hMid = (start + end) / 2;
+      return (
+        <>
+          <View
+            style={{
+              position: "absolute",
+              left: pad,
+              top: pad,
+              width: ring,
+              height: ring,
+              borderRadius: ring / 2,
+              borderWidth: sw,
+              borderColor: color(),
+            }}
+          />
+          <View style={[vectorBarStyle(hMid, hMid, handleLen, sw, "45deg"), { backgroundColor: color() }]} />
+        </>
+      );
+    }
+    case "copy": {
+      const pad = s * 0.12;
+      const box = s * 0.55;
+      const radius = Math.max(1.5, s * 0.125);
+      const frontPos = s - pad - box;
+      const armLen = box * 0.8;
+      return (
+        <>
+          <View
+            style={{
+              position: "absolute",
+              left: pad,
+              top: pad,
+              width: armLen,
+              height: sw,
+              borderRadius: sw / 2,
+              backgroundColor: color(),
+            }}
+          />
+          <View
+            style={{
+              position: "absolute",
+              left: pad,
+              top: pad,
+              width: sw,
+              height: armLen,
+              borderRadius: sw / 2,
+              backgroundColor: color(),
+            }}
+          />
+          <View
+            style={{
+              position: "absolute",
+              left: frontPos,
+              top: frontPos,
+              width: box,
+              height: box,
+              borderRadius: radius,
+              borderWidth: sw,
+              borderColor: color(),
+            }}
+          />
+        </>
+      );
+    }
+    case "qrcode": {
+      const pad = s * 0.09;
+      const gap = Math.max(1.5, s * 0.1);
+      const q = (s - 2 * pad - gap) / 2;
+      const far = pad + q + gap;
+      const fsw = Math.max(1.3, Math.round(q * 0.24 * 10) / 10);
+      const fr = Math.max(1, q * 0.18);
+      const subGap = Math.max(1, q * 0.18);
+      const m = (q - subGap) / 2;
+      const mr = Math.max(0.5, m * 0.2);
+      const finders: ReadonlyArray<readonly [number, number]> = [
+        [pad, pad],
+        [far, pad],
+        [pad, far],
+      ];
+      const modules: ReadonlyArray<readonly [number, number]> = [
+        [far, far],
+        [far + m + subGap, far],
+        [far + m + subGap, far + m + subGap],
+      ];
+      return (
+        <>
+          {finders.map(([fx, fy]) => (
+            <View
+              style={{
+                position: "absolute",
+                left: fx,
+                top: fy,
+                width: q,
+                height: q,
+                borderRadius: fr,
+                borderWidth: fsw,
+                borderColor: color(),
+              }}
+            />
+          ))}
+          {modules.map(([mx, my]) => (
+            <View
+              style={{
+                position: "absolute",
+                left: mx,
+                top: my,
+                width: m,
+                height: m,
+                borderRadius: mr,
+                backgroundColor: color(),
+              }}
+            />
+          ))}
+        </>
+      );
+    }
+    case "refresh": {
+      const d = Math.round((s * 0.75) / 2) * 2;
+      const r = d / 2;
+      const ox = Math.round(((s - d) / 2 - s * 0.04) * 10) / 10;
+      const oy = (s - d) / 2;
+      const tipX = ox + d - sw / 2;
+      const tipY = oy + r;
+      const armLen = s * 0.28;
+      const armD = ((armLen - sw) / 2) * Math.SQRT1_2;
+      return (
+        <>
+          {/* Left 180-degree semicircle (6 -> 9 -> 12 o'clock) */}
+          <View
+            style={{
+              position: "absolute",
+              left: ox,
+              top: oy,
+              width: r,
+              height: d,
+              overflow: "hidden",
+            }}
+          >
+            <View
+              style={{
+                position: "absolute",
+                left: 0,
+                top: 0,
+                width: d,
+                height: d,
+                borderRadius: r,
+                borderWidth: sw,
+                borderColor: color(),
+              }}
+            />
+          </View>
+          {/* Top-right 90-degree arc (12 -> 3 o'clock), overlapping 0.5pt at 12 o'clock to prevent fractional-DPI seams */}
+          <View
+            style={{
+              position: "absolute",
+              left: ox + r - 0.5,
+              top: oy,
+              width: r + 0.5,
+              height: r,
+              overflow: "hidden",
+            }}
+          >
+            <View
+              style={{
+                position: "absolute",
+                left: -(r - 0.5),
+                top: 0,
+                width: d,
+                height: d,
+                borderRadius: r,
+                borderWidth: sw,
+                borderColor: color(),
+              }}
+            />
+          </View>
+          {/* Rounded start cap at 6 o'clock */}
+          <View
+            style={{
+              position: "absolute",
+              left: ox + r - sw / 2,
+              top: oy + d - sw,
+              width: sw,
+              height: sw,
+              borderRadius: sw / 2,
+              backgroundColor: color(),
+            }}
+          />
+          {/* Clockwise V arrowhead at 3 o'clock arc tip */}
+          <View style={[vectorBarStyle(tipX - armD, tipY - armD, armLen, sw, "45deg"), { backgroundColor: color() }]} />
+          <View style={[vectorBarStyle(tipX + armD, tipY - armD, armLen, sw, "-45deg"), { backgroundColor: color() }]} />
+        </>
+      );
+    }
+  }
+}
+
+/**
+ * Renders tinted UI icons using `<Image>` on iOS/desktop/web and pure `<View>`
+ * geometric shapes on Android (avoiding Android BitmapShader tint clipping issues).
+ */
+export function UiIcon(props: {
+  src: ImageAsset;
+  size?: number;
+  color: string;
+  class?: string;
+}) {
+  const s = () => props.size ?? 16;
+  if (platform.os !== "android") {
+    return (
+      <Image
+        src={props.src}
+        class={props.class ? `shrink-0 ${props.class}` : "shrink-0"}
+        style={{ width: s(), height: s(), tintColor: props.color }}
+      />
+    );
+  }
+
+  return (
+    <View
+      class={props.class ? `shrink-0 ${props.class}` : "shrink-0"}
+      style={{
+        width: s(),
+        height: s(),
+        position: "relative",
+        flexShrink: 0,
+        pointerEvents: "none",
+      }}
+    >
+      {() => renderAndroidVectorIcon(resolveUiIconKind(props.src), s(), () => props.color)}
+    </View>
+  );
+}
+
+const BRAND_KEYS = [
+  { color: "#facc15", kx: 0.315, ky: 0.37 },
+  { color: "#22c55e", kx: 0.5, ky: 0.425 },
+  { color: "#3b82f6", kx: 0.685, ky: 0.37 },
+] as const;
+
+/**
+ * Renders the NonePwd 3-key brand mark using `<Image>` on iOS/desktop/web and
+ * pure `<View>` geometry on Android.
+ */
+export function AppBrandLogo(props: {
+  src: ImageAsset;
+  size?: number;
+  class?: string;
+}) {
+  if (platform.os !== "android") {
+    return <Image src={props.src} class={props.class ?? "h-14 w-14 rounded-2xl"} />;
+  }
+
+  const s = () => props.size ?? 56;
+  return (
+    <View
+      class={props.class ? `shrink-0 ${props.class}` : "shrink-0"}
+      style={{
+        width: s(),
+        height: s(),
+        borderRadius: s() * 0.285,
+        backgroundColor: "#1c1c1e",
+        position: "relative",
+        overflow: "hidden",
+        flexShrink: 0,
+        pointerEvents: "none",
+      }}
+    >
+      {() => {
+        const sz = s();
+        const bowD = sz * 0.28;
+        const holeD = sz * 0.068;
+        const stemW = sz * 0.105;
+        const stemH = sz * 0.29;
+        const tipS = stemW * Math.SQRT1_2;
+        const toothS = stemW * 0.82;
+
+        return BRAND_KEYS.map((k) => {
+          const cx = sz * k.kx;
+          const cy = sz * k.ky;
+          const stemTop = cy + bowD * 0.25;
+          const stemBottom = stemTop + stemH;
+          return (
+            <>
+              <View
+                style={{
+                  position: "absolute",
+                  left: cx - stemW / 2,
+                  top: stemTop,
+                  width: stemW,
+                  height: stemH,
+                  backgroundColor: k.color,
+                }}
+              />
+              <View
+                style={{
+                  position: "absolute",
+                  left: cx - tipS / 2,
+                  top: stemBottom - tipS / 2,
+                  width: tipS,
+                  height: tipS,
+                  borderRadius: tipS * 0.18,
+                  backgroundColor: k.color,
+                  rotate: "45deg",
+                }}
+              />
+              <View
+                style={{
+                  position: "absolute",
+                  left: cx + stemW * 0.42 - toothS / 2,
+                  top: cy + bowD * 0.58 - toothS / 2,
+                  width: toothS,
+                  height: toothS,
+                  borderRadius: toothS * 0.22,
+                  backgroundColor: k.color,
+                  rotate: "45deg",
+                }}
+              />
+              <View
+                style={{
+                  position: "absolute",
+                  left: cx + stemW * 0.42 - toothS / 2,
+                  top: cy + bowD * 0.9 - toothS / 2,
+                  width: toothS,
+                  height: toothS,
+                  borderRadius: toothS * 0.22,
+                  backgroundColor: k.color,
+                  rotate: "45deg",
+                }}
+              />
+              <View
+                style={{
+                  position: "absolute",
+                  left: cx - bowD / 2,
+                  top: cy - bowD / 2,
+                  width: bowD,
+                  height: bowD,
+                  borderRadius: bowD / 2,
+                  backgroundColor: k.color,
+                }}
+              />
+              <View
+                style={{
+                  position: "absolute",
+                  left: cx - holeD / 2,
+                  top: cy - bowD * 0.15 - holeD / 2,
+                  width: holeD,
+                  height: holeD,
+                  borderRadius: holeD / 2,
+                  backgroundColor: "#1c1c1e",
+                }}
+              />
+            </>
+          );
+        });
+      }}
+    </View>
+  );
+}
 
 // ---------- 5-Step Typography Scale + Mono Hero ----------
 
@@ -129,9 +611,11 @@ function formatOtpGroups(raw: string): string[] {
 export function OtpHeroText(props: {
   code: string;
   size?: "hero" | "compact";
+  expiring?: boolean;
   class?: string;
 }) {
   const parts = () => formatOtpGroups(props.code);
+  const colorClass = () => (props.expiring ? "text-destructive" : "text-foreground");
   return (
     <View
       accessibilityLabel={props.code}
@@ -140,7 +624,7 @@ export function OtpHeroText(props: {
       <Each of={parts()} key="index">
         {(part) => (
           <Text
-            class={`shrink-0 font-mono font-bold text-primary px-0.5 ${
+            class={`shrink-0 font-mono font-semibold ${colorClass()} px-0.5 ${
               props.size === "compact" ? "text-[24px]" : "text-[26px]"
             }`}
             style={{
@@ -222,7 +706,7 @@ export function ActionButton(props: ActionButtonProps) {
       }`}
     >
       <If when={props.icon}>
-        {(ic) => <Image src={ic()} class="h-[18px] w-[18px] shrink-0" style={{ tintColor: iconTint() }} />}
+        {(ic) => <UiIcon src={ic()} size={18} color={iconTint()} />}
       </If>
       <Text class={labelStyle()} style={{ numberOfLines: 1 }}>
         {props.label}
@@ -302,7 +786,7 @@ export function CompactButton(props: CompactButtonProps) {
       }`}
     >
       <If when={props.icon}>
-        {(ic) => <Image src={ic()} class="h-4 w-4 shrink-0" style={{ tintColor: iconTint() }} />}
+        {(ic) => <UiIcon src={ic()} size={16} color={iconTint()} />}
       </If>
       <Text
         class={`text-[13px] font-semibold ${textClass()}`}
@@ -451,11 +935,7 @@ export function AppSelect(props: AppSelectProps) {
           <Text class="flex-1 min-w-0 line-clamp-1 text-[15px] font-medium text-foreground">
             {selectedTitle()}
           </Text>
-          <Image
-            src={chevronDownIcon}
-            class="h-4 w-4 shrink-0"
-            style={{ tintColor: token("muted-foreground") }}
-          />
+          <UiIcon src={chevronDownIcon} size={16} color={token("muted-foreground")} />
         </View>
       }
     />
@@ -556,11 +1036,7 @@ export function SearchBar(props: SearchBarProps) {
         props.class ?? ""
       }`}
     >
-      <Image
-        src={searchIcon}
-        class="h-4 w-4 shrink-0"
-        style={{ tintColor: token("muted-foreground") }}
-      />
+      <UiIcon src={searchIcon} size={16} color={token("muted-foreground")} />
       <Input
         testID={props.testID}
         value={props.value}
@@ -578,11 +1054,7 @@ export function SearchBar(props: SearchBarProps) {
           accessibilityLabel="清除搜索"
           class="shrink-0 h-6 w-6 items-center justify-center rounded-full bg-input active:opacity-75"
         >
-          <Image
-            src={xIcon}
-            class="h-3.5 w-3.5 shrink-0"
-            style={{ tintColor: token("muted-foreground") }}
-          />
+          <UiIcon src={xIcon} size={14} color={token("muted-foreground")} />
         </Button>
       </If>
     </View>
@@ -613,7 +1085,7 @@ export function GroupedRow(props: {
   class?: string;
 }) {
   const border = () => (props.last ? "" : "border-b border-border");
-  const sel = () => (props.selected ? "bg-primary/12" : "");
+  const sel = () => (props.selected ? "bg-accent" : "");
   const cls = () => `min-h-[52px] px-4 py-3 ${border()} ${sel()} ${props.class ?? ""}`;
 
   if (props.onPress) {
@@ -647,7 +1119,7 @@ export interface SurfaceCardProps {
 export function SurfaceCard(props: SurfaceCardProps) {
   const baseClass = () =>
     `rounded-2xl p-4 gap-3 ${
-      props.selected ? "bg-primary/12" : "bg-card"
+      props.selected ? "bg-accent" : "bg-card"
     } ${props.class ?? ""}`;
 
   if (props.onPress) {
@@ -707,38 +1179,6 @@ function extractAvatarMonogram(title: string): string {
   return first.toUpperCase();
 }
 
-function avatarColorForCategory(cat: ItemCategory | "email", title: string): string {
-  if (cat === "email") {
-    const emailTokens = [
-      token("chart-1"),
-      token("chart-5"),
-      token("chart-4"),
-      token("chart-2"),
-      token("chart-3"),
-    ];
-    let hash = 0;
-    for (let i = 0; i < title.length; i++) {
-      hash = (hash * 31 + title.charCodeAt(i)) >>> 0;
-    }
-    return emailTokens[hash % emailTokens.length];
-  }
-  switch (cat) {
-    case "api_credential":
-      return token("chart-4");
-    case "ssh_key":
-      return token("muted-foreground");
-    case "card":
-      return token("chart-2");
-    case "identity":
-      return token("chart-5");
-    case "secure_note":
-      return token("chart-3");
-    case "login":
-    default:
-      return token("chart-1");
-  }
-}
-
 export interface ItemAvatarProps {
   title: string;
   category?: ItemCategory | "email";
@@ -747,7 +1187,6 @@ export interface ItemAvatarProps {
 }
 
 export function ItemAvatar(props: ItemAvatarProps) {
-  const bgColor = () => avatarColorForCategory(props.category ?? "login", props.title);
   const boxClass = () =>
     props.size === "sm"
       ? "h-9 w-9 rounded-[10px]"
@@ -756,10 +1195,9 @@ export function ItemAvatar(props: ItemAvatarProps) {
 
   return (
     <View
-      class={`shrink-0 ${boxClass()} items-center justify-center ${props.class ?? ""}`}
-      style={{ backgroundColor: bgColor() }}
+      class={`shrink-0 ${boxClass()} bg-input border border-border items-center justify-center ${props.class ?? ""}`}
     >
-      <Text class={`${textClass()} font-bold text-primary-foreground`}>
+      <Text class={`${textClass()} font-semibold text-foreground`}>
         {extractAvatarMonogram(props.title)}
       </Text>
     </View>
@@ -849,8 +1287,8 @@ export function ScreenHeader(props: ScreenHeaderProps) {
           <PageTitle>{props.title}</PageTitle>
           <If when={props.badge}>
             {(b) => (
-              <View class="shrink-0 rounded-full bg-primary/12 px-3 py-1">
-                <CaptionText numberOfLines={1} class="text-primary">
+              <View class="shrink-0 rounded-full bg-muted px-3 py-1">
+                <CaptionText numberOfLines={1} class="text-muted-foreground">
                   {b()}
                 </CaptionText>
               </View>
