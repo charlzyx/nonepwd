@@ -219,7 +219,7 @@ publish_release() {
     gh release create "${create_args[@]}"
   fi
 
-  gh release view "$TAG" --json tagName,name,isLatest,isPrerelease,url,assets
+  gh release view "$TAG" --json tagName,name,isDraft,isPrerelease,url,assets
 }
 
 case "$MODE" in
