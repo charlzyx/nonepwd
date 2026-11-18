@@ -12,7 +12,8 @@
     "dev:web": "pnpm --filter @nonepwd/web dev",
     "test": "vitest run",
     "typecheck": "pnpm -r typecheck",
-    "np": "./dist/bin/np"
+    "np": "./dist/bin/np",
+    "release:local": "bash scripts/release-local.sh"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",

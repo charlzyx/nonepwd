@@ -8,14 +8,7 @@ on:
         required: false
         default: false
         type: boolean
-  push:
-    branches:
-      - main
-    paths:
-      - 'apps/**'
-      - 'crates/**'
-      - 'packages/extension/**'
-      - '.github/workflows/clients.yml'
+  # Re-enable push trigger once Actions quota resets or repo is public.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

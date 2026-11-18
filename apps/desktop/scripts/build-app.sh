@@ -38,10 +38,11 @@ if [ ! -f "$DYLIB_SRC" ]; then
 fi
 
 stop_running_app() {
-  if pgrep -x NonePwd >/dev/null 2>&1; then
-    pkill -x NonePwd || true
+  local target_bin="$APP_DIR/Contents/MacOS/NonePwd"
+  if pgrep -f "$target_bin" >/dev/null 2>&1; then
+    pkill -f "$target_bin" || true
     for _ in $(seq 1 20); do
-      pgrep -x NonePwd >/dev/null 2>&1 || break
+      pgrep -f "$target_bin" >/dev/null 2>&1 || break
       sleep 0.1
     done
   fi
