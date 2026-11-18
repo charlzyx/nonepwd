@@ -55,17 +55,17 @@ const StandaloneVaultGuide: React.FC<{ onBackHome: () => void }> = ({ onBackHome
               Self-Hosted Quickstart
             </div>
             <h1 className="mt-3 text-3xl font-semibold tracking-tight text-foreground">
-              启动你的私有 nonepwd 密码库
+              启动你的私有密码库
             </h1>
             <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-              当前访问的是公开官网，从不托管任何用户密文或密钥。请在本地或自有服务器一条命令启动属于你的零知识 Vault 实例。
+              公开官网不托管任何密文或密钥。选择以下任一方式在本地或自有域名启动实例。
             </p>
 
             <div className="mt-8 grid grid-cols-1 gap-px border border-border/70 bg-border/70">
               <div className="bg-background p-5">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="font-mono text-xs font-medium text-foreground">
-                    01A · Cloudflare Worker + D1 + R2（绑定自有域名免服务器）
+                    01A · Cloudflare Worker + D1 + R2
                   </span>
                   <CopyButton
                     value={`pnpm run build:rust && pnpm run build:cf-server
@@ -79,14 +79,14 @@ cd packages/cf-server && pnpm run db:migrate:remote && pnpm run deploy`}
 cd packages/cf-server && pnpm run db:migrate:remote && pnpm run deploy`}
                 </pre>
                 <p className="mt-2 text-xs text-muted-foreground">
-                  将 Web Vault、D1 数据库、R2 快照备份、Durable Objects WebSocket 与域名 Email Routing 收信全部部署到你自己的 Cloudflare 域名。
+                  免服务器部署至自有域名，集成 D1 密文库、Email Routing 与 R2 快照。
                 </p>
               </div>
 
               <div className="bg-background p-5">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="font-mono text-xs font-medium text-foreground">
-                    01B · 启动本地 Rust 单二进制零知识服务端
+                    01B · 本地 Rust 单二进制服务端
                   </span>
                   <CopyButton value="np server" label="复制" variant="minimal" />
                 </div>
@@ -94,14 +94,14 @@ cd packages/cf-server && pnpm run db:migrate:remote && pnpm run deploy`}
                   np server
                 </pre>
                 <p className="mt-2 text-xs text-muted-foreground">
-                  默认在 127.0.0.1:8787 托管本地 SQLite 密文库、Web 管理台与 WebSocket 实时推送。
+                  在 127.0.0.1:8787 运行内置 SQLite 密文库与 Web 管理台。
                 </p>
               </div>
 
               <div className="bg-background p-5">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="font-mono text-xs font-medium text-foreground">
-                    02 · 安装原生 Rust CLI (`np`)
+                    02 · 安装原生 np CLI
                   </span>
                   <CopyButton value={cliInstallCmd} label="复制" variant="minimal" />
                 </div>
