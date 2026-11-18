@@ -73,10 +73,17 @@ export const EmailOtpView: React.FC<EmailOtpViewProps> = ({
     for (const acc of imapAccounts) {
       for (const addr of extractEmailAddresses(acc.username)) {
         if (!addr) continue;
-        const label = acc.label?.trim();
+        const rawLabel = acc.label?.trim();
+        const localPart = addr.split('@')[0]?.toLowerCase();
+        const cleanLabel =
+          rawLabel &&
+          rawLabel.toLowerCase() !== addr &&
+          rawLabel.toLowerCase() !== localPart
+            ? rawLabel
+            : undefined;
         map.set(addr, {
           address: addr,
-          label: label && label.toLowerCase() !== addr ? label : undefined,
+          label: cleanLabel,
           count: 0,
         });
       }
@@ -92,7 +99,9 @@ export const EmailOtpView: React.FC<EmailOtpViewProps> = ({
         }
       }
     }
-    return Array.from(map.values());
+    return Array.from(map.values()).sort(
+      (a, b) => (b.count > 0 ? 1 : 0) - (a.count > 0 ? 1 : 0)
+    );
   }, [emails, imapAccounts]);
 
   const effectiveMailbox = mailboxes.some((m) => m.address === selectedMailbox)

@@ -468,7 +468,7 @@ public struct MainWorkspaceView: View {
             }
         }
         .navigationTitle(store.currentDestinationTitle)
-        .navigationSubtitle(store.currentDestinationSubtitle)
+        .navigationSubtitle(contentColumnSubtitle)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if store.destination == .emailOtp {
@@ -628,39 +628,84 @@ public struct MainWorkspaceView: View {
         return nil
     }
 
-    private var distinctMailboxes: [(address: String, label: String?)] {
-        var result: [(address: String, label: String?)] = []
+    private func cleanMailboxLabel(_ rawLabel: String?, for address: String) -> String? {
+        guard let lbl = rawLabel?.nilIfBlank else { return nil }
+        if lbl.caseInsensitiveCompare(address) == .orderedSame {
+            return nil
+        }
+        if let localPart = address.split(separator: "@").first.map(String.init),
+           lbl.caseInsensitiveCompare(localPart) == .orderedSame
+        {
+            return nil
+        }
+        return lbl
+    }
+
+    private func emailMatchesMailbox(_ email: DecryptedEmailPayload, address: String) -> Bool {
+        if receivingMailbox(for: email) == address { return true }
+        if let to = email.to.nilIfBlank, normalizeMailboxAddress(to) == address {
+            return true
+        }
+        return false
+    }
+
+    private var distinctMailboxes: [(address: String, label: String?, count: Int)] {
+        var entries: [(address: String, label: String?, index: Int)] = []
         var seen = Set<String>()
 
         for acct in store.imapAccounts {
             let norm = normalizeMailboxAddress(acct.username)
             guard !norm.isEmpty, !seen.contains(norm) else { continue }
             seen.insert(norm)
-            result.append((address: norm, label: acct.label.nilIfBlank))
+            entries.append((
+                address: norm,
+                label: cleanMailboxLabel(acct.label, for: norm),
+                index: entries.count
+            ))
         }
 
         for email in store.emails {
             if let m = receivingMailbox(for: email), !seen.contains(m) {
                 seen.insert(m)
-                result.append((address: m, label: nil))
+                entries.append((address: m, label: nil, index: entries.count))
             }
         }
 
-        return result
+        let counted = entries.map { item -> (address: String, label: String?, count: Int, index: Int) in
+            let cnt = store.emails.reduce(into: 0) { acc, email in
+                if emailMatchesMailbox(email, address: item.address) {
+                    acc += 1
+                }
+            }
+            return (address: item.address, label: item.label, count: cnt, index: item.index)
+        }
+
+        return counted
+            .sorted { lhs, rhs in
+                let lhsNonEmpty = lhs.count > 0 ? 1 : 0
+                let rhsNonEmpty = rhs.count > 0 ? 1 : 0
+                if lhsNonEmpty != rhsNonEmpty {
+                    return lhsNonEmpty > rhsNonEmpty
+                }
+                return lhs.index < rhs.index
+            }
+            .map { (address: $0.address, label: $0.label, count: $0.count) }
+    }
+
+    private func mailboxDisplayTitle(address: String, label: String?) -> String {
+        if let lbl = cleanMailboxLabel(label, for: address) {
+            return "\(lbl) · \(address)"
+        }
+        return address
     }
 
     private func mailboxBadgeText(for email: DecryptedEmailPayload) -> String? {
         guard let addr = receivingMailbox(for: email) else { return nil }
-        if let acct = store.imapAccounts.first(where: { normalizeMailboxAddress($0.username) == addr }),
-           let lbl = acct.label.nilIfBlank,
-           lbl.caseInsensitiveCompare(addr) != .orderedSame
-        {
-            return "\(lbl) · \(addr)"
-        }
-        return addr
+        let rawLabel = store.imapAccounts.first(where: { normalizeMailboxAddress($0.username) == addr })?.label
+        return mailboxDisplayTitle(address: addr, label: rawLabel)
     }
 
-    private var emailInboxList: some View {
+    private var filteredInboxEmails: [DecryptedEmailPayload] {
         let mailboxes = distinctMailboxes
         let activeFilter: String? = {
             guard let sel = selectedMailboxFilter,
@@ -668,50 +713,155 @@ public struct MainWorkspaceView: View {
             else { return nil }
             return sel
         }()
-        let displayedEmails: [DecryptedEmailPayload] = {
-            guard let activeFilter else { return store.emails }
-            return store.emails.filter { email in
-                if receivingMailbox(for: email) == activeFilter { return true }
-                if let to = email.to.nilIfBlank, normalizeMailboxAddress(to) == activeFilter {
-                    return true
-                }
-                return false
+
+        var list = store.emails
+        if let activeFilter {
+            list = list.filter { emailMatchesMailbox($0, address: activeFilter) }
+        }
+
+        let q = store.searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !q.isEmpty {
+            list = list.filter { email in
+                email.senderDomain.lowercased().contains(q)
+                    || email.from.lowercased().contains(q)
+                    || email.subject.lowercased().contains(q)
+                    || email.to.lowercased().contains(q)
+                    || (email.envelopeTo?.lowercased().contains(q) ?? false)
+                    || (email.otpCode?.lowercased().contains(q) ?? false)
+                    || email.snippet.lowercased().contains(q)
             }
-        }()
+        }
+        return list
+    }
+
+    private var contentColumnSubtitle: String {
+        if store.destination == .emailOtp {
+            let shown = filteredInboxEmails.count
+            let total = store.emails.count
+            if shown != total {
+                return "\(shown) / \(total) 个项目"
+            }
+            return "\(total)个项目"
+        }
+        return store.currentDestinationSubtitle
+    }
+
+    private var emailInboxList: some View {
+        let mailboxes = distinctMailboxes
+        let activeBox = mailboxes.first(where: { $0.address == selectedMailboxFilter })
+        let activeFilter = activeBox?.address
+        let displayedEmails = filteredInboxEmails
 
         return VStack(spacing: 0) {
             if store.imapAccounts.filter(\.enabled).isEmpty && !store.imapConfig.enabled {
                 imapDisabledBanner
             }
 
-            if !store.emails.isEmpty && mailboxes.count > 1 {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        mailboxFilterPill(
-                            title: "全部邮箱",
-                            isSelected: activeFilter == nil
-                        ) {
+            if mailboxes.count > 1 {
+                HStack(spacing: 6) {
+                    Menu {
+                        Button {
                             selectedMailboxFilter = nil
-                        }
-
-                        ForEach(mailboxes, id: \.address) { box in
-                            let pillTitle: String = {
-                                if let lbl = box.label, lbl.caseInsensitiveCompare(box.address) != .orderedSame {
-                                    return "\(lbl) · \(box.address)"
+                        } label: {
+                            HStack {
+                                if activeFilter == nil {
+                                    Image(systemName: "checkmark")
                                 }
-                                return box.address
-                            }()
-                            mailboxFilterPill(
-                                title: pillTitle,
-                                isSelected: activeFilter == box.address
-                            ) {
-                                selectedMailboxFilter = (activeFilter == box.address) ? nil : box.address
+                                Text("全部邮箱 (\(store.emails.count))")
                             }
                         }
+
+                        Divider()
+
+                        ForEach(mailboxes, id: \.address) { box in
+                            let title = mailboxDisplayTitle(address: box.address, label: box.label)
+                            Button {
+                                selectedMailboxFilter = box.address
+                            } label: {
+                                HStack {
+                                    if activeFilter == box.address {
+                                        Image(systemName: "checkmark")
+                                    }
+                                    Text("\(title) (\(box.count))")
+                                }
+                            }
+                        }
+
+                        Divider()
+
+                        Button {
+                            store.showImapSheet = true
+                        } label: {
+                            Label("管理 IMAP 收信邮箱…", systemImage: "gearshape")
+                        }
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: activeFilter == nil ? "tray.2" : "line.3.horizontal.decrease.circle.fill")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(activeFilter == nil ? Color.secondary : Color.accentColor)
+
+                            Text(
+                                activeBox.map { mailboxDisplayTitle(address: $0.address, label: $0.label) }
+                                    ?? "全部邮箱"
+                            )
+                            .font(.system(size: 12, weight: activeFilter == nil ? .medium : .semibold))
+                            .foregroundStyle(activeFilter == nil ? Color.primary : Color.accentColor)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                            Spacer(minLength: 4)
+
+                            Text("\(displayedEmails.count)")
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 5.5)
+                                .padding(.vertical, 1.5)
+                                .background(
+                                    Capsule()
+                                        .fill(Color.primary.opacity(0.07))
+                                )
+
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 10)
+                        .frame(height: 28)
+                        .frame(maxWidth: .infinity)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(activeFilter == nil ? Color.primary.opacity(0.055) : Color.accentColor.opacity(0.11))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .strokeBorder(
+                                    activeFilter == nil ? Color.primary.opacity(0.08) : Color.accentColor.opacity(0.28),
+                                    lineWidth: 0.5
+                                )
+                        )
+                        .contentShape(Rectangle())
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .help("按接收邮箱筛选验证码邮件")
+
+                    if activeFilter != nil {
+                        Button {
+                            selectedMailboxFilter = nil
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 24, height: 28)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("清除邮箱筛选，显示全部邮箱")
+                    }
                 }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+
                 Divider()
             }
 
@@ -750,11 +900,14 @@ public struct MainWorkspaceView: View {
                     Image(systemName: "envelope.open")
                         .font(.system(size: 32))
                         .foregroundStyle(.tertiary)
-                    Text("该邮箱暂无收件验证码")
+                    Text(activeFilter == nil ? "未找到匹配的收件验证码" : "该邮箱暂无收件验证码")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.secondary)
-                    Button("查看全部邮箱") {
+                    Button(activeFilter == nil ? "清除搜索" : "查看全部邮箱") {
                         selectedMailboxFilter = nil
+                        if activeFilter == nil {
+                            store.searchText = ""
+                        }
                     }
                     .buttonStyle(ApplePillButtonStyle(isProminent: false, height: 28, cornerRadius: 7))
                 }
@@ -773,6 +926,10 @@ public struct MainWorkspaceView: View {
                                 onSelect: {
                                     store.selectedEmailId = email.id
                                 },
+                                onCopyOtp: { code in
+                                    store.selectedEmailId = email.id
+                                    store.copySecret(code, label: "邮箱验证码")
+                                },
                                 onDelete: {
                                     Task { await store.deleteEmail(email) }
                                 }
@@ -785,22 +942,6 @@ public struct MainWorkspaceView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
-    }
-
-    private func mailboxFilterPill(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 11.5, weight: isSelected ? .semibold : .regular))
-                .foregroundStyle(isSelected ? Color.white : Color.primary)
-                .lineLimit(1)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4.5)
-                .background(
-                    Capsule()
-                        .fill(isSelected ? Color.accentColor : Color.primary.opacity(0.065))
-                )
-        }
-        .buttonStyle(.plain)
     }
 
     private var imapDisabledBanner: some View {
@@ -1165,90 +1306,116 @@ private struct EmailRowView: View {
     let isSelected: Bool
     let showDivider: Bool
     let onSelect: () -> Void
+    let onCopyOtp: (String) -> Void
     let onDelete: () -> Void
 
     @State private var isHovered = false
+    @State private var isOtpHovered = false
 
     private var senderTitle: String {
         email.senderDomain.nilIfBlank ?? email.from
     }
 
     var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: 12) {
-                SquircleAvatar(
-                    title: senderTitle,
-                    category: .login,
-                    urlHint: email.senderDomain.nilIfBlank ?? email.from,
-                    size: 32
-                )
+        HStack(spacing: 10) {
+            Button(action: onSelect) {
+                HStack(spacing: 12) {
+                    SquircleAvatar(
+                        title: senderTitle,
+                        category: .login,
+                        urlHint: email.senderDomain.nilIfBlank ?? email.from,
+                        size: 32
+                    )
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(senderTitle)
-                        .font(.system(size: 13.5, weight: .medium))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(senderTitle)
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
 
-                    Text(email.subject.nilIfBlank ?? "（无主题）")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-
-                    if let mailboxBadge = mailboxBadge?.nilIfBlank {
-                        Text("→ \(mailboxBadge)")
-                            .font(.system(size: 10.5))
+                        Text(email.subject.nilIfBlank ?? "（无主题）")
+                            .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                            .truncationMode(.middle)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                    .fill(Color.primary.opacity(0.06))
-                            )
+
+                        if let mailboxBadge = mailboxBadge?.nilIfBlank {
+                            Text("→ \(mailboxBadge)")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .fill(Color.primary.opacity(0.06))
+                                )
+                        }
                     }
+
+                    Spacer(minLength: 4)
                 }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
 
-                Spacer(minLength: 6)
-
+            HStack(spacing: 5) {
                 if isHovered {
                     Button(action: onDelete) {
                         Image(systemName: "trash")
-                            .font(.system(size: 12.5))
+                            .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                             .frame(width: 24, height: 24)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(Color.primary.opacity(0.05))
+                            )
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help("删除邮件")
-                } else if let code = email.otpCode?.nilIfBlank {
-                    Text(code)
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Color(red: 0.14, green: 0.62, blue: 0.30))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2.5)
+                }
+
+                if let code = email.otpCode?.nilIfBlank {
+                    Button {
+                        onCopyOtp(code)
+                    } label: {
+                        HStack(spacing: 3.5) {
+                            Text(code)
+                                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 9.5, weight: .medium))
+                        }
+                        .foregroundStyle(Color(red: 0.12, green: 0.58, blue: 0.28))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3.5)
                         .background(
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .fill(Color.green.opacity(0.14))
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.green.opacity(isOtpHovered ? 0.24 : 0.14))
                         )
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { hovering in
+                        isOtpHovered = hovering
+                    }
+                    .help("点击复制验证码 \(code)")
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, mailboxBadge == nil ? 0 : 5)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(
-                        isSelected
-                            ? Color.primary.opacity(0.09)
-                            : (isHovered ? Color.primary.opacity(0.04) : Color.clear)
-                    )
-            )
-            .padding(.horizontal, 8)
-            .padding(.vertical, 2)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 10)
+        .padding(.vertical, mailboxBadge == nil ? 0 : 5)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(
+                    isSelected
+                        ? Color.primary.opacity(0.09)
+                        : (isHovered ? Color.primary.opacity(0.04) : Color.clear)
+                )
+        )
+        .padding(.horizontal, 8)
+        .padding(.vertical, 2)
         .frame(height: mailboxBadge == nil ? 56 : 68)
         .overlay(alignment: .bottom) {
             Rectangle()
@@ -1261,6 +1428,12 @@ private struct EmailRowView: View {
             isHovered = hovering
         }
         .contextMenu {
+            if let code = email.otpCode?.nilIfBlank {
+                Button("复制验证码 \(code)") {
+                    onCopyOtp(code)
+                }
+                Divider()
+            }
             Button("删除邮件", role: .destructive, action: onDelete)
         }
     }

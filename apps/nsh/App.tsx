@@ -508,9 +508,14 @@ function App() {
       for (const addr of extractAddressesFromHeader(acc.username)) {
         if (!addr) continue;
         const lbl = acc.label?.trim();
+        const localPart = addr.split("@")[0]?.toLowerCase();
+        const cleanLabel =
+          lbl && lbl.toLowerCase() !== addr && lbl.toLowerCase() !== localPart
+            ? lbl
+            : undefined;
         map.set(addr, {
           address: addr,
-          label: lbl && lbl.toLowerCase() !== addr ? lbl : undefined,
+          label: cleanLabel,
           count: 0,
         });
       }
@@ -524,7 +529,9 @@ function App() {
         else map.set(addr, { address: addr, count: 1 });
       }
     }
-    return Array.from(map.values());
+    return Array.from(map.values()).sort(
+      (a, b) => (b.count > 0 ? 1 : 0) - (a.count > 0 ? 1 : 0)
+    );
   });
 
   const filteredEmails = computed(() => {

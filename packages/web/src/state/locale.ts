@@ -41,13 +41,27 @@ export function detectInitialLocale(): Locale {
   return 'en';
 }
 
+const SEO_META: Record<Locale, { title: string; description: string }> = {
+  zh: {
+    title: 'nonepwd — 免费开源密码管理器 · 自建 1Password 平替与实时验证码',
+    description:
+      '免费开源的自建零知识密码管理器（1Password / Bitwarden 零订阅费平替）。纯 Rust 加密核心，内置 2FA 验证器、多邮箱实时接码、域名别名与 op:// 兼容 CLI，支持 macOS、iOS、Android 与浏览器扩展。',
+  },
+  en: {
+    title: 'nonepwd — Free Open-Source Password Manager & Self-Hosted 1Password Alternative',
+    description:
+      'Free open-source, self-hosted password manager and 1Password alternative. Pure-Rust zero-knowledge AES-256-GCM vault with 2FA TOTP authenticator, live email OTPs, masked aliases, op:// compatible CLI, macOS, iOS, Android, and browser extension.',
+  },
+};
+
 function applyDocumentLocale(locale: Locale): void {
   if (typeof document === 'undefined') return;
   document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
-  document.title =
-    locale === 'zh'
-      ? 'nonepwd — 私有化零知识密码库与实时验证码引擎'
-      : 'nonepwd — Self-Hosted Zero-Knowledge Vault & Live OTP Engine';
+  document.title = SEO_META[locale].title;
+  const descEl = document.querySelector('meta[name="description"]');
+  if (descEl) {
+    descEl.setAttribute('content', SEO_META[locale].description);
+  }
 }
 
 export function useLocale() {

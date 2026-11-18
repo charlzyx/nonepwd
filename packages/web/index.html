@@ -1,24 +1,97 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>nonepwd — 私有化零知识密码库与实时验证码引擎</title>
+    <title>nonepwd — Free Open-Source Password Manager &amp; 1Password Alternative | 免费自建密码管理器</title>
     <meta
       name="description"
-      content="nonepwd v0.2.0：基于纯 Rust 核心的自建零知识密码管理器与实时验证码引擎，涵盖双密钥 E2EE、通用多账号 IMAP & Cloudflare Email Routing、macOS / Android AutofillService / iOS / Chrome MV3 扩展与 op 兼容 np CLI。"
+      content="Free open-source, self-hosted password manager and 1Password alternative. Zero-knowledge AES-256-GCM vault, 2FA authenticator, live email OTPs, op:// CLI, macOS, iOS, Android &amp; Chrome extension. 免费开源自建零知识密码管理器与实时验证码引擎。"
     />
+    <meta
+      name="keywords"
+      content="free password manager, 1Password alternative, free 1Password, open source password manager, self-hosted password manager, Bitwarden alternative, Vaultwarden alternative, zero-knowledge vault, 2FA authenticator, TOTP, live email OTP, op CLI alternative, Cloudflare Workers password manager, 免费密码管理器, 1Password平替, 1Password免费替代, 开源密码管理器, 自建密码库, 零知识加密, 实时邮箱验证码"
+    />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="nonepwd — 私有化零知识密码库与实时验证码引擎" />
+    <meta property="og:site_name" content="nonepwd" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:locale:alternate" content="zh_CN" />
+    <meta
+      property="og:title"
+      content="nonepwd — Free Open-Source Password Manager &amp; Self-Hosted 1Password Alternative"
+    />
     <meta
       property="og:description"
-      content="一个私有实例，接管你的全部密码、2FA 与实时邮箱验证码。覆盖 macOS SwiftUI、Android 系统级自动填充、iOS、Chrome MV3 框选扫码扩展与纯 Rust np CLI。"
+      content="Zero-knowledge password vault, 2FA authenticator, live multi-mailbox OTPs, masked aliases, and op:// compatible CLI. Self-host free on Cloudflare Workers or a single Rust binary."
+    />
+    <meta name="twitter:card" content="summary" />
+    <meta
+      name="twitter:title"
+      content="nonepwd — Free Open-Source Password Manager &amp; 1Password Alternative"
+    />
+    <meta
+      name="twitter:description"
+      content="Self-hosted zero-knowledge password manager with live email OTPs, 2FA TOTP, macOS/iOS/Android apps, MV3 extension, and op:// CLI."
     />
     <link
       rel="icon"
       type="image/svg+xml"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' fill='none'%3E%3Crect width='64' height='64' rx='14.5' fill='%231C1C1F'/%3E%3Cg transform='translate(20.5 22.5)'%3E%3Ccircle cx='0' cy='0' r='8.2' fill='%23F5CC2E'/%3E%3Cpath d='M-3.1 5.5 L-3.1 19.3 L-0.4 22.0 Q0 22.5 0.5 22.0 L3.3 19.2 L3.3 17.6 L5.6 15.3 Q6.2 14.7 5.6 14.1 L3.6 12.1 L3.6 11.4 L5.8 9.2 Q6.4 8.6 5.8 8.0 L3.1 5.3 Z' fill='%23F5CC2E' stroke='%23F5CC2E' stroke-width='0.6' stroke-linejoin='round'/%3E%3Ccircle cx='0' cy='-2.2' r='2.2' fill='%231C1C1F'/%3E%3C/g%3E%3Cg transform='translate(32 26)'%3E%3Ccircle cx='0' cy='0' r='8.2' fill='%233DCC61'/%3E%3Cpath d='M-3.1 5.5 L-3.1 19.3 L-0.4 22.0 Q0 22.5 0.5 22.0 L3.3 19.2 L3.3 17.6 L5.6 15.3 Q6.2 14.7 5.6 14.1 L3.6 12.1 L3.6 11.4 L5.8 9.2 Q6.4 8.6 5.8 8.0 L3.1 5.3 Z' fill='%233DCC61' stroke='%233DCC61' stroke-width='0.6' stroke-linejoin='round'/%3E%3Ccircle cx='0' cy='-2.2' r='2.2' fill='%231C1C1F'/%3E%3C/g%3E%3Cg transform='translate(43.5 22.5)'%3E%3Ccircle cx='0' cy='0' r='8.2' fill='%233D8AF9'/%3E%3Cpath d='M-3.1 5.5 L-3.1 19.3 L-0.4 22.0 Q0 22.5 0.5 22.0 L3.3 19.2 L3.3 17.6 L5.6 15.3 Q6.2 14.7 5.6 14.1 L3.6 12.1 L3.6 11.4 L5.8 9.2 Q6.4 8.6 5.8 8.0 L3.1 5.3 Z' fill='%233D8AF9' stroke='%233D8AF9' stroke-width='0.6' stroke-linejoin='round'/%3E%3Ccircle cx='0' cy='-2.2' r='2.2' fill='%231C1C1F'/%3E%3C/g%3E%3C/svg%3E"
     />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "SoftwareApplication",
+            "name": "nonepwd",
+            "applicationCategory": "SecurityApplication",
+            "operatingSystem": "macOS, iOS, Android, Linux, Web, Chrome",
+            "isAccessibleForFree": true,
+            "license": "https://opensource.org/licenses/MIT",
+            "softwareVersion": "0.2.0",
+            "codeRepository": "https://github.com/charlzyx/nonepwd",
+            "downloadUrl": "https://github.com/charlzyx/nonepwd/releases/latest",
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "USD"
+            },
+            "description": "Free open-source, self-hosted zero-knowledge password manager and 1Password alternative with 2FA TOTP authenticator, live email OTPs, masked aliases, and op:// compatible Rust CLI."
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "Is nonepwd a free open-source 1Password alternative?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Yes. nonepwd is MIT-licensed and free to self-host on a single Rust binary or Cloudflare Workers free tier (including *.workers.dev), with dual-key zero-knowledge encryption and an op:// compatible CLI."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Can the server ever see my passwords or emails?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "No. Master Password and NP3 Secret Key stay in local memory, vaults use per-vault AES-256-GCM keys, and incoming OTP emails are sealed with X25519."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "How do I migrate from 1Password, Chrome, or Google Authenticator?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Import 1Password or Chrome CSV exports in bulk, and scan Google Authenticator migration QR codes via desktop screen snip, webcam, or mobile camera."
+                }
+              }
+            ]
+          }
+        ]
+      }
+    </script>
     <script>
       try {
         var saved = localStorage.getItem('nonepwd.theme');
@@ -34,8 +107,8 @@
         var isZh = pick.indexOf('zh') === 0;
         document.documentElement.lang = isZh ? 'zh-CN' : 'en';
         document.title = isZh
-          ? 'nonepwd — 私有化零知识密码库与实时验证码引擎'
-          : 'nonepwd — Self-Hosted Zero-Knowledge Vault & Live OTP Engine';
+          ? 'nonepwd — 免费开源密码管理器 · 自建 1Password 平替与实时验证码'
+          : 'nonepwd — Free Open-Source Password Manager & Self-Hosted 1Password Alternative';
       } catch (e) {}
     </script>
   </head>

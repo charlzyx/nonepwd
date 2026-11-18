@@ -12,6 +12,7 @@ import {
   Layers,
   Lock,
   MailCheck,
+  Monitor,
   Moon,
   QrCode,
   Shield,
@@ -77,6 +78,7 @@ const COPY: Record<
       heading: string;
       cards: {
         macos: { desc: string; cta: string };
+        windows: { desc: string; cta: string };
         android: { desc: string; cta: string };
         ios: { desc: string; ipa: string; sim: string };
         ext: { title: string; desc: string; cta: string };
@@ -108,6 +110,7 @@ const COPY: Record<
       };
     };
     faq: Array<{ q: string; a: string }>;
+    footerTagline: string;
   }
 > = {
   zh: {
@@ -123,7 +126,7 @@ const COPY: Record<
       locked: '解锁密码库',
     },
     pill: {
-      standalone: `${RELEASE_TAG} · Zero-Knowledge · Self-Hosted`,
+      standalone: `${RELEASE_TAG} · 免费开源 · 自建零知识密码库`,
       uninitialized: `${RELEASE_TAG} · 实例就绪 · 待初始化`,
       unlocked: `${RELEASE_TAG} · Vault 已解锁`,
       locked: `${RELEASE_TAG} · 实例就绪 · 已锁定`,
@@ -172,6 +175,10 @@ const COPY: Record<
         macos: {
           desc: 'SwiftUI 原生，Touch ID、菜单栏接码与屏幕框选扫码。',
           cta: '下载 .zip',
+        },
+        windows: {
+          desc: '原生桌面客户端与全局自动填充，正在开发中。',
+          cta: '敬请期待',
         },
         android: {
           desc: '系统级自动填充服务、Keystore 加密缓存与相机扫码。',
@@ -270,6 +277,7 @@ curl -H "Authorization: Bearer my-connect-secret" \\
         a: '个人日常使用完全在 Workers、D1、R2 与 Email Routing 免费额度内，无需购买服务器或订阅服务。',
       },
     ],
+    footerTagline: '© 2026 nonepwd · 免费开源自建密码管理器',
   },
   en: {
     nav: { features: 'Features', clients: 'Downloads', cli: 'CLI', deploy: 'Deploy' },
@@ -284,7 +292,7 @@ curl -H "Authorization: Bearer my-connect-secret" \\
       locked: 'Unlock Vault',
     },
     pill: {
-      standalone: `${RELEASE_TAG} · Zero-Knowledge · Self-Hosted`,
+      standalone: `${RELEASE_TAG} · Free & Open-Source · Self-Hosted Password Manager`,
       uninitialized: `${RELEASE_TAG} · Instance Ready · Setup Required`,
       unlocked: `${RELEASE_TAG} · Vault Unlocked`,
       locked: `${RELEASE_TAG} · Instance Ready · Locked`,
@@ -333,6 +341,10 @@ curl -H "Authorization: Bearer my-connect-secret" \\
         macos: {
           desc: 'Native SwiftUI app with Touch ID, menu bar OTPs, and screen QR snip.',
           cta: 'Download .zip',
+        },
+        windows: {
+          desc: 'Native desktop app and global autofill, in development.',
+          cta: 'Coming Soon',
         },
         android: {
           desc: 'System AutofillService, Keystore-encrypted cache, and camera QR scan.',
@@ -431,6 +443,7 @@ curl -H "Authorization: Bearer my-connect-secret" \\
         a: 'Personal daily usage fits comfortably inside the free tiers of Workers, D1, R2, Durable Objects, and Email Routing.',
       },
     ],
+    footerTagline: '© 2026 nonepwd · Free Open-Source Self-Hosted Password Manager',
   },
 };
 
@@ -741,93 +754,118 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
               </a>
             </div>
 
-            <div className="mt-8 grid grid-cols-1 gap-px border border-border/70 bg-border/70 sm:grid-cols-2 lg:grid-cols-3">
-              {/* macOS */}
-              <div className="flex flex-col justify-between bg-background p-6 md:p-7">
-                <div>
-                  <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
-                    <span>MACOS 14+ · ARM64</span>
-                    <Laptop className="size-3.5" />
+            <div className="mt-8 border border-border/70">
+              <div className="grid grid-cols-1 gap-px bg-border/70 sm:grid-cols-2 lg:grid-cols-4">
+                {/* macOS */}
+                <div className="flex flex-col justify-between bg-background p-6 md:p-7">
+                  <div>
+                    <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+                      <span>MACOS 14+ · ARM64</span>
+                      <Laptop className="size-3.5" />
+                    </div>
+                    <h3 className="mt-3 text-sm font-medium text-foreground">macOS</h3>
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                      {t.clients.cards.macos.desc}
+                    </p>
                   </div>
-                  <h3 className="mt-3 text-sm font-medium text-foreground">macOS</h3>
-                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    {t.clients.cards.macos.desc}
-                  </p>
+                  <div className="mt-6">
+                    <a
+                      href={`${RELEASE_DOWNLOAD_BASE}/NonePwd-macos-arm64.zip`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
+                    >
+                      <Download className="size-3.5" />
+                      <span>{t.clients.cards.macos.cta}</span>
+                    </a>
+                  </div>
                 </div>
-                <div className="mt-6">
-                  <a
-                    href={`${RELEASE_DOWNLOAD_BASE}/NonePwd-macos-arm64.zip`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
-                  >
-                    <Download className="size-3.5" />
-                    <span>{t.clients.cards.macos.cta}</span>
-                  </a>
+
+                {/* Windows */}
+                <div className="flex flex-col justify-between bg-background p-6 md:p-7">
+                  <div>
+                    <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+                      <span>WINDOWS 10/11 · X64</span>
+                      <Monitor className="size-3.5" />
+                    </div>
+                    <h3 className="mt-3 text-sm font-medium text-foreground">Windows</h3>
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                      {t.clients.cards.windows.desc}
+                    </p>
+                  </div>
+                  <div className="mt-6">
+                    <span
+                      aria-disabled="true"
+                      className="inline-flex w-full cursor-not-allowed items-center justify-center rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground select-none"
+                    >
+                      {t.clients.cards.windows.cta}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Android */}
+                <div className="flex flex-col justify-between bg-background p-6 md:p-7">
+                  <div>
+                    <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+                      <span>ANDROID 8.0+ · AUTOFILL</span>
+                      <Smartphone className="size-3.5" />
+                    </div>
+                    <h3 className="mt-3 text-sm font-medium text-foreground">Android</h3>
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                      {t.clients.cards.android.desc}
+                    </p>
+                  </div>
+                  <div className="mt-6">
+                    <a
+                      href={`${RELEASE_DOWNLOAD_BASE}/NonePwd-android.apk`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
+                    >
+                      <Download className="size-3.5" />
+                      <span>{t.clients.cards.android.cta}</span>
+                    </a>
+                  </div>
+                </div>
+
+                {/* iOS */}
+                <div className="flex flex-col justify-between bg-background p-6 md:p-7">
+                  <div>
+                    <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+                      <span>IOS · IPA &amp; SIM</span>
+                      <Smartphone className="size-3.5" />
+                    </div>
+                    <h3 className="mt-3 text-sm font-medium text-foreground">iOS</h3>
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                      {t.clients.cards.ios.desc}
+                    </p>
+                  </div>
+                  <div className="mt-6 grid grid-cols-2 gap-2">
+                    <a
+                      href={`${RELEASE_DOWNLOAD_BASE}/NonePwd-ios-unsigned.ipa`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center justify-center gap-1 rounded-md border border-border bg-background px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
+                    >
+                      <Download className="size-3" />
+                      <span>{t.clients.cards.ios.ipa}</span>
+                    </a>
+                    <a
+                      href={`${RELEASE_DOWNLOAD_BASE}/NonePwd-ios-sim-arm64.app.zip`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center justify-center gap-1 rounded-md border border-border bg-background px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
+                    >
+                      <Download className="size-3" />
+                      <span>{t.clients.cards.ios.sim}</span>
+                    </a>
+                  </div>
                 </div>
               </div>
 
-              {/* Android */}
-              <div className="flex flex-col justify-between bg-background p-6 md:p-7">
-                <div>
-                  <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
-                    <span>ANDROID 8.0+ · AUTOFILL</span>
-                    <Smartphone className="size-3.5" />
-                  </div>
-                  <h3 className="mt-3 text-sm font-medium text-foreground">Android</h3>
-                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    {t.clients.cards.android.desc}
-                  </p>
-                </div>
-                <div className="mt-6">
-                  <a
-                    href={`${RELEASE_DOWNLOAD_BASE}/NonePwd-android.apk`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
-                  >
-                    <Download className="size-3.5" />
-                    <span>{t.clients.cards.android.cta}</span>
-                  </a>
-                </div>
-              </div>
-
-              {/* iOS */}
-              <div className="flex flex-col justify-between bg-background p-6 md:p-7">
-                <div>
-                  <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
-                    <span>IOS · IPA &amp; SIM</span>
-                    <Smartphone className="size-3.5" />
-                  </div>
-                  <h3 className="mt-3 text-sm font-medium text-foreground">iOS</h3>
-                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    {t.clients.cards.ios.desc}
-                  </p>
-                </div>
-                <div className="mt-6 grid grid-cols-2 gap-2">
-                  <a
-                    href={`${RELEASE_DOWNLOAD_BASE}/NonePwd-ios-unsigned.ipa`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center justify-center gap-1 rounded-md border border-border bg-background px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
-                  >
-                    <Download className="size-3" />
-                    <span>{t.clients.cards.ios.ipa}</span>
-                  </a>
-                  <a
-                    href={`${RELEASE_DOWNLOAD_BASE}/NonePwd-ios-sim-arm64.app.zip`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center justify-center gap-1 rounded-md border border-border bg-background px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
-                  >
-                    <Download className="size-3" />
-                    <span>{t.clients.cards.ios.sim}</span>
-                  </a>
-                </div>
-              </div>
-
-              {/* Browser Extension */}
-              <div id="extension" className="flex flex-col justify-between bg-background p-6 md:p-7">
+              <div className="grid grid-cols-1 gap-px border-t border-border/70 bg-border/70 md:grid-cols-3">
+                {/* Browser Extension */}
+                <div id="extension" className="flex flex-col justify-between bg-background p-6 md:p-7">
                 <div>
                   <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
                     <span>CHROME / ARC / BRAVE · MV3</span>
@@ -914,6 +952,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
                     <ArrowRight className="size-3.5" />
                   </button>
                 </div>
+              </div>
               </div>
             </div>
           </section>
@@ -1115,7 +1154,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
         <footer className="flex flex-wrap items-center justify-between gap-4 border-t border-border/70 px-5 py-10 text-xs text-muted-foreground md:px-10">
           <div className="flex items-center gap-2">
             <BrandMark className="size-5" />
-            <span>© 2026 nonepwd · Zero-Knowledge Self-Hosted Vault</span>
+            <span>{t.footerTagline}</span>
           </div>
 
           <div className="flex flex-wrap items-center gap-5 font-mono text-[11px]">

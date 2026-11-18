@@ -28,6 +28,7 @@
 | 平台 | 产物 / 安装 | 说明 |
 | :--- | :--- | :--- |
 | **macOS** | `NonePwd-macos-arm64.zip` | SwiftUI 原生桌面端（Touch ID、菜单栏实时 OTP、屏幕框选 2FA） |
+| **Windows** | 原生桌面客户端 | 敬请期待（现可用 Web Vault / 浏览器扩展 / `np` CLI） |
 | **Android** | `NonePwd-android.apk` | 含系统级 `AutofillService`、单屏解锁与相机扫码导入 |
 | **iOS** | `NonePwd-ios-unsigned.ipa` / `NonePwd-ios-sim-arm64.app.zip` | 零知识同步、实时 TOTP 与相机/相册扫码 |
 | **浏览器扩展** | `nonepwd-extension.zip` | Chrome / Arc / Brave / Edge MV3 扩展（自动填充 + 网页框选 2FA） |
