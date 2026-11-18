@@ -21,7 +21,7 @@ import {
   type TotpImportPlanItem,
   type VaultItemPayload,
 } from "./crypto";
-import qrcodeIcon from "./icons/qrcode.svg";
+import qrcodeIcon from "./icons/qrcode.png";
 import { decodeQrFromRgba } from "./qr-cpu";
 import {
   ActionButton,

@@ -69,6 +69,7 @@ export interface UnlockedSession {
   email: string;
   rootKeyBytes: Uint8Array;
   emailPrivateKeyPkcs8B64: string;
+  isDemo?: boolean;
 }
 
 export interface SyncStateResult {

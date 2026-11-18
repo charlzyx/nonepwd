@@ -90,10 +90,8 @@ jobs:
       - name: Package iOS unsigned IPA and Simulator app
         run: |
           WORK_DIR="$PWD"
-          mkdir -p "$WORK_DIR/dist-ios" "$WORK_DIR/dist-ios-sim" "$WORK_DIR/ipa-stage/Payload" "$WORK_DIR/release-assets"
-          nsh package --target ios -o "$WORK_DIR/dist-ios" apps/nsh
-          cp -R "$WORK_DIR/dist-ios/NonePwd.app" "$WORK_DIR/ipa-stage/Payload/"
-          (cd "$WORK_DIR/ipa-stage" && zip -qry "$WORK_DIR/release-assets/NonePwd-ios-unsigned.ipa" Payload)
+          mkdir -p "$WORK_DIR/dist-ios-sim" "$WORK_DIR/release-assets"
+          bash apps/nsh/scripts/package-ios.sh "$WORK_DIR/release-assets/NonePwd-ios-unsigned.ipa"
           nsh package --target ios-simulator -o "$WORK_DIR/dist-ios-sim" apps/nsh
           ditto -c -k --sequesterRsrc --keepParent "$WORK_DIR/dist-ios-sim/NonePwd.app" "$WORK_DIR/release-assets/NonePwd-ios-sim-arm64.app.zip"
 

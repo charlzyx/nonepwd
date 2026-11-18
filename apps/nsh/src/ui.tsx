@@ -16,9 +16,9 @@ import {
 import { Button, Input, Select, Sheet, Tab, Tabs, type SelectItem } from "nsh/base";
 import { Haptics } from "nsh/mobile";
 import type { ItemCategory } from "./crypto";
-import chevronDownIcon from "./icons/chevron-down.svg";
-import searchIcon from "./icons/search.svg";
-import xIcon from "./icons/x.svg";
+import chevronDownIcon from "./icons/chevron-down.png";
+import searchIcon from "./icons/search.png";
+import xIcon from "./icons/x.png";
 
 // ---------- 5-Step Typography Scale + Mono Hero ----------
 
@@ -53,10 +53,12 @@ export function SectionHeader(props: {
 }) {
   return (
     <View class={`flex-row items-center justify-between gap-2 px-1 ${props.class ?? ""}`}>
-      <Text role="header" class="text-[13px] font-semibold text-muted-foreground">
+      <Text role="header" class="flex-1 min-w-0 text-[13px] font-semibold text-muted-foreground">
         {props.title}
       </Text>
-      <If when={props.rightSlot}>{props.rightSlot}</If>
+      <If when={props.rightSlot}>
+        <View class="shrink-0">{props.rightSlot}</View>
+      </If>
     </View>
   );
 }
@@ -101,15 +103,27 @@ export function CaptionText(props: {
   children: JSX.Element;
   class?: string;
   style?: StyleProp<TextStyle>;
+  numberOfLines?: number;
 }) {
   return (
     <Text
       class={`text-[11.5px] font-semibold ${props.class ?? "text-muted-foreground"}`}
-      style={props.style}
+      style={[
+        props.numberOfLines !== undefined ? { numberOfLines: props.numberOfLines } : undefined,
+        props.style,
+      ]}
     >
       {props.children}
     </Text>
   );
+}
+
+function formatOtpGroups(raw: string): string[] {
+  const code = raw.trim();
+  if (!code || code === "------") return ["---", "---"];
+  if (/^\d{6}$/.test(code)) return [code.slice(0, 3), code.slice(3)];
+  if (/^\d{8}$/.test(code)) return [code.slice(0, 4), code.slice(4)];
+  return [code];
 }
 
 export function OtpHeroText(props: {
@@ -117,15 +131,29 @@ export function OtpHeroText(props: {
   size?: "hero" | "compact";
   class?: string;
 }) {
+  const parts = () => formatOtpGroups(props.code);
   return (
-    <Text
-      class={`font-mono font-bold text-primary ${
-        props.size === "compact" ? "text-[26px]" : "text-[28px]"
-      } ${props.class ?? ""}`}
-      style={{ fontVariant: ["tabular-nums"], letterSpacing: 2.5 }}
+    <View
+      accessibilityLabel={props.code}
+      class={`shrink-0 flex-row items-center gap-1.5 ${props.class ?? ""}`}
     >
-      {props.code}
-    </Text>
+      <Each of={parts()} key="index">
+        {(part) => (
+          <Text
+            class={`shrink-0 font-mono font-bold text-primary px-0.5 ${
+              props.size === "compact" ? "text-[24px]" : "text-[26px]"
+            }`}
+            style={{
+              fontVariant: ["tabular-nums"],
+              numberOfLines: 1,
+              textOverflow: "clip",
+            }}
+          >
+            {part()}
+          </Text>
+        )}
+      </Each>
+    </View>
   );
 }
 
@@ -194,9 +222,11 @@ export function ActionButton(props: ActionButtonProps) {
       }`}
     >
       <If when={props.icon}>
-        {(ic) => <Image src={ic()} class="h-[18px] w-[18px]" style={{ tintColor: iconTint() }} />}
+        {(ic) => <Image src={ic()} class="h-[18px] w-[18px] shrink-0" style={{ tintColor: iconTint() }} />}
       </If>
-      <Text class={labelStyle()}>{props.label}</Text>
+      <Text class={labelStyle()} style={{ numberOfLines: 1 }}>
+        {props.label}
+      </Text>
     </Button>
   );
 }
@@ -265,16 +295,21 @@ export function CompactButton(props: CompactButtonProps) {
       testID={props.testID}
       disabled={props.disabled}
       onPress={() => props.onPress?.()}
-      class={`h-9 ${
+      class={`shrink-0 h-9 ${
         props.pill ? "rounded-full" : "rounded-lg"
       } px-3 items-center justify-center flex-row gap-1.5 disabled:opacity-50 ${bgClass()} ${
         props.class ?? ""
       }`}
     >
       <If when={props.icon}>
-        {(ic) => <Image src={ic()} class="h-4 w-4" style={{ tintColor: iconTint() }} />}
+        {(ic) => <Image src={ic()} class="h-4 w-4 shrink-0" style={{ tintColor: iconTint() }} />}
       </If>
-      <Text class={`text-[13px] font-semibold ${textClass()}`}>{props.label}</Text>
+      <Text
+        class={`text-[13px] font-semibold ${textClass()}`}
+        style={{ numberOfLines: 1 }}
+      >
+        {props.label}
+      </Text>
     </Button>
   );
 }
@@ -298,7 +333,7 @@ export function FilterPill(props: FilterPillProps) {
         Haptics.selection();
         props.onPress?.();
       }}
-      class={`h-8 rounded-full px-3 items-center justify-center flex-row gap-1.5 active:opacity-80 ${
+      class={`shrink-0 h-8 rounded-full px-3 items-center justify-center flex-row gap-1.5 active:opacity-80 ${
         props.selected ? "bg-primary" : unselectedBg()
       } ${props.class ?? ""}`}
     >
@@ -308,6 +343,7 @@ export function FilterPill(props: FilterPillProps) {
             ? "font-semibold text-primary-foreground"
             : "font-medium text-muted-foreground"
         }`}
+        style={{ numberOfLines: 1 }}
       >
         {props.label}
       </Text>
@@ -353,6 +389,7 @@ export function SegmentedControl<T extends string>(props: SegmentedControlProps<
                   ? "font-semibold text-foreground"
                   : "font-medium text-muted-foreground"
               }`}
+              style={{ numberOfLines: 1 }}
             >
               {opt().label}
             </Text>
@@ -411,12 +448,12 @@ export function AppSelect(props: AppSelectProps) {
             props.surface === "card" ? "bg-input" : "bg-card border border-border"
           }`}
         >
-          <Text class="flex-1 line-clamp-1 text-[15px] font-medium text-foreground">
+          <Text class="flex-1 min-w-0 line-clamp-1 text-[15px] font-medium text-foreground">
             {selectedTitle()}
           </Text>
           <Image
             src={chevronDownIcon}
-            class="h-4 w-4"
+            class="h-4 w-4 shrink-0"
             style={{ tintColor: token("muted-foreground") }}
           />
         </View>
@@ -492,8 +529,10 @@ export function FormField(props: FormFieldProps) {
   return (
     <View class={`gap-2 ${props.class ?? ""}`}>
       <View class="flex-row items-center justify-between gap-2">
-        <Text class="text-[13px] font-medium text-muted-foreground">{props.label}</Text>
-        <If when={props.rightSlot}>{props.rightSlot}</If>
+        <Text class="flex-1 min-w-0 text-[13px] font-medium text-muted-foreground">{props.label}</Text>
+        <If when={props.rightSlot}>
+          <View class="shrink-0">{props.rightSlot}</View>
+        </If>
       </View>
       {props.children}
     </View>
@@ -519,7 +558,7 @@ export function SearchBar(props: SearchBarProps) {
     >
       <Image
         src={searchIcon}
-        class="h-4 w-4"
+        class="h-4 w-4 shrink-0"
         style={{ tintColor: token("muted-foreground") }}
       />
       <Input
@@ -529,7 +568,7 @@ export function SearchBar(props: SearchBarProps) {
         placeholder={props.placeholder}
         autoCapitalize="none"
         autoCorrect={false}
-        class="flex-1 h-full bg-transparent text-[15px] text-foreground"
+        class="flex-1 min-w-0 h-full bg-transparent text-[15px] text-foreground"
         style={{ placeholderColor: token("muted-foreground") }}
       />
       <If when={props.value.length > 0}>
@@ -537,11 +576,11 @@ export function SearchBar(props: SearchBarProps) {
           onPress={() => props.onChange("")}
           hitSlop={8}
           accessibilityLabel="清除搜索"
-          class="h-6 w-6 items-center justify-center rounded-full bg-input active:opacity-75"
+          class="shrink-0 h-6 w-6 items-center justify-center rounded-full bg-input active:opacity-75"
         >
           <Image
             src={xIcon}
-            class="h-3.5 w-3.5"
+            class="h-3.5 w-3.5 shrink-0"
             style={{ tintColor: token("muted-foreground") }}
           />
         </Button>
@@ -717,7 +756,7 @@ export function ItemAvatar(props: ItemAvatarProps) {
 
   return (
     <View
-      class={`${boxClass()} items-center justify-center ${props.class ?? ""}`}
+      class={`shrink-0 ${boxClass()} items-center justify-center ${props.class ?? ""}`}
       style={{ backgroundColor: bgColor() }}
     >
       <Text class={`${textClass()} font-bold text-primary-foreground`}>
@@ -761,7 +800,7 @@ export function SheetContainer(props: SheetContainerProps) {
 
         {/* Header */}
         <View class="flex-row items-start justify-between gap-3">
-          <View class="flex-1 gap-1">
+          <View class="flex-1 min-w-0 gap-1">
             <SheetTitle>{props.title}</SheetTitle>
             <If when={props.subtitle}>
               {(sub) => <SubheadText>{sub()}</SubheadText>}
@@ -806,17 +845,21 @@ export function ScreenHeader(props: ScreenHeaderProps) {
   return (
     <View class={`px-4 pt-3 pb-2 gap-3 ${props.class ?? ""}`}>
       <View class="flex-row items-center justify-between gap-2">
-        <View class="flex-1 flex-row items-center gap-2">
+        <View class="flex-1 min-w-0 flex-row items-center gap-2">
           <PageTitle>{props.title}</PageTitle>
           <If when={props.badge}>
             {(b) => (
-              <View class="rounded-full bg-primary/12 px-3 py-1">
-                <CaptionText class="text-primary">{b()}</CaptionText>
+              <View class="shrink-0 rounded-full bg-primary/12 px-3 py-1">
+                <CaptionText numberOfLines={1} class="text-primary">
+                  {b()}
+                </CaptionText>
               </View>
             )}
           </If>
         </View>
-        <If when={props.rightSlot}>{props.rightSlot}</If>
+        <If when={props.rightSlot}>
+          <View class="shrink-0">{props.rightSlot}</View>
+        </If>
       </View>
       <If when={props.children}>{props.children}</If>
     </View>
@@ -844,8 +887,10 @@ export function BadgePill(props: { label: string; tone?: BadgeTone; class?: stri
     }
   };
   return (
-    <View class={`rounded-full px-3 py-1 ${toneClass().bg} ${props.class ?? ""}`}>
-      <CaptionText class={toneClass().text}>{props.label}</CaptionText>
+    <View class={`shrink-0 rounded-full px-3 py-1 ${toneClass().bg} ${props.class ?? ""}`}>
+      <CaptionText numberOfLines={1} class={toneClass().text}>
+        {props.label}
+      </CaptionText>
     </View>
   );
 }

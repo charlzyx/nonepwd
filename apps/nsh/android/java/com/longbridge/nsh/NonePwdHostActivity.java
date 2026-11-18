@@ -1,18 +1,13 @@
 package com.longbridge.nsh;
 
 import android.app.Activity;
-import android.app.assist.AssistStructure;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.res.Configuration;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.provider.Settings;
-import android.service.autofill.FillResponse;
-import android.view.autofill.AutofillManager;
 import dev.nonepwd.app.AutofillStore;
-import dev.nonepwd.app.NonePwdAutofillService;
 import java.util.Map;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -27,7 +22,7 @@ public final class NonePwdHostActivity extends Activity {
 
   private NshView view;
   private boolean pendingAutofillAuth;
-  private AssistStructure pendingAssistStructure;
+  private Object pendingAssistStructure;
 
   @Override
   protected void onCreate(Bundle savedInstanceState) {
@@ -89,35 +84,44 @@ public final class NonePwdHostActivity extends Activity {
     view.handle(
         "autofill.status",
         (args, reply) -> {
-          try {
-            AutofillManager afm = getSystemService(AutofillManager.class);
-            boolean supported = afm != null && afm.isAutofillSupported();
-            boolean enabled = afm != null && afm.hasEnabledAutofillServices();
-            JSONObject result = new JSONObject();
-            result.put("available", true);
-            result.put("supported", supported);
-            result.put("enabled", enabled);
-            reply.resolve(result);
-          } catch (Throwable err) {
-            reply.reject(err.getMessage() != null ? err.getMessage() : "autofill.status failed");
+          JSONObject result = null;
+          Class<?> bridge = loadAutofillBridge();
+          if (bridge != null) {
+            try {
+              Object out = bridge.getMethod("getStatus", Context.class).invoke(null, this);
+              if (out instanceof JSONObject) {
+                result = (JSONObject) out;
+              }
+            } catch (Throwable ignored) {
+              result = null;
+            }
           }
+          if (result == null) {
+            result = new JSONObject();
+            try {
+              result.put("available", true);
+              result.put("supported", false);
+              result.put("enabled", false);
+            } catch (JSONException ignored) {
+              // Unreachable for boolean keys
+            }
+          }
+          reply.resolve(result);
         });
 
     view.handle(
         "autofill.enable",
         (args, reply) -> {
           boolean launched = false;
-          try {
-            Intent intent = new Intent(Settings.ACTION_REQUEST_SET_AUTOFILL_SERVICE);
-            intent.setData(Uri.parse("package:" + getPackageName()));
-            startActivity(intent);
-            launched = true;
-          } catch (Throwable ignored) {
+          Class<?> bridge = loadAutofillBridge();
+          if (bridge != null) {
             try {
-              Intent fallback = new Intent(Settings.ACTION_SETTINGS);
-              startActivity(fallback);
-              launched = true;
-            } catch (Throwable ignored2) {
+              Object out =
+                  bridge.getMethod("launchEnableSettings", Activity.class).invoke(null, this);
+              if (out instanceof Boolean) {
+                launched = ((Boolean) out).booleanValue();
+              }
+            } catch (Throwable ignored) {
               launched = false;
             }
           }
@@ -141,32 +145,70 @@ public final class NonePwdHostActivity extends Activity {
             String latestOtpCode = payload.optString("latestOtpCode", "");
             String latestOtpSender = payload.optString("latestOtpSender", "");
 
-            AutofillStore store = AutofillStore.getInstance(this);
-            store.sync(unlocked, expiresAtMs, credentials, latestOtpCode, latestOtpSender);
+            AutofillStore store = null;
+            try {
+              store = AutofillStore.getInstance(this);
+              store.sync(unlocked, expiresAtMs, credentials, latestOtpCode, latestOtpSender);
+            } catch (Throwable ignored) {
+              // Gracefully ignore if AndroidKeyStore / SharedPreferences unavailable (e.g. macapk)
+            }
 
             JSONObject result = new JSONObject();
             result.put("ok", true);
             reply.resolve(result);
 
             if (unlocked && pendingAutofillAuth) {
-              runOnUiThread(() -> completeAutofillAuthentication(store));
+              final AutofillStore finalStore = store;
+              runOnUiThread(() -> completeAutofillAuthentication(finalStore));
             }
           } catch (Throwable err) {
-            reply.reject(err.getMessage() != null ? err.getMessage() : "autofill.sync failed");
+            try {
+              JSONObject fallback = new JSONObject();
+              fallback.put("ok", false);
+              reply.resolve(fallback);
+            } catch (JSONException ignored) {
+              reply.reject(err.getMessage() != null ? err.getMessage() : "autofill.sync failed");
+            }
           }
         });
 
     view.handle(
         "autofill.takePendingSaves",
         (args, reply) -> {
+          JSONArray pending = new JSONArray();
           try {
-            JSONArray pending = AutofillStore.getInstance(this).takePendingSavesJson();
-            reply.resolve(pending);
-          } catch (Throwable err) {
-            reply.reject(
-                err.getMessage() != null ? err.getMessage() : "autofill.takePendingSaves failed");
+            pending = AutofillStore.getInstance(this).takePendingSavesJson();
+          } catch (Throwable ignored) {
+            pending = new JSONArray();
           }
+          reply.resolve(pending);
         });
+  }
+
+  private static boolean isAutofillFrameworkAvailable() {
+    if (Build.VERSION.SDK_INT < 26) {
+      return false;
+    }
+    try {
+      Class.forName("android.app.assist.AssistStructure");
+      Class.forName("android.view.autofill.AutofillManager");
+      Class.forName("android.service.autofill.FillResponse");
+      Class.forName("android.service.autofill.AutofillService");
+      return true;
+    } catch (Throwable ignored) {
+      return false;
+    }
+  }
+
+  private static Class<?> loadAutofillBridge() {
+    if (!isAutofillFrameworkAvailable()) {
+      return null;
+    }
+    try {
+      return Class.forName("dev.nonepwd.app.AutofillHostBridge");
+    } catch (Throwable ignored) {
+      return null;
+    }
   }
 
   private void captureAutofillAuthIntent(Intent intent) {
@@ -175,39 +217,38 @@ public final class NonePwdHostActivity extends Activity {
     if (intent == null) {
       return;
     }
-    AssistStructure structure = extractAssistStructure(intent);
+    Object structure = null;
+    Class<?> bridge = loadAutofillBridge();
+    if (bridge != null) {
+      try {
+        structure = bridge.getMethod("extractAssistStructure", Intent.class).invoke(null, intent);
+      } catch (Throwable ignored) {
+        structure = null;
+      }
+    }
     if (intent.getBooleanExtra(EXTRA_AUTOFILL_AUTH, false) || structure != null) {
       pendingAutofillAuth = true;
       pendingAssistStructure = structure;
     }
   }
 
-  @SuppressWarnings("deprecation")
-  private static AssistStructure extractAssistStructure(Intent intent) {
-    if (intent == null) {
-      return null;
-    }
-    if (Build.VERSION.SDK_INT >= 33) {
-      return intent.getParcelableExtra(
-          AutofillManager.EXTRA_ASSIST_STRUCTURE, AssistStructure.class);
-    }
-    return intent.getParcelableExtra(AutofillManager.EXTRA_ASSIST_STRUCTURE);
-  }
-
   private void completeAutofillAuthentication(AutofillStore store) {
     pendingAutofillAuth = false;
-    AssistStructure structure = pendingAssistStructure;
+    Object structure = pendingAssistStructure;
     pendingAssistStructure = null;
 
-    Intent resultIntent = new Intent();
-    if (structure != null) {
-      FillResponse fillResponse =
-          NonePwdAutofillService.buildResponseForStructure(this, structure, store);
-      if (fillResponse != null) {
-        resultIntent.putExtra(AutofillManager.EXTRA_AUTHENTICATION_RESULT, fillResponse);
+    Class<?> bridge = loadAutofillBridge();
+    if (bridge != null) {
+      try {
+        bridge
+            .getMethod("completeAuthentication", Activity.class, Object.class, AutofillStore.class)
+            .invoke(null, this, structure, store);
+        return;
+      } catch (Throwable ignored) {
+        // Fall back to empty OK result
       }
     }
-    setResult(Activity.RESULT_OK, resultIntent);
+    setResult(Activity.RESULT_OK, new Intent());
     finish();
   }
 

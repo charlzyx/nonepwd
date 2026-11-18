@@ -3,13 +3,10 @@ package dev.nonepwd.app;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.net.Uri;
-import android.security.keystore.KeyGenParameterSpec;
-import android.security.keystore.KeyProperties;
+import android.os.Build;
 import android.util.Base64;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
-import java.security.KeyStore;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
@@ -18,7 +15,6 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 import javax.crypto.Cipher;
-import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 import org.json.JSONArray;
@@ -32,8 +28,6 @@ public final class AutofillStore {
   private static final String PREFS_NAME = "nonepwd_autofill_v1";
   private static final String KEY_VAULT_ENC = "vault_enc_v1";
   private static final String KEY_PENDING_SAVES_ENC = "pending_saves_enc_v1";
-  private static final String KEYSTORE_PROVIDER = "AndroidKeyStore";
-  private static final String KEY_ALIAS = "nonepwd_autofill_aes";
   private static final String CIPHER_TRANSFORMATION = "AES/GCM/NoPadding";
   private static final int GCM_IV_BYTES = 12;
   private static final int GCM_TAG_BITS = 128;
@@ -92,7 +86,9 @@ public final class AutofillStore {
   }
 
   private AutofillStore(Context context) {
-    this.prefs = context.getApplicationContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+    Context appCtx = context.getApplicationContext();
+    Context target = appCtx != null ? appCtx : context;
+    this.prefs = target.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
   }
 
   public static synchronized AutofillStore getInstance(Context context) {
@@ -409,42 +405,45 @@ public final class AutofillStore {
     return value == null ? "" : value.trim();
   }
 
-  private SecretKey getOrCreateSecretKey(boolean forceRecreate)
-      throws GeneralSecurityException, IOException {
-    KeyStore keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER);
-    keyStore.load(null);
-    if (forceRecreate && keyStore.containsAlias(KEY_ALIAS)) {
-      keyStore.deleteEntry(KEY_ALIAS);
+  private static boolean isKeyStoreAvailable() {
+    if (Build.VERSION.SDK_INT < 23) {
+      return false;
     }
-    if (!forceRecreate && keyStore.containsAlias(KEY_ALIAS)) {
-      KeyStore.Entry entry = keyStore.getEntry(KEY_ALIAS, null);
-      if (entry instanceof KeyStore.SecretKeyEntry) {
-        return ((KeyStore.SecretKeyEntry) entry).getSecretKey();
-      }
-      keyStore.deleteEntry(KEY_ALIAS);
+    try {
+      Class.forName("android.security.keystore.KeyGenParameterSpec");
+      Class.forName("android.security.keystore.KeyProperties");
+      return true;
+    } catch (Throwable ignored) {
+      return false;
     }
+  }
 
-    KeyGenerator keyGenerator =
-        KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER);
-    KeyGenParameterSpec spec =
-        new KeyGenParameterSpec.Builder(
-                KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setKeySize(256)
-            .setRandomizedEncryptionRequired(true)
-            .build();
-    keyGenerator.init(spec);
-    return keyGenerator.generateKey();
+  private static SecretKey invokeKeyStoreHelper(String methodName, Boolean forceRecreate) {
+    if (!isKeyStoreAvailable()) {
+      return null;
+    }
+    try {
+      Class<?> helper = Class.forName("dev.nonepwd.app.AutofillKeyStoreHelper");
+      Object res =
+          forceRecreate != null
+              ? helper.getMethod(methodName, boolean.class).invoke(null, forceRecreate)
+              : helper.getMethod(methodName).invoke(null);
+      return res instanceof SecretKey ? (SecretKey) res : null;
+    } catch (Throwable ignored) {
+      return null;
+    }
   }
 
   private String encryptString(String plaintext) {
-    if (plaintext == null) {
+    if (plaintext == null || !isKeyStoreAvailable()) {
       return null;
     }
     for (int attempt = 0; attempt < 2; attempt++) {
       try {
-        SecretKey key = getOrCreateSecretKey(attempt > 0);
+        SecretKey key = invokeKeyStoreHelper("getOrCreateSecretKey", attempt > 0);
+        if (key == null) {
+          return null;
+        }
         Cipher cipher = Cipher.getInstance(CIPHER_TRANSFORMATION);
         cipher.init(Cipher.ENCRYPT_MODE, key);
         byte[] iv = cipher.getIV();
@@ -456,15 +455,15 @@ public final class AutofillStore {
         System.arraycopy(iv, 0, combined, 0, GCM_IV_BYTES);
         System.arraycopy(ct, 0, combined, GCM_IV_BYTES, ct.length);
         return Base64.encodeToString(combined, Base64.NO_WRAP);
-      } catch (GeneralSecurityException | IOException | RuntimeException ignored) {
-        // Retry once with regenerated keystore key on key invalidation
+      } catch (Throwable ignored) {
+        // Retry once with regenerated keystore key on key invalidation, or degrade gracefully
       }
     }
     return null;
   }
 
   private String decryptString(String encoded) {
-    if (encoded == null || encoded.isEmpty()) {
+    if (encoded == null || encoded.isEmpty() || !isKeyStoreAvailable()) {
       return null;
     }
     try {
@@ -472,22 +471,16 @@ public final class AutofillStore {
       if (combined.length < GCM_IV_BYTES + 16) {
         return null;
       }
-      KeyStore keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER);
-      keyStore.load(null);
-      if (!keyStore.containsAlias(KEY_ALIAS)) {
+      SecretKey key = invokeKeyStoreHelper("loadExistingSecretKey", null);
+      if (key == null) {
         return null;
       }
-      KeyStore.Entry entry = keyStore.getEntry(KEY_ALIAS, null);
-      if (!(entry instanceof KeyStore.SecretKeyEntry)) {
-        return null;
-      }
-      SecretKey key = ((KeyStore.SecretKeyEntry) entry).getSecretKey();
       Cipher cipher = Cipher.getInstance(CIPHER_TRANSFORMATION);
       GCMParameterSpec spec = new GCMParameterSpec(GCM_TAG_BITS, combined, 0, GCM_IV_BYTES);
       cipher.init(Cipher.DECRYPT_MODE, key, spec);
       byte[] plain = cipher.doFinal(combined, GCM_IV_BYTES, combined.length - GCM_IV_BYTES);
       return new String(plain, StandardCharsets.UTF_8);
-    } catch (GeneralSecurityException | IOException | RuntimeException ignored) {
+    } catch (Throwable ignored) {
       return null;
     }
   }

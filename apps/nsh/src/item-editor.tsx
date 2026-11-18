@@ -12,7 +12,7 @@ import {
   type TotpImportEntry,
   type VaultItemPayload,
 } from "./crypto";
-import qrcodeIcon from "./icons/qrcode.svg";
+import qrcodeIcon from "./icons/qrcode.png";
 import {
   ActionButton,
   AppInput,
