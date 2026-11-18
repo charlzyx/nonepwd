@@ -191,6 +191,37 @@ im.resize((sz, sz), resample).save(dst)
 
 resize_icon "$APP_DIR/icon.png" "$WORK_DIR/res/mipmap-xxxhdpi/ic_launcher.png" 192
 
+# Generate API 26+ adaptive icon foreground (432x432 xxxhdpi = 108dp * 4, full-bleed 288x288 art centered on #1C1C1F)
+make_adaptive_foreground() {
+  local src="$1"
+  local dst="$2"
+  if command -v python3 >/dev/null 2>&1 && python3 -c "import PIL" >/dev/null 2>&1; then
+    python3 -c '
+import sys
+from PIL import Image
+src, dst = sys.argv[1], sys.argv[2]
+im = Image.open(src).convert("RGBA")
+resample = getattr(Image, "Resampling", Image).LANCZOS
+fg = im.resize((288, 288), resample)
+canvas = Image.new("RGBA", (432, 432), (28, 28, 31, 255))
+canvas.alpha_composite(fg, (72, 72))
+canvas.save(dst)
+' "$src" "$dst"
+  elif command -v sips >/dev/null 2>&1; then
+    sips -z 288 288 "$src" --out "$dst" >/dev/null
+    sips -p 432 432 --padColor 1C1C1F "$dst" --out "$dst" >/dev/null
+  elif command -v magick >/dev/null 2>&1; then
+    magick "$src" -resize 288x288 -background "#1C1C1F" -gravity center -extent 432x432 "$dst"
+  elif command -v convert >/dev/null 2>&1; then
+    convert "$src" -resize 288x288 -background "#1C1C1F" -gravity center -extent 432x432 "$dst"
+  else
+    echo "ERROR: No image tool found to build adaptive foreground (tried python3 PIL, sips, magick, convert)." >&2
+    exit 1
+  fi
+}
+
+make_adaptive_foreground "$APP_DIR/icon.png" "$WORK_DIR/res/mipmap-xxxhdpi/ic_launcher_foreground.png"
+
 mkdir -p "$WORK_DIR/compiled" "$WORK_DIR/gen" "$WORK_DIR/classes-stubs" "$WORK_DIR/classes-app" "$WORK_DIR/dex"
 
 echo "[package-android] Compiling and linking resources with aapt2..."

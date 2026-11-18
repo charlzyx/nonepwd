@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="dev.nonepwd.app"
-    android:versionCode="8"
+    android:versionCode="9"
     android:versionName="0.1.0">
 
     <uses-sdk
@@ -30,6 +30,7 @@
         android:enableOnBackInvokedCallback="true"
         android:extractNativeLibs="false"
         android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="NonePwd"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">

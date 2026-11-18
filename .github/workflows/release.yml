@@ -23,6 +23,7 @@ on:
         type: boolean
 
 permissions:
+  actions: read
   contents: write
   packages: write
 
@@ -591,10 +592,24 @@ jobs:
       needs.docker-ghcr.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
+      - name: Download workflow artifacts via gh CLI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts-raw artifacts
+          for attempt in 1 2 3 4; do
+            rm -rf artifacts-raw/*
+            if gh run download "${{ github.run_id }}" -R "${{ github.repository }}" --dir artifacts-raw; then
+              break
+            fi
+            if [ "$attempt" -eq 4 ]; then
+              echo "ERROR: gh run download failed after 4 attempts" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          find artifacts-raw -type f -exec cp -f {} artifacts/ \;
+          ls -la artifacts
 
       - name: Verify required client assets and generate SHA-256 checksums
         run: |

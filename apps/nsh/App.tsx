@@ -63,7 +63,6 @@ import {
   DEFAULT_SERVER_URL,
   auditVaultItems,
   extractEmailAddress,
-  generateRawAesKey,
   generateSecretKey,
   generateTotp,
   randomId,
@@ -264,10 +263,6 @@ function App() {
 
   async function syncAutofillNow() {
     if (phase() !== "unlocked") return;
-    if (session()?.isDemo) {
-      const existingRemembered = await loadRememberedSession();
-      if (existingRemembered) return;
-    }
     const durMs = rememberDurationMs(rememberDuration());
     const expiresAtMs = durMs > 0 ? Date.now() + durMs : 0;
     await syncAndroidAutofill({
@@ -282,10 +277,6 @@ function App() {
     const st = await getAndroidAutofillStatus();
     autofillStatus.set(st);
     if (phase() === "unlocked") {
-      if (session()?.isDemo) {
-        const existingRemembered = await loadRememberedSession();
-        if (existingRemembered) return;
-      }
       const pending = await takePendingAndroidSaves();
       if (pending.length > 0) {
         pendingAndroidSaves.update((prev) => {
@@ -297,7 +288,6 @@ function App() {
   }
 
   async function performSync(activeSession: UnlockedSession): Promise<void> {
-    if (activeSession.isDemo) return;
     const res = await syncAll(
       activeSession.serverUrl,
       activeSession.token,
@@ -661,278 +651,21 @@ function App() {
     }
   }
 
-  function enterDemoMode() {
-    const nowMsVal = Date.now();
-    const now = new Date(nowMsVal).toISOString();
-    const personalVaultId = "demo-vault-personal";
-    const teamVaultId = "demo-vault-team";
-    const personalKey = generateRawAesKey();
-    const teamKey = generateRawAesKey();
-
-    const demoVaults: DecryptedVault[] = [
-      {
-        id: personalVaultId,
-        metadata: { name: "个人主库", description: "个人日常账号与 2FA 凭据" },
-        keyBytes: personalKey,
-        createdAt: now,
-        updatedAt: now,
-      },
-      {
-        id: teamVaultId,
-        metadata: { name: "团队共享", description: "生产密钥、云平台与运维共享" },
-        keyBytes: teamKey,
-        createdAt: now,
-        updatedAt: now,
-      },
-    ];
-
-    const demoVaultKeys = new Map<string, Uint8Array>([
-      [personalVaultId, personalKey],
-      [teamVaultId, teamKey],
-    ]);
-
-    const demoItems: VaultItemPayload[] = [
-      {
-        id: "demo-item-github",
-        vaultId: personalVaultId,
-        category: "login",
-        title: "GitHub",
-        favorite: true,
-        tags: ["开发", "工作"],
-        urls: ["https://github.com"],
-        username: "demo@nonepwd.dev",
-        password: "ghp-DemoStrongPass#2026!",
-        totp: "JBSWY3DPEHPK3PXP",
-        notes: "离线体验示例库 GitHub 登录与 2FA 凭据",
-        customFields: [],
-        createdAt: now,
-        updatedAt: now,
-      },
-      {
-        id: "demo-item-cloudflare",
-        vaultId: teamVaultId,
-        category: "login",
-        title: "Cloudflare",
-        favorite: true,
-        tags: ["运维", "DNS"],
-        urls: ["https://dash.cloudflare.com"],
-        username: "ops@nonepwd.dev",
-        password: "cf-EdgeNetwork#9988!",
-        totp: "GEZDGNBVGY3TQOJQ",
-        notes: "域名解析与 Email Routing 管理账号",
-        customFields: [],
-        createdAt: now,
-        updatedAt: now,
-      },
-      {
-        id: "demo-item-openai",
-        vaultId: teamVaultId,
-        category: "api_credential",
-        title: "OpenAI API Key",
-        favorite: false,
-        tags: ["AI", "开发"],
-        urls: ["https://api.openai.com/v1"],
-        username: "org-nonepwd-prod",
-        password: "sk-proj-demo-example-key-8f3a9c21",
-        notes: "生产环境大模型服务 API 密钥",
-        customFields: [
-          {
-            id: "demo-cf-openai-project",
-            label: "Project",
-            value: "nonepwd-assistant",
-            type: "text",
-          },
-        ],
-        createdAt: now,
-        updatedAt: now,
-      },
-      {
-        id: "demo-item-ssh",
-        vaultId: teamVaultId,
-        category: "ssh_key",
-        title: "Prod Bastion SSH",
-        favorite: false,
-        tags: ["运维", "SSH"],
-        urls: ["bastion.nonepwd.dev"],
-        username: "ubuntu",
-        password:
-          "-----BEGIN OPENSSH PRIVATE KEY-----\ndemo-ed25519-private-key-placeholder\n-----END OPENSSH PRIVATE KEY-----",
-        notes: "生产跳板机 Ed25519 密钥对",
-        customFields: [
-          {
-            id: "demo-cf-ssh-pubkey",
-            label: "public_key",
-            value:
-              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoNonePwdBastionKey2026 demo@nonepwd.dev",
-            type: "text",
-          },
-        ],
-        createdAt: now,
-        updatedAt: now,
-      },
-    ];
-
-    const demoEmails: DecryptedEmailItem[] = [
-      {
-        id: "demo-email-1",
-        source: "imap",
-        envelopeTo: "work@gmail.com",
-        from: "GitHub <noreply@github.com>",
-        to: "work@gmail.com",
-        subject: "[GitHub] Sudo verification code",
-        snippet: "Your GitHub verification code is 849201",
-        textBody: "Your GitHub verification code is 849201. Valid for 10 minutes.",
-        otpCode: "849201",
-        confidence: 0.98,
-        magicLink: null,
-        senderDomain: "github.com",
-        receivedAt: new Date(nowMsVal - 2 * 60_000).toISOString(),
-      },
-      {
-        id: "demo-email-2",
-        source: "imap",
-        envelopeTo: "ops@qq.com",
-        from: "Cloudflare <noreply@notify.cloudflare.com>",
-        to: "ops@qq.com",
-        subject: "Cloudflare 登录验证码 517394",
-        snippet: "Use 517394 to verify your Cloudflare login",
-        textBody: "Use verification code 517394 to verify your Cloudflare login.",
-        otpCode: "517394",
-        confidence: 0.97,
-        magicLink: "https://dash.cloudflare.com/login/verify?demo=1",
-        senderDomain: "cloudflare.com",
-        receivedAt: new Date(nowMsVal - 8 * 60_000).toISOString(),
-      },
-      {
-        id: "demo-email-3",
-        source: "imap",
-        envelopeTo: "backup@gmail.com",
-        from: "Linear <notifications@linear.app>",
-        to: "backup@gmail.com",
-        subject: "Your Linear login code: 306418",
-        snippet: "Enter 306418 to continue signing in",
-        textBody: "Enter verification code 306418 to continue signing in to Linear.",
-        otpCode: "306418",
-        confidence: 0.95,
-        magicLink: null,
-        senderDomain: "linear.app",
-        receivedAt: new Date(nowMsVal - 25 * 60_000).toISOString(),
-      },
-    ];
-
-    const demoImapAccounts: ImapAccountPublic[] = [
-      {
-        id: "demo-imap-1",
-        label: "工作 Gmail",
-        enabled: true,
-        host: "imap.gmail.com",
-        port: 993,
-        tls: true,
-        username: "work@gmail.com",
-        hasPassword: true,
-        status: "listening",
-        lastError: null,
-        lastSyncAt: now,
-      },
-      {
-        id: "demo-imap-2",
-        label: "备用 Gmail",
-        enabled: true,
-        host: "imap.gmail.com",
-        port: 993,
-        tls: true,
-        username: "backup@gmail.com",
-        hasPassword: true,
-        status: "listening",
-        lastError: null,
-        lastSyncAt: now,
-      },
-      {
-        id: "demo-imap-3",
-        label: "运维 QQ 邮箱",
-        enabled: true,
-        host: "imap.qq.com",
-        port: 993,
-        tls: true,
-        username: "ops@qq.com",
-        hasPassword: true,
-        status: "listening",
-        lastError: null,
-        lastSyncAt: now,
-      },
-    ];
-
-    const demoSession: UnlockedSession = {
-      serverUrl: "demo://offline",
-      token: "demo-local",
-      email: "demo@nonepwd.dev",
-      rootKeyBytes: generateRawAesKey(),
-      emailPrivateKeyPkcs8B64: "",
-      isDemo: true,
-    };
-
-    batch(() => {
-      authError.set(null);
-      session.set(demoSession);
-      accountInfo.set({
-        email: "demo@nonepwd.dev",
-        emailPublicKey: "demo-email-public-key",
-        cfWebhookSecret: "demo-cf-webhook-secret",
-        aliasDomain: "mail.nonepwd.dev",
-      });
-      vaults.set(demoVaults);
-      vaultKeys.set(demoVaultKeys);
-      items.set(demoItems);
-      emails.set(demoEmails);
-      imapAccounts.set(demoImapAccounts);
-      emailFilter.set({ ...DEFAULT_EMAIL_FILTER });
-      pendingAndroidSaves.set([]);
-      selectedVaultId.set("all");
-      selectedCategory.set("all");
-      selectedTag.set("all");
-      selectedItemId.set(null);
-      selectedMailbox.set("all");
-      expandedEmailId.set(null);
-      revealedFieldKeys.set({});
-      totpSearch.set("");
-      vaultSearch.set("");
-      activeTab.set("totp");
-      phase.set("unlocked");
-    });
-
-    void refreshAutofillAndPending();
-    void (async () => {
-      const existingRemembered = await loadRememberedSession();
-      if (!existingRemembered && session()?.isDemo && phase() === "unlocked") {
-        await syncAutofillNow();
-      }
-    })();
-    Haptics.notification("success");
-  }
-
   async function handleLock(clearCredentials = false) {
     const cur = session();
-    const isDemo = Boolean(cur?.isDemo);
-    if (cur && !isDemo) {
+    if (cur) {
       await logoutSession(cur.serverUrl, cur.token);
     }
-    if (isDemo) {
-      const existingRemembered = await loadRememberedSession();
-      if (!existingRemembered) {
-        void syncAndroidAutofill({ unlocked: false });
-      }
-    } else {
-      await clearRememberedSession();
-      void syncAndroidAutofill({ unlocked: false });
-      if (clearCredentials) {
-        secretKeyInput.set("");
-        await saveClientPrefs({
-          serverUrl: serverUrl(),
-          email: "",
-          secretKey: "",
-          rememberDuration: rememberDuration(),
-        });
-      }
+    await clearRememberedSession();
+    void syncAndroidAutofill({ unlocked: false });
+    if (clearCredentials) {
+      secretKeyInput.set("");
+      await saveClientPrefs({
+        serverUrl: serverUrl(),
+        email: "",
+        secretKey: "",
+        rememberDuration: rememberDuration(),
+      });
     }
     batch(() => {
       session.set(null);
@@ -957,27 +690,12 @@ function App() {
       activeTab.set("totp");
       phase.set("locked");
     });
-    showToast(
-      isDemo
-        ? "已退出演示模式"
-        : clearCredentials
-          ? "已退出登录并清除本地密钥"
-          : "密码库已锁定",
-      "info"
-    );
+    showToast(clearCredentials ? "已退出登录并清除本地密钥" : "密码库已锁定", "info");
   }
 
   async function handleManualSync() {
     const cur = session();
     if (!cur || syncing()) return;
-    if (cur.isDemo) {
-      nowMs.set(Date.now());
-      void syncAutofillNow();
-      void refreshAutofillAndPending();
-      Haptics.notification("success");
-      showToast("演示模式：本地示例数据已是最新", "ok");
-      return;
-    }
     syncing.set(true);
     try {
       await performSync(cur);
@@ -1008,29 +726,13 @@ function App() {
     if (!cur) throw new Error("密码库已锁定");
     const vk = vaultKeys().get(payload.vaultId);
     if (!vk) throw new Error("未找到对应保险库密钥");
-    const now = new Date().toISOString();
-    const saved = cur.isDemo
-      ? {
-          ...payload,
-          createdAt: payload.createdAt || now,
-          updatedAt: now,
-        }
-      : await saveItem(cur.serverUrl, cur.token, vk, payload, isNew);
+    const saved = await saveItem(cur.serverUrl, cur.token, vk, payload, isNew);
     items.update((prev) => [saved, ...prev.filter((i) => i.id !== saved.id)]);
     if (opts?.select !== false) {
       selectedItemId.set(saved.id);
     }
     void syncAutofillNow();
-    showToast(
-      cur.isDemo
-        ? isNew
-          ? "已创建示例条目"
-          : "已保存修改（演示模式）"
-        : isNew
-          ? "已创建条目"
-          : "已保存修改",
-      "ok"
-    );
+    showToast(isNew ? "已创建条目" : "已保存修改", "ok");
   }
 
   async function handleDeleteVaultItem(item: VaultItemPayload) {
@@ -1046,14 +748,12 @@ function App() {
     });
     if (res.action !== "delete") return;
     try {
-      if (!cur.isDemo) {
-        await deleteItem(cur.serverUrl, cur.token, item.vaultId, item.id);
-      }
+      await deleteItem(cur.serverUrl, cur.token, item.vaultId, item.id);
       items.update((prev) => prev.filter((i) => i.id !== item.id));
       if (selectedItemId() === item.id) selectedItemId.set(null);
       void syncAutofillNow();
       Haptics.notification("success");
-      showToast(cur.isDemo ? "条目已删除（演示模式）" : "条目已删除", "ok");
+      showToast("条目已删除", "ok");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "删除失败", "error");
     }
@@ -1084,9 +784,7 @@ function App() {
           totp: step.otpauthUri,
           updatedAt: now,
         };
-        const saved = cur.isDemo
-          ? nextItem
-          : await saveItem(cur.serverUrl, cur.token, vk, nextItem, false);
+        const saved = await saveItem(cur.serverUrl, cur.token, vk, nextItem, false);
         updatedItems.push(saved);
       } else if (step.action === "create") {
         newItems.push({
@@ -1108,9 +806,7 @@ function App() {
 
     const createdSaved =
       newItems.length > 0
-        ? cur.isDemo
-          ? newItems
-          : await batchSaveItems(cur.serverUrl, cur.token, vid, vk, newItems)
+        ? await batchSaveItems(cur.serverUrl, cur.token, vid, vk, newItems)
         : [];
 
     if (updatedItems.length > 0 || createdSaved.length > 0) {
@@ -1132,16 +828,7 @@ function App() {
     const name = newVaultName().trim();
     if (!cur || !name) return;
     try {
-      const now = new Date().toISOString();
-      const created = cur.isDemo
-        ? {
-            id: randomId(),
-            metadata: { name },
-            keyBytes: generateRawAesKey(),
-            createdAt: now,
-            updatedAt: now,
-          }
-        : await createVault(cur.serverUrl, cur.token, cur.rootKeyBytes, name);
+      const created = await createVault(cur.serverUrl, cur.token, cur.rootKeyBytes, name);
       vaultKeys.update((m) => {
         const next = new Map(m);
         next.set(created.id, created.keyBytes);
@@ -1151,12 +838,7 @@ function App() {
       selectedVaultId.set(created.id);
       newVaultName.set("");
       newVaultDialogOpen.set(false);
-      showToast(
-        cur.isDemo
-          ? `已创建示例保险库「${created.metadata.name}」`
-          : `已创建保险库「${created.metadata.name}」`,
-        "ok"
-      );
+      showToast(`已创建保险库「${created.metadata.name}」`, "ok");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "创建保险库失败", "error");
     }
@@ -1165,20 +847,6 @@ function App() {
   async function handleSyncImap(accountId?: string) {
     const cur = session();
     if (!cur || syncingImap()) return;
-    if (cur.isDemo) {
-      const now = new Date().toISOString();
-      imapAccounts.update((prev) =>
-        prev.map((acc) =>
-          !accountId || acc.id === accountId
-            ? { ...acc, lastSyncAt: now, status: acc.enabled ? "listening" : "disabled" }
-            : acc
-        )
-      );
-      void syncAutofillNow();
-      Haptics.notification("success");
-      showToast("演示模式：示例收件箱已刷新", "ok");
-      return;
-    }
     syncingImap.set(true);
     try {
       const res = await syncImapNow(cur.serverUrl, cur.token, accountId);
@@ -1206,30 +874,6 @@ function App() {
   async function handleSaveImapAccount(input: SaveImapAccountInput) {
     const cur = session();
     if (!cur) throw new Error("密码库已锁定");
-    if (cur.isDemo) {
-      const now = new Date().toISOString();
-      const existing = input.id ? imapAccounts().find((a) => a.id === input.id) : undefined;
-      const saved: ImapAccountPublic = {
-        id: existing?.id ?? input.id ?? randomId(),
-        label: input.label?.trim() || input.username,
-        enabled: input.enabled,
-        host: input.host,
-        port: input.port,
-        tls: input.tls,
-        username: input.username,
-        hasPassword: Boolean(existing?.hasPassword || input.password?.trim()),
-        status: input.enabled ? "listening" : "disabled",
-        lastError: null,
-        lastSyncAt: existing?.lastSyncAt ?? now,
-      };
-      imapAccounts.update((prev) =>
-        existing
-          ? prev.map((a) => (a.id === saved.id ? saved : a))
-          : [...prev, saved]
-      );
-      showToast("IMAP 邮箱已保存（演示模式）", "ok");
-      return;
-    }
     const res = await saveImapAccount(cur.serverUrl, cur.token, input);
     imapAccounts.set(res.accounts);
     await performSync(cur);
@@ -1239,18 +883,6 @@ function App() {
   async function handleToggleImapEnabled(acc: ImapAccountPublic) {
     const cur = session();
     if (!cur) return;
-    if (cur.isDemo) {
-      const nextEnabled = !acc.enabled;
-      imapAccounts.update((prev) =>
-        prev.map((a) =>
-          a.id === acc.id
-            ? { ...a, enabled: nextEnabled, status: nextEnabled ? "listening" : "disabled" }
-            : a
-        )
-      );
-      showToast(nextEnabled ? `已启用「${acc.label}」` : `已停用「${acc.label}」`, "ok");
-      return;
-    }
     try {
       const res = await saveImapAccount(cur.serverUrl, cur.token, {
         id: acc.id,
@@ -1280,15 +912,6 @@ function App() {
       ],
     });
     if (res.action !== "delete") return;
-    if (cur.isDemo) {
-      imapAccounts.update((prev) => prev.filter((a) => a.id !== acc.id));
-      const removedAddr = extractEmailAddress(acc.username);
-      if (selectedMailbox() === removedAddr) {
-        selectedMailbox.set("all");
-      }
-      showToast("已删除邮箱账号（演示模式）", "ok");
-      return;
-    }
     try {
       const out = await deleteImapAccount(cur.serverUrl, cur.token, acc.id);
       imapAccounts.set(out.accounts);
@@ -1303,16 +926,6 @@ function App() {
     if (!cur) return;
     const nextCfg: EmailFilterConfig = { ...emailFilter(), otpOnly: nextOtpOnly };
     emailFilter.set(nextCfg);
-    if (cur.isDemo) {
-      Haptics.selection();
-      showToast(
-        nextCfg.otpOnly
-          ? "已开启：仅保留含验证码邮件（演示模式）"
-          : "已关闭：保留全部收件（演示模式）",
-        "ok"
-      );
-      return;
-    }
     try {
       const saved = await saveEmailFilter(cur.serverUrl, cur.token, nextCfg);
       emailFilter.set(saved);
@@ -1327,13 +940,11 @@ function App() {
     const cur = session();
     if (!cur) return;
     try {
-      if (!cur.isDemo) {
-        await deleteEmail(cur.serverUrl, cur.token, em.id);
-      }
+      await deleteEmail(cur.serverUrl, cur.token, em.id);
       emails.update((prev) => prev.filter((e) => e.id !== em.id));
       if (expandedEmailId() === em.id) expandedEmailId.set(null);
       void syncAutofillNow();
-      showToast(cur.isDemo ? "已删除邮件记录（演示模式）" : "已删除邮件记录", "ok");
+      showToast("已删除邮件记录", "ok");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "删除邮件失败", "error");
     }
@@ -1775,35 +1386,68 @@ function App() {
 
   // ---------- Views ----------
 
+  function renderAuthInlinePill(props: {
+    label: string;
+    variant?: "tonal" | "neutral";
+    icon?: typeof copyIcon;
+    disabled?: boolean;
+    onPress: () => void;
+  }) {
+    const isTonal = () => (props.variant ?? "neutral") === "tonal";
+    return (
+      <Button
+        disabled={props.disabled}
+        onPress={props.onPress}
+        class={`h-7 px-2.5 rounded-md items-center justify-center flex-row gap-1 disabled:opacity-50 ${
+          isTonal() ? "bg-primary/12 active:opacity-75" : "bg-muted active:opacity-75"
+        }`}
+      >
+        <If when={props.icon}>
+          {(ic) => <UiIcon src={ic()} size={13} color={isTonal() ? token("primary") : token("foreground")} />}
+        </If>
+        <Text
+          class={`text-[12px] font-semibold ${isTonal() ? "text-primary" : "text-foreground"}`}
+          style={{ numberOfLines: 1 }}
+        >
+          {props.label}
+        </Text>
+      </Button>
+    );
+  }
+
   function renderAuthView() {
     return (
       <View class="flex-1 bg-background pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
         <Scroll
           class="flex-1"
-          contentClass="grow items-center justify-center px-4 py-8"
+          contentClass="grow items-center justify-center px-4 py-3"
+          bounces={false}
+          scrollbar={false}
+          keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
         >
-          <View class="w-full max-w-md gap-6">
-            {/* Brand Header */}
-            <View class="items-center gap-2">
-              <AppBrandLogo src={appIcon} size={56} class="h-14 w-14 rounded-2xl" />
-              <PageTitle>NonePwd</PageTitle>
-              <SubheadText>端到端零知识密码库 · 2FA 与邮箱验证码中枢</SubheadText>
+          <View class="w-full max-w-md gap-4">
+            {/* Compact Brand Header */}
+            <View class="flex-row items-center justify-center gap-3">
+              <AppBrandLogo src={appIcon} size={44} class="h-11 w-11 rounded-xl" />
+              <View class="gap-0.5">
+                <PageTitle>NonePwd</PageTitle>
+                <CaptionText>零知识密码库 · 2FA 与收信中枢</CaptionText>
+              </View>
             </View>
 
             {/* Auth Card */}
-            <View class="gap-4 rounded-2xl border border-border bg-card p-4">
+            <View class="gap-3 rounded-2xl border border-border bg-card p-3.5">
               {/* Server URL */}
               <FormField
                 label="服务端地址"
-                rightSlot={
-                  <CompactButton
-                    label="检测服务端"
-                    variant="tonal"
-                    disabled={authBusy()}
-                    onPress={() => void handleCheckServer()}
-                  />
-                }
+                class="gap-1.5"
+                rightSlot={renderAuthInlinePill({
+                  label: "检测服务端",
+                  variant: "tonal",
+                  disabled: authBusy(),
+                  onPress: () => void handleCheckServer(),
+                })}
               >
                 <AppInput
                   testID="server-url-input"
@@ -1813,6 +1457,8 @@ function App() {
                   keyboardType="url"
                   autoCapitalize="none"
                   autoCorrect={false}
+                  class="h-10"
+                  style={{ height: 40 }}
                 />
               </FormField>
 
@@ -1831,8 +1477,8 @@ function App() {
 
               {/* Unlock Form */}
               <If when={phase() === "locked"}>
-                <View class="gap-4">
-                  <FormField label="Secret Key">
+                <View class="gap-3">
+                  <FormField label="Secret Key" class="gap-1.5">
                     <AppInput
                       mono
                       testID="secret-key-input"
@@ -1841,18 +1487,19 @@ function App() {
                       placeholder="NP3-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX"
                       autoCapitalize="characters"
                       autoCorrect={false}
+                      class="h-10"
+                      style={{ height: 40 }}
                     />
                   </FormField>
 
                   <FormField
                     label="主密码"
-                    rightSlot={
-                      <CompactButton
-                        label={showUnlockPassword() ? "隐藏" : "显示"}
-                        variant="neutral"
-                        onPress={() => showUnlockPassword.update((v) => !v)}
-                      />
-                    }
+                    class="gap-1.5"
+                    rightSlot={renderAuthInlinePill({
+                      label: showUnlockPassword() ? "隐藏" : "显示",
+                      variant: "neutral",
+                      onPress: () => showUnlockPassword.update((v) => !v),
+                    })}
                   >
                     <AppInput
                       testID="master-password-input"
@@ -1862,10 +1509,12 @@ function App() {
                       autoComplete="current-password"
                       placeholder="输入主密码"
                       onSubmit={() => void handleUnlock()}
+                      class="h-10"
+                      style={{ height: 40 }}
                     />
                   </FormField>
 
-                  <FormField label="记住登录时长">
+                  <FormField label="记住登录时长" class="gap-1.5">
                     <SegmentedControl
                       options={REMEMBER_OPTIONS}
                       value={rememberDuration()}
@@ -1888,56 +1537,68 @@ function App() {
 
               {/* Setup Form */}
               <If when={phase() === "setup"}>
-                <View class="gap-4">
-                  <FormField label="主账号邮箱">
+                <View class="gap-3">
+                  <FormField label="主账号邮箱" class="gap-1.5">
                     <AppInput
                       value={setupEmail()}
                       onChange={(e) => setupEmail.set(e.value)}
                       keyboardType="email-address"
                       autoCapitalize="none"
                       placeholder="owner@example.com"
+                      class="h-10"
+                      style={{ height: 40 }}
                     />
                   </FormField>
 
                   <FormField
                     label="Secret Key (请务必保存)"
+                    class="gap-1.5"
                     rightSlot={
-                      <View class="shrink-0 flex-row gap-2">
-                        <CompactButton
-                          label="复制"
-                          icon={copyIcon}
-                          variant="tonal"
-                          onPress={() => void handleCopyText(setupSecretKey(), " Secret Key")}
-                        />
-                        <CompactButton
-                          label="重新生成"
-                          variant="neutral"
-                          onPress={() => setupSecretKey.set(generateSecretKey())}
-                        />
+                      <View class="shrink-0 flex-row gap-1.5">
+                        {renderAuthInlinePill({
+                          label: "复制",
+                          icon: copyIcon,
+                          variant: "tonal",
+                          onPress: () => void handleCopyText(setupSecretKey(), " Secret Key"),
+                        })}
+                        {renderAuthInlinePill({
+                          label: "重新生成",
+                          variant: "neutral",
+                          onPress: () => setupSecretKey.set(generateSecretKey()),
+                        })}
                       </View>
                     }
                   >
-                    <View class="rounded-xl bg-input px-3 py-3">
-                      <Text class="font-mono text-[14px] text-foreground">{setupSecretKey()}</Text>
+                    <View class="h-10 justify-center rounded-xl bg-input px-3">
+                      <Text
+                        class="font-mono text-[13px] text-foreground"
+                        style={{ numberOfLines: 1 }}
+                      >
+                        {setupSecretKey()}
+                      </Text>
                     </View>
                   </FormField>
 
-                  <FormField label="设置主密码">
+                  <FormField label="设置主密码" class="gap-1.5">
                     <AppInput
                       value={setupPassword()}
                       onChange={(e) => setupPassword.set(e.value)}
                       masked
                       autoComplete="new-password"
                       placeholder="至少 10 位强密码"
+                      class="h-10"
+                      style={{ height: 40 }}
                     />
                   </FormField>
 
-                  <FormField label="邮箱别名域名 (可选)">
+                  <FormField label="邮箱别名域名 (可选)" class="gap-1.5">
                     <AppInput
                       value={setupAliasDomain()}
                       onChange={(e) => setupAliasDomain.set(e.value)}
                       autoCapitalize="none"
                       placeholder="mail.example.com"
+                      class="h-10"
+                      style={{ height: 40 }}
                     />
                   </FormField>
 
@@ -1952,15 +1613,6 @@ function App() {
                   />
                 </View>
               </If>
-            </View>
-
-            <View class="items-center pt-1">
-              <CompactButton
-                testID="enter-demo-btn"
-                label="离线体验示例库"
-                variant="neutral"
-                onPress={() => enterDemoMode()}
-              />
             </View>
           </View>
         </Scroll>
@@ -2510,16 +2162,11 @@ function App() {
         <ScreenHeader
           title="设置"
           rightSlot={
-            <View class="flex-row items-center gap-2 shrink-0">
-              <If when={session()?.isDemo}>
-                <BadgePill label="演示模式" tone="primary" />
-              </If>
-              <CompactButton
-                label={session()?.isDemo ? "退出演示" : "锁定"}
-                variant={session()?.isDemo ? "danger" : "neutral"}
-                onPress={() => void handleLock(false)}
-              />
-            </View>
+            <CompactButton
+              label="锁定"
+              variant="neutral"
+              onPress={() => void handleLock(false)}
+            />
           }
         />
 
@@ -2539,51 +2186,34 @@ function App() {
             />
             <GroupedList>
               <GroupedRow class="gap-1">
-                <View class="flex-row items-center justify-between gap-2">
-                  <BodyText class="flex-1 min-w-0 font-medium">{session()?.email}</BodyText>
-                  <If when={session()?.isDemo}>
-                    <BadgePill label="演示模式" tone="primary" />
-                  </If>
-                </View>
+                <BodyText class="font-medium">{session()?.email}</BodyText>
                 <SubheadText>服务端：{session()?.serverUrl}</SubheadText>
               </GroupedRow>
               <GroupedRow last class="gap-2">
-                <If
-                  when={session()?.isDemo}
-                  else={
-                    <View class="gap-2">
-                      <View class="flex-row gap-2">
-                        <ActionButton
-                          variant="secondary"
-                          class="flex-1"
-                          disabled={syncing()}
-                          onPress={() => void handleManualSync()}
-                          label={syncing() ? "同步中..." : "立即全量同步"}
-                        />
-                        <ActionButton
-                          testID="lock-vault-btn"
-                          variant="primary"
-                          class="flex-1"
-                          onPress={() => void handleLock(false)}
-                          label="锁定密码库"
-                        />
-                      </View>
-                      <ActionButton
-                        testID="logout-account-btn"
-                        variant="danger"
-                        onPress={() => void handleLock(true)}
-                        label="退出登录（切换账号）"
-                      />
-                    </View>
-                  }
-                >
+                <View class="gap-2">
+                  <View class="flex-row gap-2">
+                    <ActionButton
+                      variant="secondary"
+                      class="flex-1"
+                      disabled={syncing()}
+                      onPress={() => void handleManualSync()}
+                      label={syncing() ? "同步中..." : "立即全量同步"}
+                    />
+                    <ActionButton
+                      testID="lock-vault-btn"
+                      variant="primary"
+                      class="flex-1"
+                      onPress={() => void handleLock(false)}
+                      label="锁定密码库"
+                    />
+                  </View>
                   <ActionButton
-                    testID="lock-vault-btn"
+                    testID="logout-account-btn"
                     variant="danger"
-                    onPress={() => void handleLock(false)}
-                    label="退出演示模式"
+                    onPress={() => void handleLock(true)}
+                    label="退出登录（切换账号）"
                   />
-                </If>
+                </View>
               </GroupedRow>
             </GroupedList>
           </View>
@@ -2980,9 +2610,6 @@ function App() {
         onTest={async (input) => {
           const cur = session();
           if (!cur) return { ok: false, error: "密码库已锁定" };
-          if (cur.isDemo) {
-            return { ok: true, messages: emails().length };
-          }
           return testImapConnection(cur.serverUrl, cur.token, input);
         }}
         onSave={handleSaveImapAccount}

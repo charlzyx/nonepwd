@@ -960,136 +960,95 @@ describe("NonePwd App Headless UI & End-to-End Flows", () => {
     await mobileWebApp.waitUntil(() => webSyncPayloads.some((p) => p.unlocked === false));
   });
 
-  test("enters offline demo vault without credentials, explores all 4 tabs with zero network calls, and locks back to Auth", async () => {
-    const demoApp = await open("./App.tsx", {
-      platform: "web",
+  test("verifies production compact Auth screen without demo mode, toggles password/mode/duration, checks server, and completes new-server setup", async () => {
+    const fx = await buildTestVaultFixture();
+    let initialized = false;
+    const setupCaptures: Array<{ email?: string; aliasDomain?: string; vaults?: unknown[] }> = [];
+
+    const authApp = await open("./App.tsx", {
+      platform: "ios",
       width: 390,
       height: 844,
-      network: {},
-    });
-
-    await demoApp.press("离线体验示例库");
-    await demoApp.waitFor("text:GitHub");
-    await demoApp.waitFor("text:Cloudflare");
-
-    const githubCode = (await generateTotp("JBSWY3DPEHPK3PXP", Date.now())).code;
-    const cfCode = (await generateTotp("GEZDGNBVGY3TQOJQ", Date.now())).code;
-    await demoApp.waitFor(`text:${githubCode.slice(0, 3)}`);
-    await demoApp.waitFor(`text:${githubCode.slice(3)}`);
-    await demoApp.waitFor(`text:${cfCode.slice(0, 3)}`);
-    await demoApp.waitFor(`text:${cfCode.slice(3)}`);
-
-    // Switch to Vault tab, inspect demo items, and create a demo item in-memory
-    await demoApp.press("密码库");
-    await demoApp.waitFor("text:OpenAI API Key");
-    await demoApp.waitFor("text:Prod Bastion SSH");
-    await demoApp.press("Prod Bastion SSH");
-    await demoApp.waitFor("text:SSH 公钥");
-    await demoApp.back();
-    await demoApp.waitFor("text:SSH 公钥", { state: "gone" });
-
-    await demoApp.press("id:vault-add-btn");
-    await demoApp.waitFor("text:新建条目");
-    await demoApp.type("id:item-title-input", "Demo Vercel");
-    await demoApp.press("生成强密码");
-    await demoApp.press("加密并保存");
-    await demoApp.waitFor("text:新建条目", { state: "gone" });
-    await demoApp.waitFor("text:Demo Vercel");
-    await demoApp.waitFor("text:已创建示例条目");
-    await demoApp.press("已创建示例条目");
-    await demoApp.waitFor("text:已创建示例条目", { state: "gone" });
-    await demoApp.waitFor("text:密码 / 机密");
-    await demoApp.back();
-    await demoApp.waitFor("text:密码 / 机密", { state: "gone" });
-
-    // Switch to Inbox tab and verify multi-mailbox OTP emails & filter pills
-    await demoApp.press("收件箱");
-    await demoApp.waitFor("text:849");
-    await demoApp.waitFor("text:201");
-    await demoApp.waitFor("text:517");
-    await demoApp.waitFor("text:394");
-    await demoApp.waitFor("text:306");
-    await demoApp.waitFor("text:418");
-    await demoApp.press("运维 QQ 邮箱 · ops@qq.com (1)");
-    await demoApp.waitFor("text:849", { state: "gone" });
-    expect(demoApp.texts()).toContain("517");
-    expect(demoApp.texts()).toContain("394");
-    await demoApp.press("全部邮箱 (3)");
-    await demoApp.waitFor("text:849");
-    await demoApp.waitFor("text:201");
-    await demoApp.press("id:sync-imap-btn");
-
-    // Switch to Settings tab, verify 当前账号, demo badge & 3 IMAP accounts, test/add IMAP in-memory, then exit demo
-    await demoApp.press("设置");
-    await demoApp.waitFor("text:当前账号");
-    expect(demoApp.texts()).toContain("演示模式");
-    expect(demoApp.texts()).toContain("退出演示模式");
-    await demoApp.press("演示模式：示例收件箱已刷新");
-    await demoApp.waitFor("text:演示模式：示例收件箱已刷新", { state: "gone" });
-    expect(demoApp.texts()).not.toContain("系统自动填充");
-    expect(demoApp.shows("id:enable-autofill-btn")).toBe(false);
-    expect(demoApp.texts()).toContain("工作 Gmail");
-    expect(demoApp.texts()).toContain("备用 Gmail");
-    expect(demoApp.texts()).toContain("运维 QQ 邮箱");
-    await demoApp.press("id:add-imap-btn");
-    await demoApp.waitFor("text:添加 IMAP 收信邮箱");
-    await demoApp.press("Gmail");
-    await demoApp.type("you@gmail.com", "qa@gmail.com");
-    await demoApp.type("输入授权码", "demo-app-pw");
-    await demoApp.press("测试连接");
-    await demoApp.waitFor("text:连接成功！INBOX 当前共有 3 封邮件");
-    await demoApp.press("保存账号");
-    await demoApp.waitFor("text:添加 IMAP 收信邮箱", { state: "gone" });
-    await demoApp.waitFor("text:qa@gmail.com · imap.gmail.com:993");
-
-    await demoApp.press("id:otp-only-switch");
-    expect(demoApp.requests()).toHaveLength(0);
-
-    await demoApp.press("退出演示模式");
-    await demoApp.waitFor("id:unlock-button");
-    expect(demoApp.requests()).toHaveLength(0);
-
-    // Verify demo mode never overwrites AutofillStore when a real remembered session exists
-    const preservedSyncPayloads: unknown[] = [];
-    const desktopDemo = await open("./App.tsx", {
-      platform: "windows",
-      width: 1100,
-      height: 760,
-      network: {},
-      storage: {
-        "nonepwd.session.v1": JSON.stringify({
-          serverUrl: "http://127.0.0.1:8787",
-          token: "real-remembered-token",
-          email: "owner@example.com",
-          rootKeyB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-          emailPrivateKeyPkcs8B64: "MC4CAQAwBQYDK2VuBCIEIHWgp24HWSBVyuB4RLoPEgI-a44GZZgWibgTsIH2jJsr",
-          expiresAtMs: Date.now() + 3600_000,
+      network: {
+        "GET http://127.0.0.1:8787/api/auth/params": () => ({
+          body: { initialized },
         }),
-      },
-      host: {
-        handlers: {
-          "autofill.status": () =>
-            JSON.stringify({ available: true, supported: true, enabled: true }),
-          "autofill.sync": (raw: unknown) => {
-            preservedSyncPayloads.push(raw);
-            return JSON.stringify({ ok: true });
-          },
-          "autofill.takePendingSaves": () => JSON.stringify({ saves: [] }),
+        "POST http://127.0.0.1:8787/api/auth/setup": (req: { body?: string | null }) => {
+          const parsed = JSON.parse(req.body ?? "{}") as {
+            email?: string;
+            aliasDomain?: string;
+            emailPublicKey?: string;
+            vaults?: unknown[];
+          };
+          initialized = true;
+          setupCaptures.push({
+            email: parsed.email,
+            aliasDomain: parsed.aliasDomain,
+            vaults: parsed.vaults,
+          });
+          return {
+            body: {
+              token: "tok_setup_1",
+              account: {
+                email: parsed.email ?? "newowner@example.com",
+                emailPublicKey: parsed.emailPublicKey ?? "",
+                cfWebhookSecret: "whsec_new",
+                aliasDomain: parsed.aliasDomain ?? "",
+              },
+            },
+          };
         },
+        "GET http://127.0.0.1:8787/api/sync": () => ({
+          body: {
+            kind: "owner",
+            account: {
+              email: setupCaptures[0]?.email ?? "newowner@example.com",
+              emailPublicKey: fx.networkRoutes["GET http://127.0.0.1:8787/api/sync"]().body.account.emailPublicKey,
+              cfWebhookSecret: "whsec_new",
+              aliasDomain: setupCaptures[0]?.aliasDomain ?? "",
+            },
+            vaults: [],
+            items: [],
+            aliases: [],
+            emails: [],
+            imapAccounts: [],
+            emailFilter: { enabled: false, otpOnly: false, mode: "allow", rules: [] },
+          },
+        }),
+        "POST http://127.0.0.1:8787/api/auth/logout": { body: { ok: true } },
       },
     });
 
-    await desktopDemo.press("离线体验示例库");
-    await desktopDemo.waitFor("text:GitHub");
-    await desktopDemo.press("设置");
-    await desktopDemo.waitFor("text:演示模式");
-    await desktopDemo.press("锁定");
-    await desktopDemo.waitFor("id:unlock-button");
-    expect(preservedSyncPayloads).toHaveLength(0);
-    expect(
-      desktopDemo
-        .requests()
-        .filter((r) => (r.headers?.authorization ?? r.headers?.Authorization) === "Bearer demo-local")
-    ).toHaveLength(0);
+    expect(authApp.texts()).not.toContain("离线体验示例库");
+    expect(authApp.shows("id:enter-demo-btn")).toBe(false);
+
+    // Toggle unlock password visibility and remember-duration options
+    await authApp.press("显示");
+    expect(authApp.texts()).toContain("隐藏");
+    await authApp.press("隐藏");
+    expect(authApp.texts()).toContain("显示");
+    await authApp.press("24小时");
+
+    // Check server transitions cleanly to setup mode when uninitialized
+    await authApp.press("检测服务端");
+    await authApp.waitFor("text:主账号邮箱");
+    expect(authApp.texts()).toContain("Secret Key (请务必保存)");
+
+    // Switch back and forth cleanly
+    await authApp.press("解锁密码库");
+    await authApp.waitFor("id:unlock-button");
+    await authApp.press("初始化新服务端");
+    await authApp.waitFor("text:初始化并解锁");
+
+    // Fill setup form and complete account initialization
+    await authApp.type("owner@example.com", "newowner@example.com");
+    await authApp.type("至少 10 位强密码", "NewStrongMaster#2026");
+    await authApp.type("mail.example.com", "otp.example.com");
+    await authApp.press("初始化并解锁");
+    await authApp.waitFor("text:暂无 2FA 验证码");
+    expect(setupCaptures).toHaveLength(1);
+    expect(setupCaptures[0]?.email).toBe("newowner@example.com");
+    expect(setupCaptures[0]?.aliasDomain).toBe("otp.example.com");
+    expect(setupCaptures[0]?.vaults).toHaveLength(2);
   });
 });
