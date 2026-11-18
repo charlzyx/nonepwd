@@ -803,6 +803,38 @@ function hideQrToast() {
   }
 }
 
+async function copyTextSafe(text: string): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fallback for plain http://<IP> pages without navigator.clipboard
+    }
+  }
+  if (typeof document === 'undefined' || !document.body) return false;
+  const activeEl = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  textarea.style.left = '-9999px';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch {
+    ok = false;
+  } finally {
+    document.body.removeChild(textarea);
+    activeEl?.focus?.();
+  }
+  return ok;
+}
+
 async function showQrImportToast(msg: QrImportResultMessage) {
   currentThemePref = await loadThemePreference();
   ensureShadowUi();
@@ -839,8 +871,8 @@ async function showQrImportToast(msg: QrImportResultMessage) {
   actionsEl.className = 'np-qr-toast-actions';
 
   if (msg.ok && !msg.locked) {
-    if (msg.code && typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-      void navigator.clipboard.writeText(msg.code).catch(() => {});
+    if (msg.code) {
+      void copyTextSafe(msg.code);
     }
     const title = msg.title || '2FA';
     const code = msg.code || '';

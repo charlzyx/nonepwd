@@ -2,7 +2,7 @@
   "name": "NonePwd",
   "id": "dev.nonepwd.app",
   "version": "0.1.0",
-  "build": 9,
+  "build": 10,
   "theme": {
     "cssVars": {
       "theme": {

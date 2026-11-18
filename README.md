@@ -38,13 +38,13 @@
 
 ## 私有部署
 
-### A. Cloudflare Serverless（自有域名免运维）
+### A. Cloudflare Serverless（免域名可用 `*.workers.dev`）
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/charlzyx/nonepwd/tree/main/packages/cf-server)
 
-点击按钮会引导在**你的 GitHub 账号下自动 Fork 本仓库**，并自动创建 Worker、`nonepwd-db` (D1)、`nonepwd-vault-blobs` (R2) 与 Durable Objects（仓库内置预编译 WASM，无需安装 Rust）。部署后在 Cloudflare Dashboard 绑定自定义域名（如 `vault.yourdomain.com`），并在 **Email → Email Routing → Catch-all** 选择发送到 **`nonepwd-cf-server`** 即可；手动 `wrangler` 部署见 [`packages/cf-server/README.md`](./packages/cf-server/README.md)（若需转发到外部服务端，见 [`packages/cf-email-worker/wrangler.toml`](./packages/cf-email-worker/wrangler.toml)）。
+点击按钮会在**你的 GitHub 账号下自动 Fork 本仓库**，并创建 Worker、`nonepwd-db` (D1)、`nonepwd-vault-blobs` (R2) 与 Durable Objects（内置预编译 WASM，无需 Rust）。**没有域名也能直接通过免费 `https://nonepwd-cf-server.<subdomain>.workers.dev` 使用密码库与多账号 IMAP 验证码**；仅当需要 `*@yourdomain.com` 随机别名收信时，才需绑定自定义域名并开启 **Email → Email Routing → Catch-all**。手动 `wrangler` 部署见 [`packages/cf-server/README.md`](./packages/cf-server/README.md)（外部转发见 [`packages/cf-email-worker/wrangler.toml`](./packages/cf-email-worker/wrangler.toml)）。
 
-### B. 本地 / VPS / Docker（单二进制 + SQLite）
+### B. 本地 / VPS / Docker（单二进制 + SQLite，支持 `http://<IP>`）
 
 ```bash
 # Node.js >= 22 一键启动（默认 http://127.0.0.1:8787）
@@ -54,6 +54,8 @@ NONEPWD_DATA_DIR=./data npx @nonepwd/server
 np server
 docker compose up -d --build
 ```
+
+> Web Vault 与全平台客户端均支持直连 `http://<IP>:8787`（适合局域网 / NAS / Tailscale；公网暴露建议配合 Caddy / Nginx / Cloudflare Tunnel 提供 HTTPS）。
 
 ---
 

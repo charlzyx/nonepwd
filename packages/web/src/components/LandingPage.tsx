@@ -239,13 +239,13 @@ curl -H "Authorization: Bearer my-connect-secret" \\
       heading: '两种自建方式，永久 0 订阅费',
       local: {
         title: 'Rust 单二进制',
-        desc: '单文件内置 SQLite、多账号 IMAP 与 Web Vault，一条命令启动。',
+        desc: '单文件内置 SQLite、多账号 IMAP 与 Web Vault，支持 http://<IP>:8787 内网直连（公网建议配 HTTPS 反代）。',
         cmd: `npx @nonepwd/server\n# 或已安装原生 CLI：\nnp server`,
         copyLabel: '复制',
       },
       cf: {
-        title: 'Worker + D1 + R2 自有域名',
-        desc: '点击按钮自动 Fork 仓库并创建 Worker + D1 + R2，绑定自有域名即用。',
+        title: 'Worker + D1 + R2（支持 workers.dev）',
+        desc: '一键 Fork 并创建 Worker + D1 + R2，无需域名即可用 *.workers.dev 运行 Vault 与多账号 IMAP；绑域名可加开别名收信。',
         button: '一键 Fork 并部署到 Cloudflare',
         manualTag: 'Fork / Clone 手动部署',
         cmd: `pnpm install && pnpm build:cf-server\ncd packages/cf-server && npx wrangler deploy`,
@@ -400,13 +400,13 @@ curl -H "Authorization: Bearer my-connect-secret" \\
       heading: 'Two ways to self-host, $0 forever',
       local: {
         title: 'Single Rust Binary',
-        desc: 'Built-in SQLite vault, multi-account IMAP, and Web Vault in one command.',
+        desc: 'Built-in SQLite vault, multi-account IMAP, and Web Vault; works directly over http://<IP>:8787 on LAN (use HTTPS proxy on public web).',
         cmd: `npx @nonepwd/server\n# Or with the native CLI installed:\nnp server`,
         copyLabel: 'Copy',
       },
       cf: {
-        title: 'Worker + D1 + R2 Custom Domain',
-        desc: 'Auto-fork the repo and provision Worker + D1 + R2 on your own Cloudflare account.',
+        title: 'Worker + D1 + R2 (workers.dev ready)',
+        desc: 'Auto-fork the repo and provision Worker + D1 + R2. Works out-of-the-box on *.workers.dev for Vault & IMAP; add a domain for aliases.',
         button: 'Fork & Deploy to Cloudflare',
         manualTag: 'Fork / Clone via Wrangler',
         cmd: `pnpm install && pnpm build:cf-server\ncd packages/cf-server && npx wrangler deploy`,

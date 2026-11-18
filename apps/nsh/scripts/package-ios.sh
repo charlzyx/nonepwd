@@ -112,6 +112,7 @@ plist["CFBundleIcons"] = {
 plist["UIDeviceFamily"] = [1]
 plist["UIRequiresFullScreen"] = True
 plist["UISupportedInterfaceOrientations"] = ["UIInterfaceOrientationPortrait"]
+plist["NSAppTransportSecurity"] = {"NSAllowsArbitraryLoads": True}
 plist.pop("UISupportedInterfaceOrientations~ipad", None)
 plist.pop("CFBundleIcons~ipad", None)
 

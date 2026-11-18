@@ -97,8 +97,8 @@ cd packages/cf-server && npx wrangler deploy`}
                 </pre>
                 <p className="mt-2 text-xs text-muted-foreground">
                   {isZh
-                    ? '点击官网「一键 Fork 并部署到 Cloudflare」或 Fork 仓库后运行上方命令，无需安装 Rust。'
-                    : 'Use the "Fork & Deploy to Cloudflare" button on the homepage, or run the commands above from your fork (no Rust required).'}
+                    ? '点击官网「一键 Fork 并部署到 Cloudflare」或 Fork 后运行上方命令（无需 Rust）。无域名也可直接用 *.workers.dev 运行 Vault 与多账号 IMAP；绑域名可加开别名收信。'
+                    : 'Use "Fork & Deploy to Cloudflare" on the homepage or run above from your fork (no Rust). Works on *.workers.dev for Vault & IMAP; add a domain for aliases.'}
                 </p>
               </div>
 
@@ -114,8 +114,8 @@ cd packages/cf-server && npx wrangler deploy`}
                 </pre>
                 <p className="mt-2 text-xs text-muted-foreground">
                   {isZh
-                    ? '在 127.0.0.1:8787 运行内置 SQLite 密文库与 Web 管理台。'
-                    : 'Serves the local SQLite vault and Web UI at 127.0.0.1:8787.'}
+                    ? '运行内置 SQLite 密文库与 Web 管理台，全端原生支持 http://<IP>:8787 直连（公网建议配 HTTPS 反代）。'
+                    : 'Serves SQLite vault & Web UI; all clients and Web Vault support direct http://<IP>:8787 (HTTPS proxy recommended on public web).'}
                 </p>
               </div>
 

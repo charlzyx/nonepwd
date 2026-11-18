@@ -121,6 +121,16 @@ build_all_assets() {
   local sim_tmp
   sim_tmp="$(mktemp -d "${TMPDIR:-/tmp}/nonepwd-ios-sim.XXXXXX")"
   nsh package --target ios-simulator -o "$sim_tmp" "$REPO_ROOT/apps/nsh"
+  python3 -c '
+import plistlib, sys
+p = sys.argv[1]
+with open(p, "rb") as f:
+    plist = plistlib.load(f)
+plist["NSAppTransportSecurity"] = {"NSAllowsArbitraryLoads": True}
+with open(p, "wb") as f:
+    plistlib.dump(plist, f)
+' "$sim_tmp/NonePwd.app/Info.plist"
+  codesign --force --deep --sign - "$sim_tmp/NonePwd.app"
   ditto -c -k --sequesterRsrc --keepParent \
     "$sim_tmp/NonePwd.app" \
     "$ASSETS_DIR/NonePwd-ios-sim-arm64.app.zip"

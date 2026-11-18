@@ -9,8 +9,8 @@
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/charlzyx/nonepwd/tree/main/packages/cf-server)
 
 1. 点击按钮授权后，Cloudflare 会在**你的 GitHub 账号下自动 Fork 本仓库**，并创建 Worker、`nonepwd-db` (D1)、`nonepwd-vault-blobs` (R2) 与 `VaultWsHub`（首次访问自动建表）。
-2. 在 Cloudflare Dashboard → Worker → **Settings → Domains & Routes** 绑定自定义域名（如 `vault.yourdomain.com`）。
-3. 在 **Email → Email Routing → Catch-all address** 选择发送到 Worker **`nonepwd-cf-server`**。
+2. **无域名可用**：默认开启 `https://nonepwd-cf-server.<你的子域>.workers.dev`，密码库同步与多账号 IMAP 验证码开箱即用。
+3. **可选自定义域名（开启随机别名收信）**：在 Worker **Settings → Domains & Routes** 绑定域名（如 `vault.yourdomain.com`），并在 **Email → Email Routing → Catch-all address** 选择发送到 **`nonepwd-cf-server`**。
 
 ## 方式 B：Fork / Clone 后使用 Wrangler CLI 部署
 
