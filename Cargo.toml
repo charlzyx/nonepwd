@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/nonepwd-core", "crates/nonepwd-cli", "crates/nonepwd-server"]
+members = ["crates/nonepwd-core", "crates/nonepwd-cli", "crates/nonepwd-server", "crates/nonepwd-agent"]
 
 [profile.release]
 opt-level = "s"

@@ -1,3 +1,4 @@
+pub mod agent_relay;
 pub mod auth;
 pub mod db;
 pub mod email_ingest;
@@ -179,6 +180,7 @@ pub async fn start_server(opts: ServerOptions) -> Result<RunningServer, String> 
     let app_state = AppState {
         db: db.clone(),
         ws_hub: ws_hub.clone(),
+        agent_relay: agent_relay::AgentRelay::new(),
         imap_worker: imap_worker.clone(),
         web_dist_dir,
         bin_dist_dirs,
@@ -251,6 +253,11 @@ pub fn run_blocking(opts: ServerOptions) -> Result<(), String> {
         let srv = start_server(opts).await?;
         println!(
             "nonepwd server listening on http://{}:{}",
+            display_host,
+            srv.addr.port()
+        );
+        println!(
+            "agent-access relay on ws://{}:{}/agent/relay",
             display_host,
             srv.addr.port()
         );

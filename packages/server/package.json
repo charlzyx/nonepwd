@@ -29,6 +29,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.14.0",
+    "@nonepwd/agent-relay": "workspace:*",
     "@nonepwd/core": "workspace:*",
     "hono": "^4.7.5",
     "imapflow": "^1.0.180",

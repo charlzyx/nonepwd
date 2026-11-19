@@ -1,6 +1,6 @@
 ---
 name: nonepwd
-description: Use nonepwd (np CLI) — an op-compatible zero-knowledge secret manager, API/SSH key vault, 2FA TOTP generator, and real-time Email OTP automation tool — to inject secrets without plaintext .env files, manage vault items/groups, and await email verification codes.
+description: Use nonepwd (np CLI) — an op-compatible zero-knowledge secret manager, API/SSH key vault, 2FA TOTP generator, real-time Email OTP tool, and Agent Access (protocol v0) credential broker — to inject secrets without plaintext .env files, approve one-credential remote requests, and await email verification codes.
 ---
 
 # nonepwd (`np`) — Agent & CLI Skill Guide
@@ -136,4 +136,35 @@ Usage:
   np service-account list | create <name> --vault <v1> [--vault <v2>] [--json] | revoke <id>
   np server [--host 127.0.0.1] [--port 8787] [--data-dir ~/.nonepwd/data]
   np serve --connect [--host 127.0.0.1] [--port 8788] [--token <tok>]
+  np agent listen [--relay-url <ws-url>] [--yes]
+  np agent connect --token <psk> (--domain <host> | --id <item> | --search <q>) [--json]
+  np agent run --token <psk> (--domain <host> | --id <item> | --search <q>) (--env-all | --env KEY=field) -- <cmd>
 ```
+
+---
+
+## 5. Agent Access (protocol v0)
+
+Remote agents can ask for **one** vault item at a time. The user approves each request. The tunnel is Noise NNpsk2 (XChaCha20-Poly1305). nonepwd decrypts only on the user side. The relay at `/agent/relay` authenticates device identities and forwards ciphertext.
+
+The relay is part of both self-hosted flavours (the Rust/`npx @nonepwd/server` process and the Cloudflare Worker Durable Object `AgentRelayHub`). Clients derive the relay from the signed-in server URL (`https://vault.example.com` → `wss://vault.example.com/agent/relay`). nonepwd does not fall back to `wss://ap.lesspassword.dev`.
+
+```bash
+# User side (unlocked session). Prints a 129-character PSK token: <64-hex-psk>_<64-hex-fingerprint>
+np agent listen
+
+# Remote side
+np agent connect --token "$TOKEN" --domain github.com --json
+np agent run --token "$TOKEN" --domain github.com --env-all -- deploy.sh
+np agent run --token "$TOKEN" --id <item-id> --env DB_PASSWORD=password -- psql
+```
+
+`--env-all` injects `NP_USERNAME`, `NP_PASSWORD`, `NP_TOTP`, `NP_URI`, `NP_NOTES`, `NP_DOMAIN`, and `NP_CREDENTIAL_ID` into the child process only. `--env KEY=field` maps one of `username`, `password`, `totp`, `uri`, `notes`, `domain`, `credential_id`. TOTP is the current code, never the seed.
+
+Official `aac` (agent-access protocol v0 / `ap-client` 0.12) can use the same relay:
+
+```bash
+aac --relay-url ws://127.0.0.1:8787/agent/relay --token "$TOKEN" --domain github.com --output json
+```
+
+Domain matching uses the vault's existing host and eTLD+1 rules. Two items on the same domain is an ambiguous denial; ask again with `--id`. Each PSK token pairs once. Device identity keys are stored under the nonepwd config directory (`agent-user-identity.cose` and `agent-remote-identity.cose`, mode `0600`) and are not vault secrets.

@@ -34,7 +34,7 @@ export default defineConfig({
     ...(customDomain ? { domains: [customDomain] } : {}),
     assets: {
       notFoundHandling: "single-page-application",
-      runWorkerFirst: ["/api/*", "/install.sh", "/downloads/*", "/llms.txt", "/SKILL.md", "/skill.md"],
+      runWorkerFirst: ["/api/*", "/agent/*", "/install.sh", "/downloads/*", "/llms.txt", "/SKILL.md", "/skill.md"],
     },
     triggers: [{ type: "scheduled", schedule: "* * * * *" }],
     // Minute cron syncs IMAP verification codes only.
@@ -42,6 +42,7 @@ export default defineConfig({
     // triggers: [{ type: "scheduled", schedule: "0 */6 * * *" }],
     exports: {
       VaultWsHub: exports.durableObject({ storage: "sqlite" }),
+      AgentRelayHub: exports.durableObject({ storage: "sqlite" }),
     },
     env: {
       FORWARD_TO_EMAIL: bindings.text(""),
@@ -52,6 +53,10 @@ export default defineConfig({
       WS_HUB: bindings.durableObject({
         worker: "nonepwd-cf-server",
         exportName: "VaultWsHub",
+      }),
+      AGENT_RELAY: bindings.durableObject({
+        worker: "nonepwd-cf-server",
+        exportName: "AgentRelayHub",
       }),
       ASSETS: bindings.assets(),
     },

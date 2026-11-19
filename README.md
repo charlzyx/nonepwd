@@ -18,6 +18,7 @@
 - **全端自动填充**：Android 系统级 `AutofillService`（Keystore 加密缓存 + 包名/域名匹配）与闭合 Shadow DOM 浏览器扩展（支持多步六宫格验证码接力）。
 - **全品类密钥库**：统一托管登录凭据、API Key、SSH 密钥、银行卡、身份地址与安全笔记，支持 Chrome / 1Password CSV 迁移。
 - **`op://` 兼容 CLI**：纯 Rust 零依赖单二进制 `np`，原生兼容 `op://` 与 `np://` 密钥引用、`np run` 内存注入与 Service Account 隔离。
+- **Agent Access 中继**：自带 [Agent Access protocol v0](https://github.com/bitwarden/agent-access/blob/main/protocol-v0.md) 中继（`/agent/relay`）。远程代理按条申请凭据，本机批准后才经 Noise 隧道发出；服务端只转发密文，默认不使用 Bitwarden 托管中继。
 
 ---
 
@@ -67,9 +68,14 @@ np signin --server https://vault.yourdomain.com --secret-key "NP3-..." --passwor
 np run --env-file .env.tpl -- npm run dev      # 内存解密注入 op:// 与 np://，硬盘零落盘
 OTP=$(np mail otp --domain github.com --wait 30s)
 np service-account create ci-agent --vault DevOps
+
+# 在已登录的机器上批准远程代理的单条凭据请求（中继就是当前 nonepwd 服务器）
+np agent listen
+# 另一侧，或官方 aac：aac --relay-url ws://127.0.0.1:8787/agent/relay --token "$TOKEN" --domain github.com
+np agent connect --token "$TOKEN" --domain github.com --json
 ```
 
-完整 `op://` 兼容命令表与 AI Agent 集成用法见 [`SKILL.md`](./SKILL.md)。
+完整 `op://` 兼容命令表、Agent Access 配对说明与 AI Agent 集成用法见 [`SKILL.md`](./SKILL.md)。
 
 ---
 

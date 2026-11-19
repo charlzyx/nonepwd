@@ -3,13 +3,14 @@ import { createCfApp, runScheduledImapSync, runScheduledMaintenance } from './ap
 import { handleIncomingCfEmail } from './email.js';
 import wasmModule from './nonepwd_core.wasm';
 import type { CfServerEnv, EmailMessageLike } from './types.js';
+import { AgentRelayHub } from './agent-relay-do.js';
 import { VaultWsHub } from './ws-hub.js';
 
 setNonePwdWasmModule(wasmModule);
 
 const app = createCfApp();
 
-export { VaultWsHub, createCfApp, handleIncomingCfEmail, runScheduledMaintenance };
+export { AgentRelayHub, VaultWsHub, createCfApp, handleIncomingCfEmail, runScheduledMaintenance };
 
 export default {
   async fetch(

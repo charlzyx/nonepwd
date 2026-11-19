@@ -201,6 +201,7 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       initialized: Boolean(row),
       version: '0.1.0',
       runtime: 'cloudflare-workers',
+      agentRelay: '/agent/relay',
       storage: {
         d1: true,
         r2: Boolean(c.env.BUCKET),
@@ -1504,6 +1505,20 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     const id = c.env.WS_HUB.idFromName('global');
     const stub = c.env.WS_HUB.get(id);
     return stub.fetch(new Request('https://do.internal/upgrade', { headers }));
+  });
+
+  // Agent Access protocol v0 relay. No vault auth: the relay authenticates
+  // device identities and only forwards ciphertext.
+  app.get('/agent/relay', async (c) => {
+    if (c.req.header('upgrade')?.toLowerCase() !== 'websocket') {
+      return c.json({ error: 'Expected WebSocket upgrade' }, 426);
+    }
+    if (!c.env.AGENT_RELAY) {
+      return c.json({ error: 'AGENT_RELAY Durable Object not bound' }, 501);
+    }
+    const id = c.env.AGENT_RELAY.idFromName('global');
+    const stub = c.env.AGENT_RELAY.get(id);
+    return stub.fetch(c.req.raw);
   });
 
   // Native CLI installer script

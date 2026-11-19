@@ -6,8 +6,8 @@
   "type": "module",
   "scripts": {
     "build:rust": "node scripts/build-rust.mjs",
-    "build": "pnpm build:rust && pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && pnpm --filter @nonepwd/server build && pnpm --filter @nonepwd/cli build && pnpm --filter @nonepwd/cf-email-worker build && pnpm --filter @nonepwd/cf-server build",
-    "build:cf-server": "pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && pnpm --filter @nonepwd/cf-server build",
+    "build": "pnpm build:rust && pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/agent-relay build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && pnpm --filter @nonepwd/server build && pnpm --filter @nonepwd/cli build && pnpm --filter @nonepwd/cf-email-worker build && pnpm --filter @nonepwd/cf-server build",
+    "build:cf-server": "pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/agent-relay build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && pnpm --filter @nonepwd/cf-server build",
     "build:site": "pnpm --filter @nonepwd/core build && pnpm --filter @nonepwd/web build && pnpm --filter @nonepwd/extension build && node scripts/build-cf-site.mjs",
     "deploy:cf-server": "pnpm build:cf-server && pnpm --filter @nonepwd/cf-server run deploy",
     "deploy:site": "pnpm build:site && pnpm --dir site exec cf deploy",

@@ -14,6 +14,7 @@ futures-util = "0.3"
 hex = "0.4"
 hmac = "0.12"
 http = "1"
+ap-relay-protocol = { git = "https://github.com/bitwarden/agent-access", rev = "512756278c41d19314b462ca978c40d29c51bd36", default-features = false }
 nonepwd-core = { path = "../nonepwd-core" }
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 percent-encoding = "2"
