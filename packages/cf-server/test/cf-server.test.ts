@@ -842,22 +842,29 @@ describe('@nonepwd/cf-server', () => {
             } else if (upper.startsWith('SELECT ')) {
               push('* 1 EXISTS\r\n');
               push(`${tag} OK [READ-WRITE] SELECT completed\r\n`);
+            } else if (upper.startsWith('STATUS ')) {
+              push('* STATUS "INBOX" (UIDNEXT 102)\r\n');
+              push(`${tag} OK STATUS completed\r\n`);
             } else if (upper.startsWith('UID SEARCH ')) {
               push('* SEARCH 101\r\n');
               push(`${tag} OK SEARCH completed\r\n`);
-            } else if (upper.startsWith('UID FETCH 101')) {
+            } else if (upper.startsWith('UID FETCH 101') || upper.startsWith('UID FETCH *')) {
               const code = loggedUser === 'alice.work@gmail.com' ? '111222' : '333444';
+              const now = new Date();
+              const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+              const internal = `${String(now.getUTCDate()).padStart(2, '0')}-${months[now.getUTCMonth()]}-${now.getUTCFullYear()} ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}:${String(now.getUTCSeconds()).padStart(2, '0')} +0000`;
               const mime = [
                 'From: Security <noreply@service.example.com>',
                 'To: undisclosed-recipients:;',
                 'Subject: Login verification code',
+                `Date: ${now.toUTCString()}`,
                 'Content-Type: text/plain; charset=utf-8',
                 '',
                 `Your verification code is ${code}.`,
                 '',
               ].join('\r\n');
               const byteLen = enc.encode(mime).byteLength;
-              push(`* 1 FETCH (UID 101 BODY[] {${byteLen}}\r\n${mime})\r\n`);
+              push(`* 1 FETCH (UID 101 INTERNALDATE "${internal}" BODY[TEXT]<0> {${byteLen}}\r\n${mime})\r\n`);
               push(`${tag} OK FETCH completed\r\n`);
             } else if (upper === 'LOGOUT') {
               push('* BYE\r\n');
@@ -951,12 +958,50 @@ describe('@nonepwd/cf-server', () => {
       expect(createdPersonal.imap.enabled).toBe(true);
       expect(createdPersonal.imap.status).toBe('listening');
 
-      // Verify both synced emails have envelopeTo set to the receiving Gmail address despite generic To header
+      // Saving an account must not download the mailbox on the request path.
       const emailsAfterCreate = (await (
         await api('/api/emails', { headers: { Authorization: `Bearer ${token}` } })
       ).json()) as { emails: EncryptedEmailRecord[] };
-      expect(emailsAfterCreate.emails).toHaveLength(2);
-      const envelopes = emailsAfterCreate.emails.map((e) => e.envelopeTo).sort();
+      expect(emailsAfterCreate.emails).toHaveLength(0);
+
+      // First sync baselines to the current max UID and does not backfill history.
+      const baselineRes = await api('/api/imap/sync', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({}),
+      });
+      expect(baselineRes.status).toBe(200);
+      const baselineJson = (await baselineRes.json()) as { ok: boolean; synced: number; baselined?: boolean };
+      expect(baselineJson.ok).toBe(true);
+      expect(baselineJson.synced).toBe(0);
+      const baselinedUid = await env.DB.prepare('SELECT last_uid FROM imap_accounts WHERE id = ?')
+        .bind(createdPersonal.account.id)
+        .first<{ last_uid: number }>();
+      expect(baselinedUid?.last_uid).toBe(101);
+      const emailsAfterBaseline = (await (
+        await api('/api/emails', { headers: { Authorization: `Bearer ${token}` } })
+      ).json()) as { emails: EncryptedEmailRecord[] };
+      expect(emailsAfterBaseline.emails).toHaveLength(0);
+
+      // A later run, inside the code window, fetches only mail newer than last_uid.
+      const recent = new Date(Date.now() - 60_000).toISOString();
+      await env.DB.prepare(
+        `UPDATE imap_accounts
+         SET last_uid = 100, last_sync_at = ?, uid_baselined = 1, sync_fail_count = 0`
+      )
+        .bind(recent)
+        .run();
+      const fetchRes = await api('/api/imap/sync', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({}),
+      });
+      expect(fetchRes.status).toBe(200);
+      const emailsAfterFetch = (await (
+        await api('/api/emails', { headers: { Authorization: `Bearer ${token}` } })
+      ).json()) as { emails: EncryptedEmailRecord[] };
+      expect(emailsAfterFetch.emails).toHaveLength(2);
+      const envelopes = emailsAfterFetch.emails.map((e) => e.envelopeTo).sort();
       expect(envelopes).toEqual(['alice.personal@gmail.com', 'alice.work@gmail.com']);
 
       // 2. Test saved account by id without re-sending password

@@ -82,6 +82,17 @@ export interface SyncStateResult {
   imapConfig: ImapConfigPublic | null;
   imapAccounts: ImapAccountPublic[];
   emailFilter: EmailFilterConfig | null;
+  cursor: string | null;
+  epoch: number | null;
+}
+
+export interface SyncPreviousState {
+  cursor: string | null;
+  epoch: number | null;
+  vaults: DecryptedVault[];
+  vaultKeys: Map<string, Uint8Array>;
+  items: VaultItemPayload[];
+  emails: DecryptedEmailItem[];
 }
 
 export interface SaveImapAccountInput {
@@ -455,20 +466,33 @@ export async function syncAll(
   serverUrl: string,
   token: string,
   rootKeyBytes: Uint8Array,
-  emailPrivateKeyPkcs8B64: string
+  emailPrivateKeyPkcs8B64: string,
+  previous?: SyncPreviousState | null
 ): Promise<SyncStateResult> {
+  const params = new URLSearchParams();
+  if (previous?.cursor) {
+    params.set("since", previous.cursor);
+    if (previous.epoch) params.set("epoch", String(previous.epoch));
+  }
+  const syncQuery = params.toString();
+  const syncPath = syncQuery ? `/api/sync?${syncQuery}` : "/api/sync";
   const syncData = await apiRequest<{
+    incremental?: boolean;
+    cursor?: string;
+    epoch?: number;
     account?: AccountInfo;
     vaults: EncryptedVaultRecord[];
     items: EncryptedItemRecord[];
     aliases?: AliasRecord[];
     emails?: EncryptedEmailRecord[];
+    deleted?: { vaults?: string[]; items?: string[]; emails?: string[] };
     imapStatus?: ImapConfigPublic;
     imapAccounts?: ImapAccountPublic[];
     emailFilter?: EmailFilterConfig;
-  }>(serverUrl, "/api/sync", { token });
+  }>(serverUrl, syncPath, { token });
 
-  const vaultKeys = new Map<string, Uint8Array>();
+  const incremental = syncData.incremental === true && Boolean(previous?.cursor);
+  const vaultKeys = incremental && previous ? new Map(previous.vaultKeys) : new Map<string, Uint8Array>();
   const vaults: DecryptedVault[] = [];
   for (const v of syncData.vaults ?? []) {
     try {
@@ -523,16 +547,46 @@ export async function syncAll(
     }
   }
 
+  let nextVaults = vaults;
+  let nextItems = items;
+  let nextEmails = emails;
+  if (incremental && previous) {
+    const vaultMap = new Map(previous.vaults.map((v) => [v.id, v]));
+    for (const v of vaults) vaultMap.set(v.id, v);
+    for (const id of syncData.deleted?.vaults ?? []) {
+      vaultMap.delete(id);
+      vaultKeys.delete(id);
+    }
+    nextVaults = [...vaultMap.values()];
+
+    const itemMap = new Map(previous.items.map((item) => [item.id, item]));
+    for (const item of items) itemMap.set(item.id, item);
+    for (const id of syncData.deleted?.items ?? []) itemMap.delete(id);
+    for (const vaultId of syncData.deleted?.vaults ?? []) {
+      for (const [id, item] of itemMap) {
+        if (item.vaultId === vaultId) itemMap.delete(id);
+      }
+    }
+    nextItems = [...itemMap.values()];
+
+    const emailMap = new Map(previous.emails.map((email) => [email.id, email]));
+    for (const email of emails) emailMap.set(email.id, email);
+    for (const id of syncData.deleted?.emails ?? []) emailMap.delete(id);
+    nextEmails = [...emailMap.values()];
+  }
+
   return {
     account: syncData.account ?? null,
-    vaults,
+    vaults: nextVaults,
     vaultKeys,
-    items,
+    items: nextItems,
     aliases: syncData.aliases ?? [],
-    emails,
+    emails: nextEmails,
     imapConfig: syncData.imapStatus ?? null,
     imapAccounts: normalizeImapAccounts(syncData.imapAccounts, syncData.imapStatus),
     emailFilter: syncData.emailFilter ?? null,
+    cursor: syncData.cursor ?? (incremental ? previous?.cursor ?? null : null),
+    epoch: typeof syncData.epoch === "number" ? syncData.epoch : previous?.epoch ?? null,
   };
 }
 

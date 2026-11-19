@@ -1,5 +1,5 @@
 import { setNonePwdWasmModule } from '@nonepwd/core/worker';
-import { createCfApp, runScheduledMaintenance } from './app.js';
+import { createCfApp, runScheduledImapSync, runScheduledMaintenance } from './app.js';
 import { handleIncomingCfEmail } from './email.js';
 import wasmModule from './nonepwd_core.wasm';
 import type { CfServerEnv, EmailMessageLike } from './types.js';
@@ -32,10 +32,16 @@ export default {
   },
 
   async scheduled(
-    _controller: ScheduledController,
+    controller: ScheduledController,
     env: CfServerEnv,
     _ctx: ExecutionContext
   ): Promise<void> {
+    // The every-minute trigger only pulls fresh verification codes.
+    // Any other schedule keeps the session purge and R2 snapshot.
+    if (controller.cron === '* * * * *') {
+      await runScheduledImapSync(env);
+      return;
+    }
     await runScheduledMaintenance(env);
   },
 };

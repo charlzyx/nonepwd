@@ -25,3 +25,11 @@ pnpm run deploy:wrangler
 ```
 
 如需将别名邮件同时抄送一份至个人主邮箱，在 [`wrangler.jsonc`](./wrangler.jsonc) 中填写 `FORWARD_TO_EMAIL` 后重新 `pnpm run deploy:wrangler` 即可（本机开发如需保留私有域名与 D1 ID，可在 gitignore 覆盖的 `.env.local` 中配置 `NONEPWD_CF_DOMAIN` 与 `NONEPWD_CF_D1_ID` 配合 `pnpm run deploy` 使用）。
+
+## Workers Free：验证码同步与增量 `/api/sync`
+
+IMAP 只在 Cron 里跑，不在 `GET /api/sync` 或 `GET /api/emails` 里跑。`wrangler.jsonc` 与 `cloudflare.config.ts` 配置了 `* * * * *`：每分钟按账号串行拉取验证码（每账号最多 2 封，只取 `last_uid` 之后、代码有效期内的邮件）。R2 快照仍由请求里的 `waitUntil(maybeAutoSnapshot)` 每 6 小时写一次，避免把整库序列化放进同一次 Cron。
+
+部署新版本后 Cron 才会生效。不需要升级到 Workers Paid。已有 D1 会在 Worker 启动时自动补上 `sync_fail_count` / `uid_baselined` 列；也可以手动执行一次 `migrations/0002_imap_sync_cursor.sql`。
+
+`/api/sync` 不带参数时仍返回全量，并附带 `cursor` 与 `epoch`。本仓库里的 Web、CLI、扩展和 nsh 会在后续请求带上 `?since=<cursor>&epoch=<epoch>`，只合并变更和 `deleted`。旧客户端忽略这两个字段即可。还原备份会增加 `epoch`，客户端下一次会重新拉全量。

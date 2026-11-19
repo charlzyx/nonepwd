@@ -307,6 +307,8 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const rootKeyRef = useRef<Uint8Array | null>(null);
   const emailPrivKeyRef = useRef<string | null>(null);
   const vaultKeysRef = useRef<Map<string, Uint8Array>>(new Map());
+  const syncCursorRef = useRef<string | null>(null);
+  const syncEpochRef = useRef<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const apiFetch = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
@@ -351,22 +353,40 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const rootKey = rootKeyRef.current;
     if (!rootKey || !sessionTokenRef.current) return;
 
+    const params = new URLSearchParams();
+    if (syncCursorRef.current) {
+      params.set('since', syncCursorRef.current);
+      if (syncEpochRef.current) params.set('epoch', String(syncEpochRef.current));
+    }
+    const syncQuery = params.toString();
+    const syncPath = syncQuery ? `/api/sync?${syncQuery}` : '/api/sync';
+
     const [syncData, saData] = await Promise.all([
       apiFetch<{
+        incremental?: boolean;
+        cursor?: string;
+        epoch?: number;
         account: AccountInfo;
         vaults: EncryptedVaultRecord[];
         items: EncryptedItemRecord[];
         aliases: AliasRecord[];
         emails: EncryptedEmailRecord[];
+        deleted?: {
+          vaults?: string[];
+          items?: string[];
+          aliases?: string[];
+          emails?: string[];
+        };
         imapStatus: ImapConfigPublic;
         imapAccounts?: ImapAccountPublic[];
-      }>('/api/sync'),
+      }>(syncPath),
       apiFetch<{ serviceAccounts: ServiceAccountRecord[] }>('/api/service-accounts'),
     ]);
 
-    const keyMap = new Map<string, Uint8Array>();
+    const incremental = syncData.incremental === true;
+    const keyMap = incremental ? new Map(vaultKeysRef.current) : new Map<string, Uint8Array>();
     const decryptedVaults: DecryptedVault[] = [];
-    for (const v of syncData.vaults) {
+    for (const v of syncData.vaults ?? []) {
       const vk = await decryptBytes(rootKey, v.encryptedKey, AAD.vaultOwnerKey(v.id));
       const meta = await decryptJson<VaultMetadata>(vk, v.encryptedMeta, AAD.vaultMeta(v.id));
       keyMap.set(v.id, vk);
@@ -378,10 +398,12 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         updatedAt: v.updatedAt,
       });
     }
+    const deletedVaults = syncData.deleted?.vaults ?? [];
+    for (const id of deletedVaults) keyMap.delete(id);
     vaultKeysRef.current = keyMap;
 
     const decryptedItems: VaultItemPayload[] = [];
-    for (const it of syncData.items) {
+    for (const it of syncData.items ?? []) {
       const vk = keyMap.get(it.vaultId);
       if (!vk) continue;
       try {
@@ -397,16 +419,50 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
 
     const decryptedEmails: DecryptedEmailItem[] = [];
-    for (const em of syncData.emails) {
+    for (const em of syncData.emails ?? []) {
       const opened = await decryptEmailRecord(em);
       if (opened) decryptedEmails.push(opened);
     }
 
+    const deletedItems = new Set(syncData.deleted?.items ?? []);
+    const deletedEmails = new Set(syncData.deleted?.emails ?? []);
+
+    if (!incremental) {
+      setVaults(decryptedVaults);
+      setItems(decryptedItems);
+      setEmails(decryptedEmails);
+    } else {
+      setVaults((prev) => {
+        const map = new Map(prev.map((v) => [v.id, v]));
+        for (const v of decryptedVaults) map.set(v.id, v);
+        for (const id of deletedVaults) map.delete(id);
+        return [...map.values()];
+      });
+      setItems((prev) => {
+        const map = new Map(prev.map((item) => [item.id, item]));
+        for (const item of decryptedItems) map.set(item.id, item);
+        for (const id of deletedItems) map.delete(id);
+        if (deletedVaults.length > 0) {
+          for (const [id, item] of map) {
+            if (deletedVaults.includes(item.vaultId)) map.delete(id);
+          }
+        }
+        return [...map.values()];
+      });
+      setEmails((prev) => {
+        const map = new Map(prev.map((email) => [email.id, email]));
+        for (const email of decryptedEmails) map.set(email.id, email);
+        for (const id of deletedEmails) map.delete(id);
+        return [...map.values()]
+          .sort((a, b) => (b.receivedAt ?? '').localeCompare(a.receivedAt ?? ''))
+          .slice(0, 100);
+      });
+    }
+
+    if (syncData.cursor) syncCursorRef.current = syncData.cursor;
+    if (typeof syncData.epoch === 'number') syncEpochRef.current = syncData.epoch;
     setAccount(syncData.account);
-    setVaults(decryptedVaults);
-    setItems(decryptedItems);
-    setAliases(syncData.aliases);
-    setEmails(decryptedEmails);
+    setAliases(syncData.aliases ?? []);
     setImapConfig(syncData.imapStatus);
     setImapAccounts(normalizeImapAccounts(syncData.imapAccounts, syncData.imapStatus));
     setServiceAccounts(saData.serviceAccounts);
@@ -656,6 +712,8 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     rootKeyRef.current = null;
     emailPrivKeyRef.current = null;
     vaultKeysRef.current = new Map();
+    syncCursorRef.current = null;
+    syncEpochRef.current = null;
     setWsConnected(false);
     setVaults([]);
     setItems([]);
