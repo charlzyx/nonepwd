@@ -75,6 +75,8 @@ export class NonePwdCliClient {
   public items: DecryptedItem[] = [];
   public aliases: AliasRecord[] = [];
   public emails: DecryptedEmailWithMeta[] = [];
+  private syncCursor: string | null = null;
+  private syncEpoch: number | null = null;
 
   constructor(options?: {
     configDir?: string;
@@ -203,6 +205,8 @@ export class NonePwdCliClient {
       this.configDir
     );
 
+    this.syncCursor = null;
+    this.syncEpoch = null;
     await this.sync();
     return {
       email: params.email.trim().toLowerCase(),
@@ -285,6 +289,12 @@ export class NonePwdCliClient {
       this.configDir
     );
 
+    this.syncCursor = null;
+    this.syncEpoch = null;
+    this.vaults = [];
+    this.items = [];
+    this.aliases = [];
+    this.emails = [];
     await this.sync();
     return { email: loginRes.account.email, serverUrl };
   }
@@ -304,6 +314,12 @@ export class NonePwdCliClient {
     this.sessionToken = null;
     this.rootKeyBytes = null;
     this.emailPrivateKeyPkcs8B64 = null;
+    this.syncCursor = null;
+    this.syncEpoch = null;
+    this.vaults = [];
+    this.items = [];
+    this.aliases = [];
+    this.emails = [];
   }
 
   async ensureAuthenticated(): Promise<void> {
@@ -342,13 +358,24 @@ export class NonePwdCliClient {
 
   async sync(): Promise<void> {
     await this.ensureAuthenticated();
+    const params = new URLSearchParams();
+    if (this.syncCursor) {
+      params.set('since', this.syncCursor);
+      if (this.syncEpoch) params.set('epoch', String(this.syncEpoch));
+    }
+    const syncQuery = params.toString();
+    const syncPath = syncQuery ? `/api/sync?${syncQuery}` : '/api/sync';
     const data = await this.requestJson<{
       kind: 'owner' | 'service_account';
+      incremental?: boolean;
+      cursor?: string;
+      epoch?: number;
       vaults: EncryptedVaultRecord[];
       items: EncryptedItemRecord[];
       aliases?: AliasRecord[];
       emails?: EncryptedEmailRecord[];
-    }>('/api/sync');
+      deleted?: { vaults?: string[]; items?: string[]; emails?: string[] };
+    }>(syncPath);
 
     const vaultMap = new Map<string, DecryptedVault>();
     const decryptedVaults: DecryptedVault[] = [];
@@ -400,8 +427,14 @@ export class NonePwdCliClient {
       }
     }
 
+    if (data.incremental) {
+      for (const existing of this.vaults) {
+        if (!vaultMap.has(existing.id)) vaultMap.set(existing.id, existing);
+      }
+    }
+
     const decryptedItems: DecryptedItem[] = [];
-    for (const item of data.items) {
+    for (const item of data.items ?? []) {
       const vault = vaultMap.get(item.vaultId);
       if (!vault) continue;
       const payload = await decryptJson<VaultItemPayload>(
@@ -437,10 +470,35 @@ export class NonePwdCliClient {
       }
     }
 
-    this.vaults = decryptedVaults;
-    this.items = decryptedItems;
-    this.aliases = data.aliases ?? [];
-    this.emails = decryptedEmails;
+    const incremental = data.incremental === true && (this.vaults.length > 0 || this.items.length > 0);
+    if (!incremental) {
+      this.vaults = decryptedVaults;
+      this.items = decryptedItems;
+      this.emails = decryptedEmails;
+    } else {
+      const vaultMapLive = new Map(this.vaults.map((v) => [v.id, v]));
+      for (const v of decryptedVaults) vaultMapLive.set(v.id, v);
+      for (const id of data.deleted?.vaults ?? []) vaultMapLive.delete(id);
+      this.vaults = [...vaultMapLive.values()];
+
+      const itemMap = new Map(this.items.map((item) => [item.id, item]));
+      for (const item of decryptedItems) itemMap.set(item.id, item);
+      for (const id of data.deleted?.items ?? []) itemMap.delete(id);
+      for (const vaultId of data.deleted?.vaults ?? []) {
+        for (const [id, item] of itemMap) {
+          if (item.vaultId === vaultId) itemMap.delete(id);
+        }
+      }
+      this.items = [...itemMap.values()];
+
+      const emailMap = new Map(this.emails.map((email) => [email.id, email]));
+      for (const email of decryptedEmails) emailMap.set(email.id, email);
+      for (const id of data.deleted?.emails ?? []) emailMap.delete(id);
+      this.emails = [...emailMap.values()];
+    }
+    this.aliases = data.aliases ?? this.aliases;
+    if (data.cursor) this.syncCursor = data.cursor;
+    if (typeof data.epoch === 'number') this.syncEpoch = data.epoch;
   }
 
   findVault(nameOrId: string): DecryptedVault {

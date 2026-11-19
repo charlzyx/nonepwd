@@ -31,11 +31,9 @@ import {
   computeAggregateImapConfig,
   deleteImapAccount,
   getImapAccountById,
-  getImapPublicConfig,
   listImapAccounts,
   resolveImapTestParams,
   saveImapAccount,
-  syncImapAccount,
   syncImapInbox,
   testImapConnection,
   type SaveImapAccountInput,
@@ -48,6 +46,15 @@ import {
   restoreEncryptedSnapshot,
 } from './r2-backup.js';
 import { ensureSchema } from './schema.js';
+import {
+  emptySyncDeletions,
+  parseSyncEpoch,
+  parseSyncSince,
+  pruneSyncDeletions,
+  querySyncDeletions,
+  readSyncEpoch,
+  syncDeletionStatement,
+} from './sync-delta.js';
 import type { CfServerEnv, EmailFilterConfig } from './types.js';
 import { broadcastEvent } from './ws-hub.js';
 
@@ -101,21 +108,14 @@ function scheduleAutoBackup(c: Context<{ Bindings: CfServerEnv }>): void {
   }
 }
 
-function scheduleImapSync(c: Context<{ Bindings: CfServerEnv }>): void {
-  try {
-    c.executionCtx.waitUntil(syncImapInbox(c.env));
-  } catch {
-    // Unit tests call app.fetch without ExecutionContext
-  }
-}
-
-async function queryOwnerVaults(db: D1Database) {
+async function queryOwnerVaults(db: D1Database, since?: string | null) {
   const res = await db
     .prepare(
       `SELECT id, encrypted_key AS encryptedKey, encrypted_meta AS encryptedMeta,
               created_at AS createdAt, updated_at AS updatedAt
-       FROM vaults ORDER BY created_at ASC`
+       FROM vaults ${since ? 'WHERE updated_at > ?' : ''} ORDER BY created_at ASC`
     )
+    .bind(...(since ? [since] : []))
     .all<{
       id: string;
       encryptedKey: string;
@@ -126,18 +126,21 @@ async function queryOwnerVaults(db: D1Database) {
   return res.results ?? [];
 }
 
-async function querySaVaults(db: D1Database, saId: string) {
-  const res = await db
-    .prepare(
-      `SELECT v.id, sav.encrypted_vault_key AS encryptedKey, v.encrypted_meta AS encryptedMeta,
+async function querySaVaults(db: D1Database, saId: string, since?: string | null) {
+  const sql = since
+    ? `SELECT v.id, sav.encrypted_vault_key AS encryptedKey, v.encrypted_meta AS encryptedMeta,
+              v.created_at AS createdAt, v.updated_at AS updatedAt
+       FROM vaults v
+       JOIN service_account_vaults sav ON sav.vault_id = v.id
+       WHERE sav.service_account_id = ? AND v.updated_at > ?
+       ORDER BY v.created_at ASC`
+    : `SELECT v.id, sav.encrypted_vault_key AS encryptedKey, v.encrypted_meta AS encryptedMeta,
               v.created_at AS createdAt, v.updated_at AS updatedAt
        FROM vaults v
        JOIN service_account_vaults sav ON sav.vault_id = v.id
        WHERE sav.service_account_id = ?
-       ORDER BY v.created_at ASC`
-    )
-    .bind(saId)
-    .all<{
+       ORDER BY v.created_at ASC`;
+  const res = await (since ? db.prepare(sql).bind(saId, since) : db.prepare(sql).bind(saId)).all<{
       id: string;
       encryptedKey: string;
       encryptedMeta: string;
@@ -400,60 +403,97 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     const authOrRes = await requireAuth(c);
     if (authOrRes instanceof Response) return authOrRes;
 
+    const nowMs = Date.now();
+    const cursor = new Date(nowMs).toISOString();
+    const since = parseSyncSince(c.req.query('since'), nowMs);
+    const clientEpoch = parseSyncEpoch(c.req.query('epoch'));
+    const epoch = await readSyncEpoch(c.env.DB);
+    const incremental = Boolean(since) && (clientEpoch === null || clientEpoch === epoch);
+    const changedSince = incremental ? since : null;
+
+    if (incremental && since) {
+      await pruneSyncDeletions(c.env.DB, nowMs);
+    }
+
     if (authOrRes.kind === 'service_account') {
-      const [vaults, itemsRes] = await Promise.all([
-        querySaVaults(c.env.DB, authOrRes.serviceAccountId),
-        c.env.DB.prepare(
-          `SELECT i.id, i.vault_id AS vaultId, i.encrypted_data AS encryptedData,
+      const itemSql = changedSince
+        ? `SELECT i.id, i.vault_id AS vaultId, i.encrypted_data AS encryptedData,
+                  i.created_at AS createdAt, i.updated_at AS updatedAt, i.version
+           FROM items i
+           JOIN service_account_vaults sav ON sav.vault_id = i.vault_id
+           WHERE sav.service_account_id = ? AND i.updated_at > ?
+           ORDER BY i.updated_at DESC`
+        : `SELECT i.id, i.vault_id AS vaultId, i.encrypted_data AS encryptedData,
                   i.created_at AS createdAt, i.updated_at AS updatedAt, i.version
            FROM items i
            JOIN service_account_vaults sav ON sav.vault_id = i.vault_id
            WHERE sav.service_account_id = ?
-           ORDER BY i.updated_at DESC`
-        )
-          .bind(authOrRes.serviceAccountId)
-          .all(),
+           ORDER BY i.updated_at DESC`;
+      const [vaults, itemsRes, deleted] = await Promise.all([
+        querySaVaults(c.env.DB, authOrRes.serviceAccountId, changedSince),
+        changedSince
+          ? c.env.DB.prepare(itemSql).bind(authOrRes.serviceAccountId, changedSince).all()
+          : c.env.DB.prepare(itemSql).bind(authOrRes.serviceAccountId).all(),
+        changedSince
+          ? querySyncDeletions(c.env.DB, changedSince, { vaultIds: authOrRes.allowedVaultIds })
+          : Promise.resolve(emptySyncDeletions()),
       ]);
 
       return c.json({
         kind: 'service_account',
+        incremental,
+        cursor,
+        epoch,
         vaults,
         items: itemsRes.results ?? [],
+        deleted,
       });
     }
 
-    const [account, vaults, itemsRes, aliases, emails, emailFilter, imapAccounts] = await Promise.all([
-      c.env.DB.prepare(
-        `SELECT email, encrypted_root_keyset AS encryptedRootKeyset,
-                email_public_key AS emailPublicKey, cf_webhook_secret AS cfWebhookSecret,
-                alias_domain AS aliasDomain
-         FROM account WHERE id = 1`
-      ).first(),
-      queryOwnerVaults(c.env.DB),
-      c.env.DB.prepare(
-        `SELECT id, vault_id AS vaultId, encrypted_data AS encryptedData,
-                created_at AS createdAt, updated_at AS updatedAt, version
-         FROM items ORDER BY updated_at DESC`
-      ).all(),
-      queryAliases(c.env.DB),
-      queryEmails(c.env, 100),
-      getEmailFilter(c.env.DB),
-      listImapAccounts(c.env.DB),
-    ]);
+    const [account, vaults, itemsRes, aliases, emails, emailFilter, imapAccounts, deleted] =
+      await Promise.all([
+        c.env.DB.prepare(
+          `SELECT email, encrypted_root_keyset AS encryptedRootKeyset,
+                  email_public_key AS emailPublicKey, cf_webhook_secret AS cfWebhookSecret,
+                  alias_domain AS aliasDomain
+           FROM account WHERE id = 1`
+        ).first(),
+        queryOwnerVaults(c.env.DB, changedSince),
+        changedSince
+          ? c.env.DB.prepare(
+              `SELECT id, vault_id AS vaultId, encrypted_data AS encryptedData,
+                      created_at AS createdAt, updated_at AS updatedAt, version
+               FROM items WHERE updated_at > ? ORDER BY updated_at DESC`
+            )
+              .bind(changedSince)
+              .all()
+          : c.env.DB.prepare(
+              `SELECT id, vault_id AS vaultId, encrypted_data AS encryptedData,
+                      created_at AS createdAt, updated_at AS updatedAt, version
+               FROM items ORDER BY updated_at DESC`
+            ).all(),
+        queryAliases(c.env.DB),
+        queryEmails(c.env, 100, changedSince),
+        getEmailFilter(c.env.DB),
+        listImapAccounts(c.env.DB),
+        changedSince
+          ? querySyncDeletions(c.env.DB, changedSince)
+          : Promise.resolve(emptySyncDeletions()),
+      ]);
 
     const imapStatus = computeAggregateImapConfig(imapAccounts);
 
-    if (imapStatus.enabled) {
-      scheduleImapSync(c);
-    }
-
     return c.json({
       kind: 'owner',
+      incremental,
+      cursor,
+      epoch,
       account,
       vaults,
       items: itemsRes.results ?? [],
       aliases,
       emails,
+      deleted,
       imapStatus,
       imapAccounts,
       emailFilter,
@@ -562,12 +602,20 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       .first<{ id: string }>();
     if (!existing) return c.json({ error: 'Vault not found' }, 404);
 
-    // Delete dependent rows explicitly in batch so cleanup never depends on per-connection PRAGMA foreign_keys
-    await c.env.DB.batch([
+    const now = new Date().toISOString();
+    const itemIds = await c.env.DB.prepare('SELECT id FROM items WHERE vault_id = ?')
+      .bind(vaultId)
+      .all<{ id: string }>();
+    const stmts: D1PreparedStatement[] = (itemIds.results ?? []).map((row) =>
+      syncDeletionStatement(c.env.DB, 'item', row.id, now, vaultId)
+    );
+    stmts.push(
+      syncDeletionStatement(c.env.DB, 'vault', vaultId, now, vaultId),
       c.env.DB.prepare('DELETE FROM items WHERE vault_id = ?').bind(vaultId),
       c.env.DB.prepare('DELETE FROM service_account_vaults WHERE vault_id = ?').bind(vaultId),
-      c.env.DB.prepare('DELETE FROM vaults WHERE id = ?').bind(vaultId),
-    ]);
+      c.env.DB.prepare('DELETE FROM vaults WHERE id = ?').bind(vaultId)
+    );
+    await c.env.DB.batch(stmts);
 
     await broadcastEvent(c.env, { type: 'vault.deleted', vaultId }, { ownerOnly: true });
     return c.json({ ok: true });
@@ -750,12 +798,17 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
 
     const vaultId = c.req.param('vaultId');
     const itemId = c.req.param('itemId');
-    const res = await c.env.DB.prepare('DELETE FROM items WHERE id = ? AND vault_id = ?')
+    const existingItem = await c.env.DB.prepare('SELECT id FROM items WHERE id = ? AND vault_id = ?')
       .bind(itemId, vaultId)
-      .run();
-    if (Number(res.meta?.changes ?? 0) === 0) {
+      .first<{ id: string }>();
+    if (!existingItem) {
       return c.json({ error: 'Item not found' }, 404);
     }
+    const deletedAt = new Date().toISOString();
+    await c.env.DB.batch([
+      syncDeletionStatement(c.env.DB, 'item', itemId, deletedAt, vaultId),
+      c.env.DB.prepare('DELETE FROM items WHERE id = ? AND vault_id = ?').bind(itemId, vaultId),
+    ]);
 
     await broadcastEvent(c.env, { type: 'item.deleted', vaultId, itemId }, { vaultId });
     scheduleAutoBackup(c);
@@ -888,10 +941,17 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     if (ownerOrRes instanceof Response) return ownerOrRes;
 
     const id = c.req.param('id');
-    const res = await c.env.DB.prepare('DELETE FROM aliases WHERE id = ?').bind(id).run();
-    if (Number(res.meta?.changes ?? 0) === 0) {
+    const existingAlias = await c.env.DB.prepare('SELECT id FROM aliases WHERE id = ?')
+      .bind(id)
+      .first<{ id: string }>();
+    if (!existingAlias) {
       return c.json({ error: 'Alias not found' }, 404);
     }
+    const deletedAt = new Date().toISOString();
+    await c.env.DB.batch([
+      syncDeletionStatement(c.env.DB, 'alias', id, deletedAt, null),
+      c.env.DB.prepare('DELETE FROM aliases WHERE id = ?').bind(id),
+    ]);
 
     await broadcastEvent(c.env, { type: 'alias.deleted', id }, { ownerOnly: true });
     return c.json({ ok: true });
@@ -902,10 +962,6 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     const ownerOrRes = await requireOwner(c);
     if (ownerOrRes instanceof Response) return ownerOrRes;
 
-    const imapCfg = await getImapPublicConfig(c.env.DB);
-    if (imapCfg.enabled) {
-      scheduleImapSync(c);
-    }
     const emails = await queryEmails(c.env, 100);
     return c.json({ emails });
   });
@@ -1138,10 +1194,7 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     const body = (await c.req.json()) as SaveImapAccountInput;
 
     try {
-      const saved = await saveImapAccount(c.env.DB, body, 'legacy_put');
-      if (saved.id && saved.enabled && saved.hasPassword) {
-        await syncImapAccount(c.env, saved.id, { force: true });
-      }
+      await saveImapAccount(c.env.DB, body, 'legacy_put');
     } catch (err) {
       if (err instanceof ImapAccountValidationError) {
         return c.json({ error: err.message }, err.statusCode);
@@ -1167,10 +1220,6 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
         return c.json({ error: err.message }, err.statusCode);
       }
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
-    }
-
-    if (saved.id && saved.enabled && saved.hasPassword) {
-      await syncImapAccount(c.env, saved.id, { force: true });
     }
 
     const accounts = await listImapAccounts(c.env.DB);
@@ -1200,10 +1249,6 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
         return c.json({ error: err.message }, err.statusCode);
       }
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
-    }
-
-    if (saved.id && saved.enabled && saved.hasPassword) {
-      await syncImapAccount(c.env, saved.id, { force: true });
     }
 
     const accounts = await listImapAccounts(c.env.DB);
@@ -1277,11 +1322,13 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       }
     }
 
-    const syncRes = await syncImapInbox(c.env, { force: true, accountId });
+    const syncRes = await syncImapInbox(c.env, { accountId });
     const accounts = await listImapAccounts(c.env.DB);
     return c.json({
       ok: !syncRes.error,
       synced: syncRes.synced,
+      throttled: Boolean(syncRes.throttled),
+      baselined: Boolean(syncRes.baselined),
       error: syncRes.error ?? null,
       accounts,
       imap: computeAggregateImapConfig(accounts),
@@ -1586,6 +1633,14 @@ exit 1
   });
 
   return app;
+}
+
+/** Minute cron: pull at most a couple of fresh verification codes per mailbox. */
+export async function runScheduledImapSync(env: CfServerEnv): Promise<void> {
+  await ensureSchema(env.DB);
+  const now = new Date().toISOString();
+  await env.DB.prepare('DELETE FROM sessions WHERE expires_at < ?').bind(now).run();
+  await syncImapInbox(env);
 }
 
 export async function runScheduledMaintenance(env: CfServerEnv): Promise<void> {
