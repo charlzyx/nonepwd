@@ -1182,10 +1182,13 @@ async function readOneImapMessage(
 ): Promise<ImapReadOutcome> {
   try {
     const meta = await client.runCommand(`UID FETCH ${uid} (UID INTERNALDATE)`);
-    if (shouldSkipStaleCode(messageDateFromFetch(meta))) return 'stale';
+    const receivedAt = messageDateFromFetch(meta);
+    if (shouldSkipStaleCode(receivedAt)) return 'stale';
 
     const fetched = await client.runCommand(buildPartialBodyFetch(uid));
-    if (shouldSkipStaleCode(messageDateFromFetch(fetched))) return 'stale';
+    // INTERNALDATE is when the mailbox received the code. The Date header can be
+    // older (a forward, or a few minutes of transit) and must not discard it.
+    if (!receivedAt && shouldSkipStaleCode(messageDateFromFetch(fetched))) return 'stale';
 
     let sawBody = false;
     for (const item of fetched) {

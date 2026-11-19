@@ -262,7 +262,7 @@ describe('IMAP sync on the worker', () => {
                   'From: Security <noreply@service.example.com>',
                   'To: alice@qq.com',
                   'Subject: Login verification code',
-                  'Date: Thu, 19 Nov 2026 16:00:00 +0000',
+                  `Date: ${new Date().toUTCString()}`,
                   'Content-Type: text/plain; charset=utf-8',
                   '',
                   '',
