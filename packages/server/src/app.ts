@@ -28,6 +28,7 @@ import {
   ingestSimulatedEmail,
 } from './email-ingest.js';
 import { createImapWorker, type ImapWorker } from './imap-worker.js';
+import { createNodeAgentRelay } from './agent-relay-ws.js';
 import { createWsHub, type WsHub } from './ws.js';
 
 export interface NonePwdServerOptions {
@@ -93,6 +94,7 @@ export function createNonePwdServer(
 
   const db = openNonePwdDb(dataDir);
   const wsHub = createWsHub(db);
+  const agentRelay = createNodeAgentRelay();
   const imapWorker = createImapWorker(db, wsHub);
 
   const app = new Hono();
@@ -141,6 +143,7 @@ export function createNonePwdServer(
       ok: true,
       initialized: Boolean(row),
       version: '0.1.0',
+      agentRelay: '/agent/relay',
     });
   });
 
@@ -1302,6 +1305,11 @@ echo "Installed nonepwd native CLI -> $PREFIX/np"
       const server = createAdaptorServer({ fetch: app.fetch }) as HttpServer;
       httpServer = server;
       server.on('upgrade', (req, socket, head) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        if (url.pathname === '/agent/relay') {
+          agentRelay.handleUpgrade(req, socket, head);
+          return;
+        }
         wsHub.handleUpgrade(req, socket, head);
       });
 
@@ -1326,6 +1334,7 @@ echo "Installed nonepwd native CLI -> $PREFIX/np"
     async close() {
       await imapWorker.stop();
       wsHub.closeAll();
+      agentRelay.close();
       if (httpServer) {
         const s = httpServer;
         httpServer = null;

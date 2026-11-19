@@ -2,6 +2,7 @@ export interface CfServerEnv {
   DB: D1Database;
   BUCKET?: R2Bucket;
   WS_HUB?: DurableObjectNamespace;
+  AGENT_RELAY?: DurableObjectNamespace;
   ASSETS?: { fetch(request: Request): Promise<Response> };
   FORWARD_TO_EMAIL?: string;
 }

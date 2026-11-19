@@ -32,6 +32,7 @@ use crate::imap::{
     SaveImapError, SaveImapMode,
 };
 use crate::imap::ImapWorker;
+use crate::agent_relay::AgentRelay;
 use crate::ws::{BroadcastOptions, WsHub};
 
 const OWNER_SESSION_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -50,6 +51,7 @@ const ALLOWED_CLI_BINARIES: &[&str] = &[
 pub struct AppState {
     pub db: Arc<NonePwdDb>,
     pub ws_hub: Arc<WsHub>,
+    pub agent_relay: Arc<AgentRelay>,
     pub imap_worker: Arc<ImapWorker>,
     pub web_dist_dir: PathBuf,
     pub bin_dist_dirs: Vec<PathBuf>,
@@ -190,6 +192,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/imap/sync", post(handle_sync_imap))
         .route("/api/webhooks/email/cf", post(handle_cf_webhook))
         .route("/api/ws", get(handle_ws_upgrade))
+        .route("/agent/relay", get(handle_agent_relay))
         .route("/install.sh", get(handle_install_sh))
         .route("/downloads/{filename}", get(handle_download))
         .fallback(handle_fallback)
@@ -211,6 +214,7 @@ async fn handle_health(State(state): State<AppState>) -> Response {
         "ok": true,
         "initialized": initialized,
         "version": "0.1.0",
+        "agentRelay": "/agent/relay",
     }))
     .into_response()
 }
@@ -2339,6 +2343,13 @@ async fn handle_ws_upgrade(
     ws.on_upgrade(move |socket| hub.handle_socket(socket, auth))
 }
 
+async fn handle_agent_relay(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+    let relay = state.agent_relay.clone();
+    ws.on_upgrade(move |socket| async move {
+        relay.handle_socket(socket).await;
+    })
+}
+
 async fn handle_install_sh(headers: HeaderMap) -> Response {
     let scheme = headers
         .get("x-forwarded-proto")
@@ -2600,6 +2611,7 @@ mod tests {
         let state = AppState {
             db: db.clone(),
             ws_hub,
+            agent_relay: crate::agent_relay::AgentRelay::new(),
             imap_worker: imap_worker.clone(),
             web_dist_dir: dir.join("web"),
             bin_dist_dirs: vec![],

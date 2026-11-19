@@ -160,6 +160,7 @@ describe('nonepwd-server (100% Rust via `np server`)', () => {
       ok: true,
       initialized: false,
       version: '0.1.0',
+      agentRelay: '/agent/relay',
     });
 
     // CORS preflight check

@@ -1,3 +1,5 @@
+#[cfg(feature = "agent")]
+mod agent_cmd;
 mod client;
 mod config;
 mod connect_server;
@@ -19,7 +21,7 @@ use crate::client::NonePwdClient;
 use crate::config::load_config;
 use crate::connect_server::serve_connect;
 
-struct ParsedArgs {
+pub(crate) struct ParsedArgs {
     positionals: Vec<String>,
     flags: HashMap<String, Vec<String>>,
     booleans: HashSet<String>,
@@ -40,6 +42,8 @@ fn is_boolean_flag(name: &str) -> bool {
             | "no-newline"
             | "otp"
             | "reveal"
+            | "yes"
+            | "env-all"
     )
 }
 
@@ -103,11 +107,11 @@ fn parse_args(argv: &[String]) -> ParsedArgs {
     }
 }
 
-fn first_flag<'a>(parsed: &'a ParsedArgs, name: &str) -> Option<&'a str> {
+pub(crate) fn first_flag<'a>(parsed: &'a ParsedArgs, name: &str) -> Option<&'a str> {
     parsed.flags.get(name).and_then(|v| v.first()).map(String::as_str)
 }
 
-fn has_flag(parsed: &ParsedArgs, name: &str) -> bool {
+pub(crate) fn has_flag(parsed: &ParsedArgs, name: &str) -> bool {
     parsed.booleans.contains(name) || parsed.flags.contains_key(name)
 }
 
@@ -333,7 +337,10 @@ Usage:
   np mail list [--json] | np mail otp [--domain <d>] [--alias <a>] [--wait <sec>] [--json]
   np service-account list | create <name> --vault <v1> [--vault <v2>] [--json] | revoke <id>
   np server [--host 127.0.0.1] [--port 8787] [--data-dir ~/.nonepwd/data]
-  np serve --connect [--host 127.0.0.1] [--port 8788] [--token <tok>]";
+  np serve --connect [--host 127.0.0.1] [--port 8788] [--token <tok>]
+  np agent listen [--relay-url <ws-url>] [--yes]
+  np agent connect --token <psk> (--domain <host> | --id <item> | --search <q>) [--json]
+  np agent run --token <psk> (--domain <host> | --id <item> | --search <q>) (--env-all | --env KEY=field) -- <cmd>";
 
 fn run() -> Result<i32, String> {
     let raw_args: Vec<String> = env::args().skip(1).collect();
@@ -1033,6 +1040,17 @@ fn run() -> Result<i32, String> {
             #[cfg(target_env = "musl")]
             {
                 Err("`np server` is not bundled in cross-compiled musl client binaries; build natively for host".into())
+            }
+        }
+
+        "agent" => {
+            #[cfg(feature = "agent")]
+            {
+                return agent_cmd::run_agent(&mut client, &parsed, &config_dir);
+            }
+            #[cfg(not(feature = "agent"))]
+            {
+                Err("this np binary was built without the `agent` feature".into())
             }
         }
 

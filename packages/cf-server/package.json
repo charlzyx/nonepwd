@@ -17,6 +17,7 @@
     "db:migrate:local": "npx wrangler d1 execute nonepwd-db --local --file=./migrations/0001_init.sql"
   },
   "dependencies": {
+    "@nonepwd/agent-relay": "workspace:*",
     "@nonepwd/core": "workspace:*",
     "hono": "^4.7.5",
     "postal-mime": "^2.4.7"
