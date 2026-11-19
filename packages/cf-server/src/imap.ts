@@ -6,12 +6,37 @@ import {
 } from '@nonepwd/core/worker';
 import type { CfSocket } from 'cloudflare:sockets';
 import { ingestRawEmail } from './email.js';
-import { deriveImapLabel, ensureLegacyImapMigrated } from './schema.js';
+import { deriveImapLabel, ensureLegacyImapMigrated, ensureSchema } from './schema.js';
 import type { CfServerEnv } from './types.js';
 
 const MAX_IMAP_LITERAL_BYTES = 8 * 1024 * 1024;
-const IMAP_SYNC_MIN_INTERVAL_MS = 15_000;
+/** Sync fetches headers plus a short text slice. Refuse anything larger than this. */
+const IMAP_SYNC_MAX_LITERAL_BYTES = 64 * 1024;
+/** Minimum gap between sync attempts, including attempts the isolate is killed during. */
+export const IMAP_SYNC_MIN_INTERVAL_MS = 15_000;
+/** First failure waits this long; each further failure doubles it. */
+export const IMAP_SYNC_BACKOFF_BASE_MS = 60_000;
+export const IMAP_SYNC_BACKOFF_MAX_MS = 15 * 60 * 1000;
+/** Verification codes are useless after this. Also the gap that skips history. */
+export const IMAP_CODE_WINDOW_MS = 15 * 60 * 1000;
+export const IMAP_LONG_GAP_MS = IMAP_CODE_WINDOW_MS;
+export const IMAP_MAX_MESSAGES_PER_ACCOUNT = 2;
+export const IMAP_PARTIAL_TEXT_BYTES = 8192;
 const IMAP_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const IMAP_MONTH_INDEX: Record<string, number> = {
+  jan: 0,
+  feb: 1,
+  mar: 2,
+  apr: 3,
+  may: 4,
+  jun: 5,
+  jul: 6,
+  aug: 7,
+  sep: 8,
+  oct: 9,
+  nov: 10,
+  dec: 11,
+};
 
 export interface ImapAccountRow {
   id: string;
@@ -26,6 +51,8 @@ export interface ImapAccountRow {
   status: string;
   last_error: string | null;
   last_sync_at: string | null;
+  sync_fail_count?: number;
+  uid_baselined?: number;
   updated_at: string;
 }
 
@@ -598,11 +625,161 @@ function formatImapDateUtc(date: Date): string {
   return `${day}-${month}-${year}`;
 }
 
-class SocketByteReader {
-  private buf = new Uint8Array(0);
+/** 15s after success. Failures back off from 1 minute, doubling, capped at 15 minutes. */
+export function syncMinIntervalMs(failCount: number): number {
+  const n = Math.max(0, Math.floor(failCount));
+  if (n <= 0) return IMAP_SYNC_MIN_INTERVAL_MS;
+  const shift = Math.min(n - 1, 8);
+  return Math.min(IMAP_SYNC_BACKOFF_MAX_MS, IMAP_SYNC_BACKOFF_BASE_MS * 2 ** shift);
+}
+
+export function isSyncThrottled(
+  lastSyncAt: string | null,
+  failCount: number,
+  nowMs: number = Date.now()
+): boolean {
+  if (!lastSyncAt) return false;
+  const last = Date.parse(lastSyncAt);
+  if (Number.isNaN(last)) return false;
+  return nowMs - last < syncMinIntervalMs(failCount);
+}
+
+/**
+ * First contact, or a gap longer than a verification code stays valid:
+ * record the current high-water UID and do not download history.
+ */
+export function shouldBaselineUid(
+  uidBaselined: boolean,
+  lastSyncAt: string | null,
+  nowMs: number = Date.now()
+): boolean {
+  if (!uidBaselined) return true;
+  if (!lastSyncAt) return true;
+  const last = Date.parse(lastSyncAt);
+  if (Number.isNaN(last)) return true;
+  return nowMs - last >= IMAP_LONG_GAP_MS;
+}
+
+export function buildVerificationUidSearch(lastUid: number, now: Date = new Date()): string {
+  const since = new Date(now.getTime() - IMAP_CODE_WINDOW_MS);
+  const start = Math.max(0, Math.floor(lastUid)) + 1;
+  return `UID SEARCH UID ${start}:* SINCE ${formatImapDateUtc(since)}`;
+}
+
+export function buildPartialBodyFetch(uid: number): string {
+  return `UID FETCH ${uid} (UID INTERNALDATE BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.${IMAP_PARTIAL_TEXT_BYTES}>)`;
+}
+
+export function parseImapSearchUids(lines: string[]): number[] {
+  const uids: number[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.toUpperCase().startsWith('* SEARCH')) continue;
+    const tokens = trimmed.slice('* SEARCH'.length).trim().split(/\s+/);
+    for (const tok of tokens) {
+      if (/^\d+$/.test(tok)) uids.push(Number(tok));
+    }
+  }
+  return uids;
+}
+
+export function selectNewestUids(
+  uids: number[],
+  lastUid: number,
+  limit: number = IMAP_MAX_MESSAGES_PER_ACCOUNT
+): { fetch: number[]; advanceTo: number } {
+  const fresh = [...new Set(uids.filter((u) => Number.isFinite(u) && u > lastUid))].sort((a, b) => a - b);
+  if (fresh.length === 0) return { fetch: [], advanceTo: lastUid };
+  const take = Math.max(0, Math.floor(limit));
+  return {
+    fetch: take === 0 ? [] : fresh.slice(-take),
+    advanceTo: fresh[fresh.length - 1]!,
+  };
+}
+
+export function parseUidNext(lines: string[]): number | null {
+  for (const line of lines) {
+    const m = line.match(/\bUIDNEXT\s+(\d+)/i);
+    if (m?.[1]) return Number(m[1]);
+  }
+  return null;
+}
+
+export function parseHighestFetchedUid(lines: string[]): number | null {
+  let max: number | null = null;
+  for (const line of lines) {
+    const m = line.match(/\bUID\s+(\d+)/i);
+    if (!m?.[1]) continue;
+    const n = Number(m[1]);
+    if (max === null || n > max) max = n;
+  }
+  return max;
+}
+
+export function parseFetchInternalDate(line: string): Date | null {
+  const m = line.match(
+    /INTERNALDATE\s+"(\d{1,2})-([A-Za-z]{3})-(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s+([+-]\d{4})"/i
+  );
+  if (!m) return null;
+  const month = IMAP_MONTH_INDEX[m[2]!.toLowerCase()];
+  if (month === undefined) return null;
+  const sign = m[7]!.startsWith('-') ? -1 : 1;
+  const tzMin = sign * (Number(m[7]!.slice(1, 3)) * 60 + Number(m[7]!.slice(3, 5)));
+  const utc =
+    Date.UTC(Number(m[3]), month, Number(m[1]), Number(m[4]), Number(m[5]), Number(m[6])) -
+    tzMin * 60 * 1000;
+  const date = new Date(utc);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+export function messageDateFromRaw(bytes: Uint8Array): Date | null {
+  if (bytes.byteLength === 0) return null;
+  const n = Math.min(bytes.byteLength, 8192);
+  const text = textDecoder.decode(bytes.subarray(0, n));
+  const headerEnd = text.search(/\r?\n\r?\n/);
+  const headers = headerEnd === -1 ? text : text.slice(0, headerEnd);
+  const m = headers.match(/^Date:\s*(.+)$/im);
+  if (!m?.[1]) return null;
+  const date = new Date(m[1].trim());
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+export function isWithinCodeWindow(
+  date: Date,
+  nowMs: number = Date.now(),
+  windowMs: number = IMAP_CODE_WINDOW_MS
+): boolean {
+  const t = date.getTime();
+  if (Number.isNaN(t)) return false;
+  return nowMs - t <= windowMs;
+}
+
+/** True when the message is dated and that date is outside the code window. Undated messages are kept. */
+export function shouldSkipStaleCode(date: Date | null, nowMs: number = Date.now()): boolean {
+  if (!date) return false;
+  return !isWithinCodeWindow(date, nowMs);
+}
+
+/**
+ * Byte queue over a socket reader.
+ * `pull()` appends each chunk by reference. It does not copy the bytes already buffered,
+ * so a large message is O(n) instead of O(n^2).
+ */
+export class SocketByteReader {
+  private chunks: Uint8Array[] = [];
+  private startChunk = 0;
+  private startOffset = 0;
+  private buffered = 0;
   private eof = false;
+  /** Bytes copied while appending a chunk. Always 0: pull() does not merge buffers. */
+  pullCopyBytes = 0;
 
   constructor(private readonly reader: ReadableStreamDefaultReader<Uint8Array>) {}
+
+  /** How many unread socket chunks are queued. Useful to show pull() did not merge them. */
+  pendingChunkCount(): number {
+    return this.chunks.length - this.startChunk;
+  }
 
   private async pull(): Promise<boolean> {
     if (this.eof) return false;
@@ -614,41 +791,74 @@ class SocketByteReader {
     if (value.byteLength === 0) {
       return this.pull();
     }
-    const merged = new Uint8Array(this.buf.byteLength + value.byteLength);
-    merged.set(this.buf, 0);
-    merged.set(value, this.buf.byteLength);
-    this.buf = merged;
+    this.chunks.push(value);
+    this.buffered += value.byteLength;
     return true;
+  }
+
+  private compact(): void {
+    if (this.startChunk > 16) {
+      this.chunks.splice(0, this.startChunk);
+      this.startChunk = 0;
+    }
+  }
+
+  private findByte(byte: number): number {
+    let pos = 0;
+    for (let i = this.startChunk; i < this.chunks.length; i++) {
+      const chunk = this.chunks[i]!;
+      const offset = i === this.startChunk ? this.startOffset : 0;
+      const idx = chunk.indexOf(byte, offset);
+      if (idx !== -1) return pos + (idx - offset);
+      pos += chunk.byteLength - offset;
+    }
+    return -1;
+  }
+
+  private copyAndDiscard(length: number): Uint8Array {
+    const out = new Uint8Array(length);
+    let written = 0;
+    while (written < length) {
+      const chunk = this.chunks[this.startChunk];
+      if (!chunk) throw new Error('IMAP buffer underflow');
+      const avail = chunk.byteLength - this.startOffset;
+      const take = Math.min(avail, length - written);
+      out.set(chunk.subarray(this.startOffset, this.startOffset + take), written);
+      written += take;
+      this.buffered -= take;
+      if (take === avail) {
+        this.startChunk += 1;
+        this.startOffset = 0;
+      } else {
+        this.startOffset += take;
+      }
+    }
+    this.compact();
+    return out;
   }
 
   async readLine(): Promise<string | null> {
     while (true) {
-      const nlIdx = this.buf.indexOf(0x0a);
+      const nlIdx = this.findByte(0x0a);
       if (nlIdx !== -1) {
-        const lineBytes = this.buf.slice(0, nlIdx + 1);
-        this.buf = this.buf.slice(nlIdx + 1);
-        return textDecoder.decode(lineBytes);
+        return textDecoder.decode(this.copyAndDiscard(nlIdx + 1));
       }
       const ok = await this.pull();
       if (!ok) {
-        if (this.buf.byteLength === 0) return null;
-        const tail = this.buf;
-        this.buf = new Uint8Array(0);
-        return textDecoder.decode(tail);
+        if (this.buffered === 0) return null;
+        return textDecoder.decode(this.copyAndDiscard(this.buffered));
       }
     }
   }
 
   async readExact(length: number): Promise<Uint8Array> {
-    while (this.buf.byteLength < length) {
+    while (this.buffered < length) {
       const ok = await this.pull();
       if (!ok) {
         throw new Error('IMAP stream ended mid-literal');
       }
     }
-    const out = this.buf.slice(0, length);
-    this.buf = this.buf.slice(length);
-    return out;
+    return this.copyAndDiscard(length);
   }
 }
 
@@ -660,13 +870,19 @@ class WorkersImapClient {
   private constructor(
     private readonly socket: CfSocket,
     reader: ReadableStreamDefaultReader<Uint8Array>,
-    writer: WritableStreamDefaultWriter<Uint8Array>
+    writer: WritableStreamDefaultWriter<Uint8Array>,
+    private readonly maxLiteral: number
   ) {
     this.byteReader = new SocketByteReader(reader);
     this.writer = writer;
   }
 
-  static async connect(host: string, port: number, tls: boolean): Promise<WorkersImapClient> {
+  static async connect(
+    host: string,
+    port: number,
+    tls: boolean,
+    opts?: { maxLiteral?: number }
+  ): Promise<WorkersImapClient> {
     const cleanHost = host.trim();
     if (!cleanHost) {
       throw new Error('IMAP host must not be empty');
@@ -678,7 +894,12 @@ class WorkersImapClient {
     );
     const reader = socket.readable.getReader();
     const writer = socket.writable.getWriter();
-    const client = new WorkersImapClient(socket, reader, writer);
+    const client = new WorkersImapClient(
+      socket,
+      reader,
+      writer,
+      opts?.maxLiteral ?? MAX_IMAP_LITERAL_BYTES
+    );
 
     const greeting = await client.byteReader.readLine();
     if (!greeting) {
@@ -726,8 +947,8 @@ class WorkersImapClient {
       while (true) {
         const litLen = parseLiteralLen(currentLine);
         if (litLen === null) break;
-        if (litLen > MAX_IMAP_LITERAL_BYTES) {
-          throw new Error(`IMAP literal (${litLen} bytes) exceeds 8 MiB limit`);
+        if (litLen > this.maxLiteral) {
+          throw new Error(`IMAP literal (${litLen} bytes) exceeds ${this.maxLiteral} byte limit`);
         }
         const rawLit = await this.byteReader.readExact(litLen);
         literalChunks.push(rawLit);
@@ -852,15 +1073,68 @@ export async function testImapConnection(params: {
   }
 }
 
+export interface ImapSyncResult {
+  synced: number;
+  error?: string;
+  throttled?: boolean;
+  baselined?: boolean;
+}
+
+async function markImapFailure(env: CfServerEnv, accountId: string, message: string): Promise<void> {
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `UPDATE imap_accounts
+     SET status = 'error', last_error = ?, last_sync_at = ?,
+         sync_fail_count = COALESCE(sync_fail_count, 0) + 1, updated_at = ?
+     WHERE id = ?`
+  )
+    .bind(message, now, now, accountId)
+    .run();
+  await syncLegacyImapConfigFromAccounts(env.DB);
+}
+
+async function markImapAttempt(env: CfServerEnv, accountId: string): Promise<void> {
+  const now = new Date().toISOString();
+  // Stamp before any socket work. A CPU kill still leaves last_sync_at set, so the next
+  // invocation is throttled instead of restarting a full mailbox download.
+  await env.DB.prepare(
+    `UPDATE imap_accounts SET status = 'connecting', last_sync_at = ?, updated_at = ? WHERE id = ?`
+  )
+    .bind(now, now, accountId)
+    .run();
+}
+
+async function markImapSuccess(env: CfServerEnv, accountId: string, lastUid: number): Promise<void> {
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `UPDATE imap_accounts
+     SET last_uid = ?, status = 'listening', last_error = NULL, last_sync_at = ?,
+         sync_fail_count = 0, uid_baselined = 1, updated_at = ?
+     WHERE id = ?`
+  )
+    .bind(lastUid, now, now, accountId)
+    .run();
+  await syncLegacyImapConfigFromAccounts(env.DB);
+}
+
+async function readMailboxHighWater(client: WorkersImapClient): Promise<number> {
+  const statusLines = await client.runCommand('STATUS "INBOX" (UIDNEXT)');
+  const uidNext = parseUidNext(statusLines.map((item) => item.line));
+  if (uidNext !== null) return Math.max(0, uidNext - 1);
+  const fetched = await client.runCommand('UID FETCH * (UID)');
+  const highest = parseHighestFetchedUid(fetched.map((item) => item.line));
+  return highest ?? 0;
+}
+
 export async function syncImapAccount(
   env: CfServerEnv,
   accountId: string,
-  options?: { force?: boolean; rejectDisabled?: boolean }
-): Promise<{ synced: number; error?: string }> {
-  await ensureLegacyImapMigrated(env.DB);
+  options?: { rejectDisabled?: boolean }
+): Promise<ImapSyncResult> {
+  await ensureSchema(env.DB);
   const row = await env.DB.prepare(
     `SELECT id, label, enabled, host, port, tls, username, password_enc,
-            last_uid, status, last_error, last_sync_at, updated_at
+            last_uid, status, last_error, last_sync_at, sync_fail_count, uid_baselined, updated_at
      FROM imap_accounts WHERE id = ?`
   )
     .bind(accountId)
@@ -880,11 +1154,9 @@ export async function syncImapAccount(
     return { synced: 0 };
   }
 
-  if (!options?.force && row.last_sync_at) {
-    const lastMs = Date.parse(row.last_sync_at);
-    if (!Number.isNaN(lastMs) && Date.now() - lastMs < IMAP_SYNC_MIN_INTERVAL_MS) {
-      return { synced: 0 };
-    }
+  const failCount = Number(row.sync_fail_count ?? 0);
+  if (isSyncThrottled(row.last_sync_at, failCount)) {
+    return { synced: 0, throttled: true };
   }
 
   const account = await env.DB.prepare('SELECT cf_webhook_secret FROM account WHERE id = 1').first<{
@@ -899,117 +1171,78 @@ export async function syncImapAccount(
     password = await decryptImapPassword(account.cf_webhook_secret, row.password_enc);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    const now = new Date().toISOString();
-    await env.DB.prepare(
-      'UPDATE imap_accounts SET status = ?, last_error = ?, last_sync_at = ?, updated_at = ? WHERE id = ?'
-    )
-      .bind('error', msg, now, now, row.id)
-      .run();
-    await syncLegacyImapConfigFromAccounts(env.DB);
+    await markImapFailure(env, row.id, msg);
     return { synced: 0, error: msg };
   }
+
+  const baseline = shouldBaselineUid(Number(row.uid_baselined ?? 0) === 1, row.last_sync_at);
+  await markImapAttempt(env, row.id);
 
   let client: WorkersImapClient | null = null;
   let synced = 0;
 
   try {
     return await withTimeout(15_000, async () => {
-      client = await WorkersImapClient.connect(row.host, clampImapPort(row.port), row.tls === 1);
+      client = await WorkersImapClient.connect(row.host, clampImapPort(row.port), row.tls === 1, {
+        maxLiteral: IMAP_SYNC_MAX_LITERAL_BYTES,
+      });
       await client.login(row.host, row.username, password);
       await client.selectInbox();
 
-      const sinceDate = new Date(Date.now() - 36 * 60 * 60 * 1000);
-      const searchLines = await client.runCommand(
-        `UID SEARCH SINCE ${formatImapDateUtc(sinceDate)}`
+      if (baseline) {
+        const highWater = await readMailboxHighWater(client);
+        await client.logout();
+        const lastUid = Math.max(row.last_uid ?? 0, highWater);
+        await markImapSuccess(env, row.id, lastUid);
+        return { synced: 0, baselined: true };
+      }
+
+      const searchLines = await client.runCommand(buildVerificationUidSearch(row.last_uid ?? 0));
+      const found = parseImapSearchUids(searchLines.map((item) => item.line));
+      const { fetch: targetUids, advanceTo } = selectNewestUids(
+        found,
+        row.last_uid ?? 0,
+        IMAP_MAX_MESSAGES_PER_ACCOUNT
       );
-
-      const allUids: number[] = [];
-      for (const item of searchLines) {
-        const trimmed = item.line.trim();
-        if (trimmed.toUpperCase().startsWith('* SEARCH')) {
-          const tokens = trimmed.slice('* SEARCH'.length).trim().split(/\s+/);
-          for (const tok of tokens) {
-            if (/^\d+$/.test(tok)) {
-              allUids.push(Number(tok));
-            }
-          }
-        }
-      }
-
-      const uniqueSorted = Array.from(new Set(allUids)).sort((a, b) => a - b);
-      let highestUid = row.last_uid;
-      let targetUids: number[] = [];
-
-      if (uniqueSorted.length > 0) {
-        const maxFound = uniqueSorted[uniqueSorted.length - 1];
-        if (row.last_uid === 0) {
-          // On initial sync, only process up to the 5 newest messages to avoid historical flood
-          targetUids = uniqueSorted.slice(-5);
-          highestUid = maxFound;
-        } else {
-          targetUids = uniqueSorted.filter((u) => u > row.last_uid).slice(-15);
-          if (options?.force) {
-            const countRow = await env.DB.prepare(
-              'SELECT COUNT(*) AS cnt FROM encrypted_emails WHERE LOWER(envelope_to) = LOWER(?)'
-            )
-              .bind(row.username.trim())
-              .first<{ cnt: number }>();
-            if (Number(countRow?.cnt ?? 0) === 0) {
-              targetUids = uniqueSorted.slice(-10);
-            }
-          }
-          if (maxFound > highestUid) {
-            highestUid = maxFound;
-          }
-        }
-      }
 
       const envelopeTo = row.username.trim() || undefined;
       for (const uid of targetUids) {
-        const fetched = await client.runCommand(`UID FETCH ${uid} (UID BODY.PEEK[])`);
-        for (const item of fetched) {
-          if (item.literal.byteLength > 0) {
-            const res = await ingestRawEmail({
-              env,
-              rawMime: item.literal,
-              source: 'imap',
-              envelopeTo,
-            });
-            if (res.accepted) {
-              synced += 1;
-            }
-          }
+        let fetched: Array<{ line: string; literal: Uint8Array }>;
+        try {
+          fetched = await client.runCommand(buildPartialBodyFetch(uid));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes('byte limit')) continue;
+          throw err;
         }
-        if (uid > highestUid) {
-          highestUid = uid;
+        for (const item of fetched) {
+          const when = parseFetchInternalDate(item.line) ?? messageDateFromRaw(item.literal);
+          if (shouldSkipStaleCode(when)) continue;
+          if (item.literal.byteLength === 0) continue;
+          const res = await ingestRawEmail({
+            env,
+            rawMime: item.literal,
+            source: 'imap',
+            envelopeTo,
+          });
+          if (res.accepted) synced += 1;
+        }
+        if (uid > (row.last_uid ?? 0)) {
+          await env.DB.prepare(
+            'UPDATE imap_accounts SET last_uid = ? WHERE id = ? AND last_uid < ?'
+          )
+            .bind(uid, row.id, uid)
+            .run();
         }
       }
 
       await client.logout();
-
-      const now = new Date().toISOString();
-      await env.DB.prepare(
-        `UPDATE imap_accounts
-         SET last_uid = ?, status = 'listening', last_error = NULL, last_sync_at = ?, updated_at = ?
-         WHERE id = ?`
-      )
-        .bind(highestUid, now, now, row.id)
-        .run();
-      await syncLegacyImapConfigFromAccounts(env.DB);
-
+      await markImapSuccess(env, row.id, Math.max(row.last_uid ?? 0, advanceTo));
       return { synced };
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    const now = new Date().toISOString();
-    await env.DB.prepare(
-      `UPDATE imap_accounts
-       SET status = 'error', last_error = ?, last_sync_at = ?, updated_at = ?
-       WHERE id = ?`
-    )
-      .bind(msg, now, now, row.id)
-      .run();
-    await syncLegacyImapConfigFromAccounts(env.DB);
+    await markImapFailure(env, row.id, msg);
     return { synced, error: msg };
   } finally {
     if (client) {
@@ -1020,14 +1253,11 @@ export async function syncImapAccount(
 
 export async function syncImapInbox(
   env: CfServerEnv,
-  options?: { force?: boolean; accountId?: string }
-): Promise<{ synced: number; error?: string }> {
-  await ensureLegacyImapMigrated(env.DB);
+  options?: { accountId?: string }
+): Promise<ImapSyncResult> {
+  await ensureSchema(env.DB);
   if (options?.accountId) {
-    return syncImapAccount(env, options.accountId, {
-      force: options.force,
-      rejectDisabled: true,
-    });
+    return syncImapAccount(env, options.accountId, { rejectDisabled: true });
   }
 
   const enabledRows = await env.DB.prepare(
@@ -1039,21 +1269,21 @@ export async function syncImapInbox(
     return { synced: 0 };
   }
 
-  const results = await Promise.all(
-    targets.map(async (target) => ({
-      username: target.username,
-      res: await syncImapAccount(env, target.id, { force: options?.force }),
-    }))
-  );
-
   let synced = 0;
+  let throttledCount = 0;
   const errors: string[] = [];
-  for (const item of results) {
-    synced += item.res.synced;
-    if (item.res.error) {
-      errors.push(targets.length > 1 ? `${item.username}: ${item.res.error}` : item.res.error);
+  for (const target of targets) {
+    const res = await syncImapAccount(env, target.id);
+    synced += res.synced;
+    if (res.throttled) throttledCount += 1;
+    if (res.error) {
+      errors.push(targets.length > 1 ? `${target.username}: ${res.error}` : res.error);
     }
   }
 
-  return errors.length > 0 ? { synced, error: errors.join('; ') } : { synced };
+  return {
+    synced,
+    ...(errors.length > 0 ? { error: errors.join('; ') } : {}),
+    ...(throttledCount === targets.length ? { throttled: true } : {}),
+  };
 }

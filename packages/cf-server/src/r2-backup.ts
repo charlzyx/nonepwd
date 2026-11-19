@@ -1,4 +1,5 @@
 import { randomHex } from './auth.js';
+import { bumpSyncEpoch } from './sync-delta.js';
 import type { CfServerEnv, R2BackupMeta } from './types.js';
 import { broadcastEvent } from './ws-hub.js';
 
@@ -365,6 +366,7 @@ export async function restoreEncryptedSnapshot(
   }
 
   await env.DB.batch(stmts);
+  await bumpSyncEpoch(env.DB);
   await broadcastEvent(env, { type: 'vault.restored', key: normalizedKey }, { ownerOnly: true });
 
   return {

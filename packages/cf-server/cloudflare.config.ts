@@ -36,8 +36,9 @@ export default defineConfig({
       notFoundHandling: "single-page-application",
       runWorkerFirst: ["/api/*", "/install.sh", "/downloads/*", "/llms.txt", "/SKILL.md", "/skill.md"],
     },
-    // Optional Cron trigger if the Cloudflare account has free Cron slots available.
-    // Even without a Cron trigger, `waitUntil(maybeAutoSnapshot)` snapshots D1->R2 every 6h on activity.
+    triggers: [{ type: "scheduled", schedule: "* * * * *" }],
+    // Minute cron syncs IMAP verification codes only.
+    // Activity-triggered waitUntil(maybeAutoSnapshot) still backs up D1 to R2.
     // triggers: [{ type: "scheduled", schedule: "0 */6 * * *" }],
     exports: {
       VaultWsHub: exports.durableObject({ storage: "sqlite" }),

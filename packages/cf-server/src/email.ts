@@ -9,6 +9,7 @@ import {
   type SealedEnvelope,
 } from '@nonepwd/core/worker';
 import { ensureSchema } from './schema.js';
+import { recordSyncDeletion } from './sync-delta.js';
 import type {
   CfServerEnv,
   EmailFilterConfig,
@@ -275,22 +276,30 @@ async function storeSealedEmail(
 export async function deleteStoredEmail(env: CfServerEnv, id: string): Promise<boolean> {
   const res = await env.DB.prepare('DELETE FROM encrypted_emails WHERE id = ?').bind(id).run();
   const changes = Number(res.meta?.changes ?? 0);
-  if (changes > 0 && env.BUCKET) {
-    await env.BUCKET.delete(`emails/${id}.json`);
+  if (changes > 0) {
+    await recordSyncDeletion(env.DB, 'email', id, new Date().toISOString());
+    if (env.BUCKET) {
+      await env.BUCKET.delete(`emails/${id}.json`);
+    }
   }
   return changes > 0;
 }
 
 export async function queryEmails(
   env: CfServerEnv,
-  limit: number = 100
+  limit: number = 100,
+  since?: string | null
 ): Promise<EncryptedEmailRecord[]> {
-  const res = await env.DB.prepare(
-    `SELECT id, source, envelope_to, has_otp, sealed_envelope, received_at
-     FROM encrypted_emails ORDER BY received_at DESC LIMIT ?`
-  )
-    .bind(limit)
-    .all<{
+  const stmt = since
+    ? env.DB.prepare(
+        `SELECT id, source, envelope_to, has_otp, sealed_envelope, received_at
+         FROM encrypted_emails WHERE received_at > ? ORDER BY received_at DESC LIMIT ?`
+      ).bind(since, limit)
+    : env.DB.prepare(
+        `SELECT id, source, envelope_to, has_otp, sealed_envelope, received_at
+         FROM encrypted_emails ORDER BY received_at DESC LIMIT ?`
+      ).bind(limit);
+  const res = await stmt.all<{
       id: string;
       source: 'imap' | 'cloudflare' | 'simulate';
       envelope_to: string | null;

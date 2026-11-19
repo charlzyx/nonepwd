@@ -6,6 +6,7 @@ import {
   encryptJson,
   extractHost,
   fromBase64Url,
+  toBase64Url,
   generatePassword,
   generateTotp,
   initNonePwdCore,
@@ -81,6 +82,8 @@ interface SessionCache {
   decryptedEmails: Array<DecryptedEmailPayload & { id: string }>;
   pendingByTab: Record<number, PendingLoginRelay>;
   expiresAt?: number;
+  syncCursor?: string | null;
+  syncEpoch?: number | null;
 }
 
 let memoryFallbackSession: SessionCache | null = null;
@@ -512,32 +515,49 @@ async function decryptSessionSync(
   rootKeyB64: string,
   emailPrivateKeyPkcs8B64: string,
   prevPending: Record<number, PendingLoginRelay> = {},
-  expiresAt?: number
+  expiresAt?: number,
+  previous?: SessionCache | null
 ): Promise<SessionCache> {
   const rootKeyBytes = fromBase64Url(rootKeyB64);
+  const params = new URLSearchParams();
+  if (previous?.syncCursor) {
+    params.set('since', previous.syncCursor);
+    if (previous.syncEpoch) params.set('epoch', String(previous.syncEpoch));
+  }
+  const syncQuery = params.toString();
+  const syncPath = syncQuery ? `/api/sync?${syncQuery}` : '/api/sync';
   const syncData = await apiJson<{
+    incremental?: boolean;
+    cursor?: string;
+    epoch?: number;
     account: { aliasDomain: string };
     vaults: EncryptedVaultRecord[];
     items: EncryptedItemRecord[];
     emails: EncryptedEmailRecord[];
-  }>(serverUrl, '/api/sync', token);
+    deleted?: { vaults?: string[]; items?: string[]; emails?: string[] };
+  }>(serverUrl, syncPath, token);
 
-  const vaults: SessionCache['vaults'] = [];
+  const incremental = syncData.incremental === true && Boolean(previous);
   const keyMap = new Map<string, Uint8Array>();
+  if (incremental && previous) {
+    for (const v of previous.vaults) keyMap.set(v.id, fromBase64Url(v.keyB64));
+  }
 
-  for (const v of syncData.vaults) {
+  const freshVaults: SessionCache['vaults'] = [];
+  for (const v of syncData.vaults ?? []) {
     const vk = await decryptBytes(rootKeyBytes, v.encryptedKey, AAD.vaultOwnerKey(v.id));
     const meta = await decryptJson<VaultMetadata>(vk, v.encryptedMeta, AAD.vaultMeta(v.id));
     keyMap.set(v.id, vk);
-    vaults.push({
+    freshVaults.push({
       id: v.id,
       name: meta.name,
-      keyB64: btoa(String.fromCharCode(...vk)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+      keyB64: toBase64Url(vk),
     });
   }
+  for (const id of syncData.deleted?.vaults ?? []) keyMap.delete(id);
 
-  const items: VaultItemPayload[] = [];
-  for (const it of syncData.items) {
+  const freshItems: VaultItemPayload[] = [];
+  for (const it of syncData.items ?? []) {
     const vk = keyMap.get(it.vaultId);
     if (!vk) continue;
     try {
@@ -546,23 +566,48 @@ async function decryptSessionSync(
         it.encryptedData,
         AAD.vaultItem(it.vaultId, it.id)
       );
-      items.push(payload);
+      freshItems.push(payload);
     } catch {
       // skip
     }
   }
 
-  const decryptedEmails: SessionCache['decryptedEmails'] = [];
-  for (const em of syncData.emails) {
+  const freshEmails: SessionCache['decryptedEmails'] = [];
+  for (const em of syncData.emails ?? []) {
     try {
       const opened = await openSealedJson<DecryptedEmailPayload>(
         emailPrivateKeyPkcs8B64,
         em.sealedEnvelope
       );
-      decryptedEmails.push({ ...opened, id: em.id });
+      freshEmails.push({ ...opened, id: em.id });
     } catch {
       // skip
     }
+  }
+
+  let vaults = freshVaults;
+  let items = freshItems;
+  let decryptedEmails = freshEmails;
+  if (incremental && previous) {
+    const vaultMap = new Map(previous.vaults.map((v) => [v.id, v]));
+    for (const v of freshVaults) vaultMap.set(v.id, v);
+    for (const id of syncData.deleted?.vaults ?? []) vaultMap.delete(id);
+    vaults = [...vaultMap.values()];
+
+    const itemMap = new Map(previous.items.map((item) => [item.id, item]));
+    for (const item of freshItems) itemMap.set(item.id, item);
+    for (const id of syncData.deleted?.items ?? []) itemMap.delete(id);
+    for (const vaultId of syncData.deleted?.vaults ?? []) {
+      for (const [id, item] of itemMap) {
+        if (item.vaultId === vaultId) itemMap.delete(id);
+      }
+    }
+    items = [...itemMap.values()];
+
+    const emailMap = new Map(previous.decryptedEmails.map((email) => [email.id, email]));
+    for (const email of freshEmails) emailMap.set(email.id, email);
+    for (const id of syncData.deleted?.emails ?? []) emailMap.delete(id);
+    decryptedEmails = [...emailMap.values()];
   }
 
   return {
@@ -570,12 +615,14 @@ async function decryptSessionSync(
     token,
     rootKeyB64,
     emailPrivateKeyPkcs8B64,
-    aliasDomain: syncData.account.aliasDomain ?? '',
+    aliasDomain: syncData.account?.aliasDomain ?? previous?.aliasDomain ?? '',
     vaults,
     items,
     decryptedEmails,
     pendingByTab: prevPending,
     expiresAt,
+    syncCursor: syncData.cursor ?? (incremental ? previous?.syncCursor : null),
+    syncEpoch: typeof syncData.epoch === 'number' ? syncData.epoch : previous?.syncEpoch ?? null,
   };
 }
 
@@ -663,7 +710,8 @@ function connectWs(session: SessionCache): void {
             current.rootKeyB64,
             current.emailPrivateKeyPkcs8B64,
             current.pendingByTab,
-            current.expiresAt
+            current.expiresAt,
+            current
           );
           await saveSession(refreshed);
         }
@@ -947,7 +995,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             session.rootKeyB64,
             session.emailPrivateKeyPkcs8B64,
             session.pendingByTab,
-            session.expiresAt
+            session.expiresAt,
+            session
           );
           await saveSession(refreshed);
           sendResponse({ ok: true });

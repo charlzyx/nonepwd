@@ -101,7 +101,21 @@ const SCHEMA_STATEMENTS = [
     status TEXT NOT NULL DEFAULT 'listening',
     last_error TEXT,
     last_sync_at TEXT,
+    sync_fail_count INTEGER NOT NULL DEFAULT 0,
+    uid_baselined INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS sync_deletions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    vault_id TEXT,
+    deleted_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_sync_deletions_deleted_at ON sync_deletions(deleted_at)`,
+  `CREATE TABLE IF NOT EXISTS sync_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    epoch INTEGER NOT NULL DEFAULT 1
   )`,
 ];
 
@@ -172,6 +186,25 @@ export async function ensureLegacyImapMigrated(db: D1Database): Promise<void> {
     .run();
 }
 
+/**
+ * Existing D1 databases were created before sync bookkeeping columns existed.
+ * CREATE TABLE IF NOT EXISTS does not add columns, so alter in place.
+ */
+export async function ensureImapSyncColumns(db: D1Database): Promise<void> {
+  const info = await db.prepare('PRAGMA table_info(imap_accounts)').all<{ name: string }>();
+  const names = new Set((info.results ?? []).map((row) => row.name));
+  if (!names.has('sync_fail_count')) {
+    await db
+      .prepare('ALTER TABLE imap_accounts ADD COLUMN sync_fail_count INTEGER NOT NULL DEFAULT 0')
+      .run();
+  }
+  if (!names.has('uid_baselined')) {
+    await db
+      .prepare('ALTER TABLE imap_accounts ADD COLUMN uid_baselined INTEGER NOT NULL DEFAULT 0')
+      .run();
+  }
+}
+
 export async function ensureSchema(db: D1Database): Promise<void> {
   if (initializedDbs.has(db)) return;
 
@@ -200,9 +233,11 @@ export async function ensureSchema(db: D1Database): Promise<void> {
            (id, enabled, host, port, tls, username, password_enc, last_uid, status, updated_at)
            VALUES (1, 0, '', 993, 1, '', '', 0, 'disabled', ?)`
         )
-        .bind(now)
+        .bind(now),
+      db.prepare('INSERT OR IGNORE INTO sync_state (id, epoch) VALUES (1, 1)')
     );
     await db.batch(stmts);
+    await ensureImapSyncColumns(db);
     await ensureLegacyImapMigrated(db);
     initializedDbs.add(db);
   })();

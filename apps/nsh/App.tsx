@@ -203,6 +203,8 @@ function App() {
   const vaultKeys = signal<Map<string, Uint8Array>>(new Map());
   const items = signal<VaultItemPayload[]>([]);
   const emails = signal<DecryptedEmailItem[]>([]);
+  const syncCursor = signal<string | null>(null);
+  const syncEpoch = signal<number | null>(null);
   const imapAccounts = signal<ImapAccountPublic[]>([]);
   const emailFilter = signal<EmailFilterConfig>(DEFAULT_EMAIL_FILTER);
 
@@ -292,7 +294,15 @@ function App() {
       activeSession.serverUrl,
       activeSession.token,
       activeSession.rootKeyBytes,
-      activeSession.emailPrivateKeyPkcs8B64
+      activeSession.emailPrivateKeyPkcs8B64,
+      {
+        cursor: syncCursor(),
+        epoch: syncEpoch(),
+        vaults: vaults(),
+        vaultKeys: vaultKeys(),
+        items: items(),
+        emails: emails(),
+      }
     );
     batch(() => {
       accountInfo.set(res.account);
@@ -300,6 +310,8 @@ function App() {
       vaultKeys.set(res.vaultKeys);
       items.set(res.items);
       emails.set(res.emails);
+      syncCursor.set(res.cursor);
+      syncEpoch.set(res.epoch);
       imapAccounts.set(res.imapAccounts);
       if (res.emailFilter) {
         emailFilter.set(res.emailFilter);
@@ -683,6 +695,8 @@ function App() {
       vaultKeys.set(new Map());
       items.set([]);
       emails.set([]);
+      syncCursor.set(null);
+      syncEpoch.set(null);
       imapAccounts.set([]);
       emailFilter.set(DEFAULT_EMAIL_FILTER);
       pendingAndroidSaves.set([]);
