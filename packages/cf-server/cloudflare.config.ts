@@ -34,7 +34,7 @@ export default defineConfig({
     ...(customDomain ? { domains: [customDomain] } : {}),
     assets: {
       notFoundHandling: "single-page-application",
-      runWorkerFirst: ["/api/*", "/install.sh", "/downloads/*", "/llms.txt", "/SKILL.md", "/skill.md"],
+      runWorkerFirst: ["/api/*", "/agent/*", "/install.sh", "/downloads/*", "/llms.txt", "/SKILL.md", "/skill.md"],
     },
     triggers: [{ type: "scheduled", schedule: "* * * * *" }],
     // Minute cron syncs IMAP verification codes only.
