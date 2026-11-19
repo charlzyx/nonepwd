@@ -423,31 +423,33 @@ function App() {
   });
 
   // Android hardware back handler for closing modals / detail sheets
-  cleanup(
-    BackHandler.on("press", () => {
-      if (qrSheetOpen()) {
-        qrSheetOpen.set(false);
-        return true;
-      }
-      if (itemEditorOpen()) {
-        itemEditorOpen.set(false);
-        return true;
-      }
-      if (imapEditorOpen()) {
-        imapEditorOpen.set(false);
-        return true;
-      }
-      if (newVaultDialogOpen()) {
-        newVaultDialogOpen.set(false);
-        return true;
-      }
-      if (!isWideDesktop() && activeTab() === "vault" && selectedItemId()) {
-        selectedItemId.set(null);
-        return true;
-      }
-      return false;
-    })
-  );
+  if (typeof BackHandler?.on === "function") {
+    cleanup(
+      BackHandler.on("press", () => {
+        if (qrSheetOpen()) {
+          qrSheetOpen.set(false);
+          return true;
+        }
+        if (itemEditorOpen()) {
+          itemEditorOpen.set(false);
+          return true;
+        }
+        if (imapEditorOpen()) {
+          imapEditorOpen.set(false);
+          return true;
+        }
+        if (newVaultDialogOpen()) {
+          newVaultDialogOpen.set(false);
+          return true;
+        }
+        if (!isWideDesktop() && activeTab() === "vault" && selectedItemId()) {
+          selectedItemId.set(null);
+          return true;
+        }
+        return false;
+      })
+    );
+  }
 
   // Computed lists & filters
   const filteredTotpItems = computed(() => {
@@ -2474,7 +2476,7 @@ function App() {
                         <Tab
                           selected={active()}
                           onPress={() => {
-                            Haptics.selection();
+                            Haptics?.selection?.();
                             activeTab.set(t().key);
                           }}
                           class={`flex-1 h-11 items-center justify-center rounded-xl ${

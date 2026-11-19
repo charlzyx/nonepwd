@@ -200,7 +200,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key>
   <string>${APP_VERSION:-0.2.0}</string>
   <key>CFBundleVersion</key>
-  <string>${APP_BUILD:-11}</string>
+  <string>${APP_BUILD:-12}</string>
   <key>LSMinimumSystemVersion</key>
   <string>${MIN_MACOS}</string>
   <key>NSHighResolutionCapable</key>

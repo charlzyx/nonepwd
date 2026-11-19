@@ -5,7 +5,6 @@ import {
   Cloud,
   Download,
   ExternalLink,
-  FolderLock,
   Globe,
   KeyRound,
   Laptop,
@@ -36,6 +35,7 @@ const RELEASE_URL = `https://github.com/charlzyx/nonepwd/releases/tag/${RELEASE_
 const RELEASE_DOWNLOAD_BASE = `https://github.com/charlzyx/nonepwd/releases/download/${RELEASE_TAG}`;
 
 type CliTab = 'run' | 'mail' | 'sa' | 'connect';
+type ShowcaseTab = 'desktop' | 'mobile' | 'inbox';
 
 const COPY: Record<
   Locale,
@@ -68,7 +68,10 @@ const COPY: Record<
       downloadApps: string;
     };
     preview: {
-      mailboxes: string;
+      tabs: Record<ShowcaseTab, string>;
+      mobileCaptions: [string, string, string];
+      altDesktop: string;
+      altInbox: string;
     };
     core: {
       heading: string;
@@ -138,7 +141,14 @@ const COPY: Record<
       downloadApps: '下载客户端',
     },
     preview: {
-      mailboxes: '3 个邮箱监听中',
+      tabs: {
+        desktop: 'macOS 原生桌面',
+        mobile: 'iOS · Android 移动端',
+        inbox: '实时邮箱接码',
+      },
+      mobileCaptions: ['2FA 验证器', '全品类密码库', '实时邮件接码'],
+      altDesktop: 'nonepwd macOS SwiftUI 原生三栏密码库与实时验证码界面',
+      altInbox: 'nonepwd macOS 多邮箱验证码自动提取与筛选界面',
     },
     core: {
       heading: '核心能力',
@@ -304,7 +314,14 @@ curl -H "Authorization: Bearer my-connect-secret" \\
       downloadApps: 'Download Apps',
     },
     preview: {
-      mailboxes: '3 mailboxes listening',
+      tabs: {
+        desktop: 'macOS Desktop',
+        mobile: 'iOS & Android',
+        inbox: 'Live Email OTP',
+      },
+      mobileCaptions: ['2FA Authenticator', 'Encrypted Vault', 'Live OTP Inbox'],
+      altDesktop: 'nonepwd native macOS SwiftUI three-column password vault and TOTP view',
+      altInbox: 'nonepwd macOS multi-mailbox live verification code extraction view',
     },
     core: {
       heading: 'Core Capabilities',
@@ -456,6 +473,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:8787';
 
   const [cliTab, setCliTab] = useState<CliTab>('run');
+  const [showcaseTab, setShowcaseTab] = useState<ShowcaseTab>('desktop');
   const [openFaq, setOpenFaq] = useState<number | null>(null);
 
   const t = COPY[locale];
@@ -584,127 +602,77 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenVault }) => {
             </div>
           </section>
 
-          {/* Architectural Product Preview Window */}
+          {/* Real App Screenshots Showcase */}
           <section className="border-t border-border/70">
-            <div className="flex items-center justify-between border-b border-border/70 bg-muted/35 px-5 py-2.5 md:px-10">
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-1.5" aria-hidden="true">
-                  <span className="size-2.5 rounded-full bg-foreground/15" />
-                  <span className="size-2.5 rounded-full bg-foreground/15" />
-                  <span className="size-2.5 rounded-full bg-foreground/15" />
-                </div>
-                <span className="font-mono text-xs text-muted-foreground">
-                  nonepwd — /vault
-                </span>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 bg-muted/35 px-4 py-2.5 md:px-10">
+              <div className="inline-flex flex-wrap items-center gap-1 rounded-lg border border-border/80 bg-background/80 p-1">
+                {(['desktop', 'mobile', 'inbox'] as ShowcaseTab[]).map((tabKey) => {
+                  const active = showcaseTab === tabKey;
+                  return (
+                    <button
+                      key={tabKey}
+                      type="button"
+                      onClick={() => setShowcaseTab(tabKey)}
+                      className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
+                        active
+                          ? 'bg-primary text-primary-foreground shadow-xs'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {t.preview.tabs[tabKey]}
+                    </button>
+                  );
+                })}
               </div>
-              <span className="font-mono text-[11px] text-muted-foreground">
-                WebSocket Live · AES-256-GCM
+
+              <span className="hidden font-mono text-[11px] text-muted-foreground sm:inline">
+                SwiftUI · iOS &amp; Android · AES-256-GCM
               </span>
             </div>
 
-            <div className="grid grid-cols-1 gap-px bg-border/70 md:grid-cols-12">
-              {/* Vaults */}
-              <div className="flex flex-col justify-between space-y-4 bg-card/60 p-5 md:col-span-3">
-                <div className="space-y-3">
-                  <div className="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
-                    Vaults
-                  </div>
-                  <div className="space-y-1 text-xs">
-                    <div className="flex items-center justify-between rounded-md bg-muted px-2.5 py-1.5 font-medium text-foreground">
-                      <span className="flex items-center gap-2">
-                        <FolderLock className="size-3.5 text-muted-foreground" />
-                        Personal
-                      </span>
-                      <span className="font-mono text-[11px] text-muted-foreground">14</span>
+            {showcaseTab === 'mobile' ? (
+              <div className="grid grid-cols-1 gap-6 bg-muted/20 p-6 sm:grid-cols-3 md:gap-8 md:p-10">
+                {(
+                  [
+                    ['2fa', t.preview.mobileCaptions[0]],
+                    ['vault', t.preview.mobileCaptions[1]],
+                    ['inbox', t.preview.mobileCaptions[2]],
+                  ] as const
+                ).map(([slug, caption]) => (
+                  <figure key={slug} className="flex flex-col items-center">
+                    <div className="w-full max-w-[260px] overflow-hidden rounded-[22px] border border-border/80 bg-background shadow-sm">
+                      <img
+                        src={`/screenshots/mobile-${slug}-${isDark ? 'dark' : 'light'}.webp`}
+                        alt={`nonepwd ${caption}`}
+                        width={390}
+                        height={800}
+                        loading="lazy"
+                        className="block h-auto w-full select-none"
+                      />
                     </div>
-                    <div className="flex items-center justify-between rounded-md px-2.5 py-1.5 text-muted-foreground">
-                      <span className="flex items-center gap-2">
-                        <Terminal className="size-3.5" />
-                        DevOps
-                      </span>
-                      <span className="font-mono text-[11px]">9</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="border-t border-border/70 pt-3 font-mono text-[11px] text-muted-foreground">
-                  {t.preview.mailboxes}
-                </div>
-              </div>
-
-              {/* Credentials */}
-              <div className="space-y-2 bg-background p-5 md:col-span-4">
-                <div className="mb-3 font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
-                  Credentials
-                </div>
-                {[
-                  { title: 'GitHub', sub: 'github.a8f2@mail.domain', tag: '2FA', active: true },
-                  { title: 'OpenAI Platform', sub: 'sk-proj-••••••••••••', tag: 'API', active: false },
-                  { title: 'Prod Bastion', sub: 'ssh-ed25519 · root@prod', tag: 'SSH', active: false },
-                ].map((row) => (
-                  <div
-                    key={row.title}
-                    className={`flex items-center justify-between rounded-md border px-3 py-2 text-xs ${
-                      row.active
-                        ? 'border-foreground/25 bg-muted/50 text-foreground'
-                        : 'border-border/70 bg-background text-muted-foreground'
-                    }`}
-                  >
-                    <div className="min-w-0">
-                      <div className="font-medium text-foreground">{row.title}</div>
-                      <div className="truncate font-mono text-[11px] text-muted-foreground">
-                        {row.sub}
-                      </div>
-                    </div>
-                    <span className="shrink-0 rounded border border-border px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                      {row.tag}
-                    </span>
-                  </div>
+                    <figcaption className="mt-3 font-mono text-xs text-muted-foreground">
+                      {caption}
+                    </figcaption>
+                  </figure>
                 ))}
               </div>
-
-              {/* Detail + Live OTP */}
-              <div className="flex flex-col justify-between space-y-3 bg-background p-5 md:col-span-5">
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between border-b border-border/70 pb-3">
-                    <div>
-                      <div className="text-sm font-semibold text-foreground">GitHub</div>
-                      <div className="font-mono text-[11px] text-muted-foreground">
-                        Personal / github.com
-                      </div>
-                    </div>
-                    <span className="rounded border border-border bg-muted/40 px-2 py-0.5 font-mono text-[11px] text-foreground">
-                      Live OTP
-                    </span>
-                  </div>
-
-                  <div className="flex items-center justify-between rounded-md border border-border bg-muted/35 px-3.5 py-2.5">
-                    <div>
-                      <div className="font-mono text-[10px] text-muted-foreground uppercase">
-                        Email OTP
-                      </div>
-                      <div className="mt-0.5 font-mono text-xl font-semibold tracking-[0.2em] text-foreground">
-                        839204
-                      </div>
-                    </div>
-                    <span className="font-mono text-[11px] text-muted-foreground">X25519 Sealed</span>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
-                      <div className="font-mono text-[10px] text-muted-foreground">TOTP</div>
-                      <div className="mt-0.5 font-mono font-medium text-foreground">482 910</div>
-                    </div>
-                    <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
-                      <div className="font-mono text-[10px] text-muted-foreground">REF</div>
-                      <div className="mt-0.5 truncate font-mono text-foreground">
-                        np://Personal/GitHub
-                      </div>
-                    </div>
-                  </div>
+            ) : (
+              <div className="bg-muted/20 p-3 sm:p-5 md:p-8">
+                <div className="overflow-hidden rounded-xl border border-border/80 bg-background shadow-sm">
+                  <img
+                    src={
+                      showcaseTab === 'inbox'
+                        ? `/screenshots/macos-inbox-${isDark ? 'dark' : 'light'}.webp`
+                        : `/screenshots/macos-vault-${isDark ? 'dark' : 'light'}.webp`
+                    }
+                    alt={showcaseTab === 'inbox' ? t.preview.altInbox : t.preview.altDesktop}
+                    width={1600}
+                    height={1093}
+                    className="block h-auto w-full select-none"
+                  />
                 </div>
               </div>
-            </div>
+            )}
           </section>
 
           {/* 6-Cell Hairline Feature Grid */}

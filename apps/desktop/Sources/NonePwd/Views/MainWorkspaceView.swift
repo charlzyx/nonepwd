@@ -8,6 +8,7 @@ public struct MainWorkspaceView: View {
     @State private var newGroupName = ""
     @State private var pendingDeleteItem: VaultItemPayload?
     @State private var selectedMailboxFilter: String? = nil
+    @State private var showMailboxMenuPopover = false
 
     private let bentoColumns = [
         GridItem(.flexible(), spacing: 10),
@@ -75,6 +76,10 @@ public struct MainWorkspaceView: View {
     }
 
     // MARK: - Column 1: Apple Passwords Bento Sidebar
+
+    var showcaseSidebarSnapshotView: some View {
+        sidebarColumn
+    }
 
     private var sidebarColumn: some View {
         VStack(spacing: 0) {
@@ -759,41 +764,8 @@ public struct MainWorkspaceView: View {
 
             if mailboxes.count > 1 {
                 HStack(spacing: 6) {
-                    Menu {
-                        Button {
-                            selectedMailboxFilter = nil
-                        } label: {
-                            HStack {
-                                if activeFilter == nil {
-                                    Image(systemName: "checkmark")
-                                }
-                                Text("全部邮箱 (\(store.emails.count))")
-                            }
-                        }
-
-                        Divider()
-
-                        ForEach(mailboxes, id: \.address) { box in
-                            let title = mailboxDisplayTitle(address: box.address, label: box.label)
-                            Button {
-                                selectedMailboxFilter = box.address
-                            } label: {
-                                HStack {
-                                    if activeFilter == box.address {
-                                        Image(systemName: "checkmark")
-                                    }
-                                    Text("\(title) (\(box.count))")
-                                }
-                            }
-                        }
-
-                        Divider()
-
-                        Button {
-                            store.showImapSheet = true
-                        } label: {
-                            Label("管理 IMAP 收信邮箱…", systemImage: "gearshape")
-                        }
+                    Button {
+                        showMailboxMenuPopover.toggle()
                     } label: {
                         HStack(spacing: 7) {
                             Image(systemName: activeFilter == nil ? "tray.2" : "line.3.horizontal.decrease.circle.fill")
@@ -814,7 +786,7 @@ public struct MainWorkspaceView: View {
                             Text("\(displayedEmails.count)")
                                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                                 .foregroundStyle(.secondary)
-                                .padding(.horizontal, 5.5)
+                                .padding(.horizontal, 6)
                                 .padding(.vertical, 1.5)
                                 .background(
                                     Capsule()
@@ -826,24 +798,72 @@ public struct MainWorkspaceView: View {
                                 .foregroundStyle(.secondary)
                         }
                         .padding(.horizontal, 10)
-                        .frame(height: 28)
+                        .frame(height: 30)
                         .frame(maxWidth: .infinity)
                         .background(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .fill(activeFilter == nil ? Color.primary.opacity(0.055) : Color.accentColor.opacity(0.11))
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .strokeBorder(
-                                    activeFilter == nil ? Color.primary.opacity(0.08) : Color.accentColor.opacity(0.28),
+                                    activeFilter == nil ? Color.primary.opacity(0.09) : Color.accentColor.opacity(0.28),
                                     lineWidth: 0.5
                                 )
                         )
                         .contentShape(Rectangle())
                     }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
+                    .buttonStyle(.plain)
                     .help("按接收邮箱筛选验证码邮件")
+                    .popover(isPresented: $showMailboxMenuPopover, arrowEdge: .bottom) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            mailboxPopoverRow(
+                                title: "全部邮箱",
+                                subtitle: nil,
+                                count: store.emails.count,
+                                isSelected: activeFilter == nil
+                            ) {
+                                selectedMailboxFilter = nil
+                                showMailboxMenuPopover = false
+                            }
+
+                            Divider().padding(.vertical, 3)
+
+                            ForEach(mailboxes, id: \.address) { box in
+                                mailboxPopoverRow(
+                                    title: box.label ?? box.address,
+                                    subtitle: box.label != nil ? box.address : nil,
+                                    count: box.count,
+                                    isSelected: activeFilter == box.address
+                                ) {
+                                    selectedMailboxFilter = box.address
+                                    showMailboxMenuPopover = false
+                                }
+                            }
+
+                            Divider().padding(.vertical, 3)
+
+                            Button {
+                                showMailboxMenuPopover = false
+                                store.showImapSheet = true
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "gearshape")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.secondary)
+                                    Text("管理 IMAP 收信邮箱…")
+                                        .font(.system(size: 12.5))
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(6)
+                        .frame(width: 268)
+                    }
 
                     if activeFilter != nil {
                         Button {
@@ -852,7 +872,7 @@ public struct MainWorkspaceView: View {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.system(size: 14))
                                 .foregroundStyle(.secondary)
-                                .frame(width: 24, height: 28)
+                                .frame(width: 24, height: 30)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
@@ -942,6 +962,57 @@ public struct MainWorkspaceView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private func mailboxPopoverRow(
+        title: String,
+        subtitle: String?,
+        count: Int,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.clear)
+                    .frame(width: 14)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 12.5, weight: isSelected ? .semibold : .regular))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+
+                Spacer(minLength: 6)
+
+                Text("\(count)")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(count > 0 ? Color.primary : Color.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1.5)
+                    .background(
+                        Capsule()
+                            .fill(Color.primary.opacity(count > 0 ? 0.09 : 0.04))
+                    )
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5.5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(0.10) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var imapDisabledBanner: some View {

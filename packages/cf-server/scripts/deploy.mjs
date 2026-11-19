@@ -47,6 +47,8 @@ function injectPublicSeoAssets(siteOrigin) {
         `    <link rel="alternate" hreflang="zh-CN" href="${siteOrigin}/?lang=zh" />`,
         `    <link rel="alternate" hreflang="x-default" href="${siteOrigin}/" />`,
         `    <meta property="og:url" content="${siteOrigin}/" />`,
+        `    <meta property="og:image" content="${siteOrigin}/screenshots/macos-vault-light.webp" />`,
+        `    <meta name="twitter:image" content="${siteOrigin}/screenshots/macos-vault-light.webp" />`,
       ].join('\n');
       fs.writeFileSync(
         indexHtmlPath,

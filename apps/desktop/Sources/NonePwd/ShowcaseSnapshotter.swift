@@ -23,13 +23,17 @@ enum ShowcaseSnapshotter {
 
         // 2. Main 3-column workspace (Light Mode - Login + 2FA ring + Email OTP)
         let wsStore = makeDemoStore(unlocked: true)
+        wsStore.clipboardStatus = ""
+        wsStore.clipboardRemaining = 0
         wsStore.destination = .all
         wsStore.selectedItemId = "item-github"
         captureWindow(
             rootView: MainWorkspaceView(store: wsStore)
-                .frame(width: 1140, height: 740),
-            size: NSSize(width: 1140, height: 740),
+                .frame(width: 1160, height: 740),
+            sidebarOverlay: AnyView(MainWorkspaceView(store: wsStore).showcaseSidebarSnapshotView),
+            size: NSSize(width: 1160, height: 740),
             appearance: NSAppearance(named: .aqua),
+            isDark: false,
             to: outURL.appendingPathComponent("macos-02-vault-login-totp.png")
         )
 
@@ -60,19 +64,59 @@ enum ShowcaseSnapshotter {
         wsStore.selectedItemId = "item-github"
         captureWindow(
             rootView: MainWorkspaceView(store: wsStore)
-                .frame(width: 1140, height: 740),
-            size: NSSize(width: 1140, height: 740),
+                .frame(width: 1160, height: 740),
+            sidebarOverlay: AnyView(MainWorkspaceView(store: wsStore).showcaseSidebarSnapshotView),
+            size: NSSize(width: 1160, height: 740),
             appearance: NSAppearance(named: .darkAqua),
+            isDark: true,
             to: outURL.appendingPathComponent("macos-05-vault-dark-mode.png")
         )
 
-        print("Captured 5 macOS SwiftUI snapshots to \(outURL.path)")
+        // 6. Live Email OTP Inbox with Multi-Mailbox Dropdown Filter
+        let inboxStore = makeDemoStore(unlocked: true)
+        inboxStore.clipboardStatus = ""
+        inboxStore.clipboardRemaining = 0
+        inboxStore.destination = .emailOtp
+        inboxStore.selectedEmailId = "em-cf"
+        captureWindow(
+            rootView: MainWorkspaceView(store: inboxStore)
+                .frame(width: 1160, height: 740),
+            sidebarOverlay: AnyView(MainWorkspaceView(store: inboxStore).showcaseSidebarSnapshotView),
+            size: NSSize(width: 1160, height: 740),
+            appearance: NSAppearance(named: .aqua),
+            isDark: false,
+            to: outURL.appendingPathComponent("macos-06-email-otp-inbox.png")
+        )
+
+        captureWindow(
+            rootView: MainWorkspaceView(store: inboxStore)
+                .frame(width: 1160, height: 740),
+            sidebarOverlay: AnyView(MainWorkspaceView(store: inboxStore).showcaseSidebarSnapshotView),
+            size: NSSize(width: 1160, height: 740),
+            appearance: NSAppearance(named: .darkAqua),
+            isDark: true,
+            to: outURL.appendingPathComponent("macos-07-email-otp-dark.png")
+        )
+
+        print("Captured 6 macOS SwiftUI snapshots to \(outURL.path)")
+    }
+
+    private static func normalizeVisualEffects(_ view: NSView) {
+        if let vev = view as? NSVisualEffectView {
+            vev.blendingMode = .withinWindow
+            vev.state = .active
+        }
+        for sub in view.subviews {
+            normalizeVisualEffects(sub)
+        }
     }
 
     private static func captureWindow<V: View>(
         rootView: V,
+        sidebarOverlay: AnyView? = nil,
         size: NSSize,
         appearance: NSAppearance?,
+        isDark: Bool = false,
         to fileURL: URL
     ) {
         let win = NSWindow(
@@ -92,13 +136,17 @@ enum ShowcaseSnapshotter {
         win.contentView = hosting
         win.orderFrontRegardless()
 
-        for _ in 0..<8 {
+        for _ in 0..<10 {
             RunLoop.main.run(until: Date().addingTimeInterval(0.08))
             win.layoutIfNeeded()
             hosting.layoutSubtreeIfNeeded()
         }
 
-        let targetView = hosting
+        let targetView = win.contentView?.superview ?? hosting
+        normalizeVisualEffects(targetView)
+        win.displayIfNeeded()
+        targetView.layoutSubtreeIfNeeded()
+
         let bounds = targetView.bounds
         let scale: CGFloat = 2.0
         guard let rep = NSBitmapImageRep(
@@ -118,6 +166,66 @@ enum ShowcaseSnapshotter {
         }
         rep.size = bounds.size
         targetView.cacheDisplay(in: bounds, to: rep)
+
+        if let sidebarOverlay {
+            let sidebarWidth: CGFloat = 244
+            let topBarHeight: CGFloat = 52
+            let sidebarHeight = max(100, bounds.height - topBarHeight)
+            let sidebarRoot = sidebarOverlay
+                .frame(width: sidebarWidth, height: sidebarHeight)
+                .background(
+                    isDark
+                        ? Color(red: 0.14, green: 0.14, blue: 0.15)
+                        : Color(red: 0.945, green: 0.945, blue: 0.955)
+                )
+            let sbWin = NSWindow(
+                contentRect: NSRect(origin: NSPoint(x: -2000, y: -2000), size: NSSize(width: sidebarWidth, height: sidebarHeight)),
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false
+            )
+            sbWin.appearance = appearance
+            let sbHosting = NSHostingView(rootView: sidebarRoot)
+            sbHosting.appearance = appearance
+            sbHosting.frame = NSRect(origin: .zero, size: NSSize(width: sidebarWidth, height: sidebarHeight))
+            sbWin.contentView = sbHosting
+            sbWin.orderFrontRegardless()
+            for _ in 0..<6 {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.04))
+                sbWin.layoutIfNeeded()
+                sbHosting.layoutSubtreeIfNeeded()
+            }
+            if let sbRep = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: Int(sidebarWidth * scale),
+                pixelsHigh: Int(sidebarHeight * scale),
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            ) {
+                sbRep.size = NSSize(width: sidebarWidth, height: sidebarHeight)
+                sbHosting.cacheDisplay(in: sbHosting.bounds, to: sbRep)
+                let sbImg = NSImage(size: sbRep.size)
+                sbImg.addRepresentation(sbRep)
+                NSGraphicsContext.saveGraphicsState()
+                if let ctx = NSGraphicsContext(bitmapImageRep: rep) {
+                    NSGraphicsContext.current = ctx
+                    sbImg.draw(
+                        in: NSRect(x: 0, y: 0, width: sidebarWidth, height: sidebarHeight),
+                        from: .zero,
+                        operation: .sourceOver,
+                        fraction: 1.0
+                    )
+                }
+                NSGraphicsContext.restoreGraphicsState()
+            }
+            sbWin.orderOut(nil)
+            sbWin.close()
+        }
 
         if let png = rep.representation(using: .png, properties: [:]) {
             try? png.write(to: fileURL, options: .atomic)
@@ -232,7 +340,46 @@ enum ShowcaseSnapshotter {
         )
 
         store.items = [github, cloudflare, card, identity, openai]
+        store.imapAccounts = [
+            ImapAccountPublic(
+                id: "imap-work",
+                label: "Work Gmail",
+                enabled: true,
+                host: "imap.gmail.com",
+                port: 993,
+                tls: true,
+                username: "alice@example.com",
+                hasPassword: true,
+                status: "listening"
+            ),
+            ImapAccountPublic(
+                id: "imap-ops",
+                label: "Ops 邮箱",
+                enabled: true,
+                host: "imap.qq.com",
+                port: 993,
+                tls: true,
+                username: "ops@example.com",
+                hasPassword: true,
+                status: "listening"
+            ),
+        ]
         store.emails = [
+            DecryptedEmailPayload(
+                id: "em-cf",
+                from: "Cloudflare <noreply@notify.cloudflare.com>",
+                to: "ops@example.com",
+                subject: "Cloudflare Access login code",
+                snippet: "Your Cloudflare Access verification code is 343113.",
+                textBody: "Hi,\n\nYour one-time login verification code for Cloudflare Access is:\n\n343113\n\nThis code expires in 10 minutes.",
+                otpCode: "343113",
+                confidence: 0.99,
+                magicLink: nil,
+                senderDomain: "cloudflare.com",
+                receivedAt: "2026-11-18 22:15",
+                source: "imap",
+                envelopeTo: "ops@example.com"
+            ),
             DecryptedEmailPayload(
                 id: "em-1",
                 from: "GitHub <noreply@github.com>",
@@ -244,7 +391,24 @@ enum ShowcaseSnapshotter {
                 confidence: 0.98,
                 magicLink: nil,
                 senderDomain: "github.com",
-                receivedAt: "2026-11-17T09:40:00Z"
+                receivedAt: "2026-11-18 22:08",
+                source: "cf_webhook",
+                envelopeTo: "alice@example.com"
+            ),
+            DecryptedEmailPayload(
+                id: "em-stripe",
+                from: "Stripe <notifications@stripe.com>",
+                to: "alice@example.com",
+                subject: "Confirm your Stripe Dashboard sign-in",
+                snippet: "Your Stripe verification code is 519042.",
+                textBody: "Enter code 519042 to finish signing in to your Stripe Dashboard.",
+                otpCode: "519042",
+                confidence: 0.97,
+                magicLink: nil,
+                senderDomain: "stripe.com",
+                receivedAt: "2026-11-18 21:42",
+                source: "imap",
+                envelopeTo: "alice@example.com"
             ),
         ]
         store.clipboardStatus = "已复制 密码"
