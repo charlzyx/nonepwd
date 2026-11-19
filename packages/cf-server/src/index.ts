@@ -1,6 +1,7 @@
 import { setNonePwdWasmModule } from '@nonepwd/core/worker';
-import { createCfApp, runScheduledImapSync, runScheduledMaintenance } from './app.js';
+import { createCfApp, runScheduledMaintenance } from './app.js';
 import { handleIncomingCfEmail } from './email.js';
+import { armImapAlarmFromEnv } from './imap-alarm.js';
 import wasmModule from './nonepwd_core.wasm';
 import type { CfServerEnv, EmailMessageLike } from './types.js';
 import { AgentRelayHub } from './agent-relay-do.js';
@@ -10,15 +11,37 @@ setNonePwdWasmModule(wasmModule);
 
 const app = createCfApp();
 
+/** One arm attempt per isolate. The call only schedules the alarm; it does not sync. */
+const imapAlarmArm = new WeakMap<object, Promise<void>>();
+
+function armImapAlarmOnce(env: CfServerEnv): Promise<void> {
+  if (!env.WS_HUB) return Promise.resolve();
+  const existing = imapAlarmArm.get(env.WS_HUB);
+  if (existing) return existing;
+  const pending = armImapAlarmFromEnv(env).then(
+    () => undefined,
+    () => {
+      imapAlarmArm.delete(env.WS_HUB!);
+    }
+  );
+  imapAlarmArm.set(env.WS_HUB, pending);
+  return pending;
+}
+
 export { AgentRelayHub, VaultWsHub, createCfApp, handleIncomingCfEmail, runScheduledMaintenance };
 
 export default {
   async fetch(
     request: Request,
     env: CfServerEnv,
-    ctx: ExecutionContext
+    _ctx: ExecutionContext
   ): Promise<Response> {
-    return app.fetch(request, env, ctx);
+    // Schedule the mailbox alarm alongside the response. This is not IMAP work
+    // and is not waitUntil: a cold isolate does one Durable Object storage read.
+    const arm = armImapAlarmOnce(env);
+    const response = await app.fetch(request, env, _ctx);
+    await arm;
+    return response;
   },
 
   async email(
@@ -33,16 +56,12 @@ export default {
   },
 
   async scheduled(
-    controller: ScheduledController,
+    _controller: ScheduledController,
     env: CfServerEnv,
     _ctx: ExecutionContext
   ): Promise<void> {
-    // The every-minute trigger only pulls fresh verification codes.
-    // Any other schedule keeps the session purge and R2 snapshot.
-    if (controller.cron === '* * * * *') {
-      await runScheduledImapSync(env);
-      return;
-    }
+    // No Cron Trigger is configured: this account is already at the Workers Free
+    // limit of 5. IMAP sync runs from the VaultWsHub "imap" alarm instead.
     await runScheduledMaintenance(env);
   },
 };

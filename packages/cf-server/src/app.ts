@@ -1635,7 +1635,7 @@ exit 1
   return app;
 }
 
-/** Minute cron: pull at most a couple of fresh verification codes per mailbox. */
+/** Minute Durable Object alarm: pull at most a couple of fresh verification codes per mailbox. */
 export async function runScheduledImapSync(env: CfServerEnv): Promise<void> {
   await ensureSchema(env.DB);
   const now = new Date().toISOString();

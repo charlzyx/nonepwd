@@ -1,3 +1,5 @@
+import { runScheduledImapSync } from './app.js';
+import { ensureImapAlarm, nextImapAlarmAt } from './imap-alarm.js';
 import type { CfServerEnv } from './types.js';
 
 interface WsAttachment {
@@ -22,6 +24,11 @@ export class VaultWsHub implements DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname === '/imap-alarm') {
+      const armed = await ensureImapAlarm(this.ctx.storage);
+      return Response.json({ ok: true, armed });
+    }
 
     if (url.pathname === '/upgrade') {
       if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
@@ -144,6 +151,20 @@ export class VaultWsHub implements DurableObject {
       ws.close(1011, 'WebSocket error');
     } catch {
       // ignore
+    }
+  }
+
+  /**
+   * Replaces the Free-plan Cron Trigger. The next alarm is stored before the
+   * pull so a CPU kill still leaves a future run. The pull itself stays on the
+   * same 1–2 message / validity-window / backoff path as a manual sync.
+   */
+  async alarm(): Promise<void> {
+    await this.ctx.storage.setAlarm(nextImapAlarmAt());
+    try {
+      await runScheduledImapSync(this.env);
+    } catch (err) {
+      console.error('imap alarm failed', err instanceof Error ? err.message : String(err));
     }
   }
 }

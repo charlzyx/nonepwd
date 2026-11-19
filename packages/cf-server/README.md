@@ -28,8 +28,8 @@ pnpm run deploy:wrangler
 
 ## Workers Free：验证码同步与增量 `/api/sync`
 
-IMAP 只在 Cron 里跑，不在 `GET /api/sync` 或 `GET /api/emails` 里跑。`wrangler.jsonc` 与 `cloudflare.config.ts` 配置了 `* * * * *`：每分钟按账号串行拉取验证码（每账号最多 2 封，只取 `last_uid` 之后、代码有效期内的邮件）。R2 快照仍由请求里的 `waitUntil(maybeAutoSnapshot)` 每 6 小时写一次，避免把整库序列化放进同一次 Cron。
+IMAP 不在 `GET /api/sync`、`GET /api/emails` 或请求的 `waitUntil` 里跑。这个 Cloudflare 账号的 Workers Free Cron 名额已满（上限 5 个），所以同步改由已有的 `VaultWsHub` 类上名为 `imap` 的 Durable Object alarm 每分钟触发：账号串行，每账号最多 2 封，只取 `last_uid` 之后、验证码有效期内的邮件。配置里不要再加 `triggers.crons`，否则下次部署会再次撞上 Cron 上限。R2 快照仍由请求里的 `waitUntil(maybeAutoSnapshot)` 每 6 小时写一次。
 
-部署新版本后 Cron 才会生效。不需要升级到 Workers Paid。已有 D1 会在 Worker 启动时自动补上 `sync_fail_count` / `uid_baselined` 列；也可以手动执行一次 `migrations/0002_imap_sync_cursor.sql`。
+部署后，下一次打到 Worker 的请求会给该 alarm 排上下一分钟（只写 alarm，不拉信）。之后即使没有客户端在线也会每分钟继续。不需要新的 Durable Object 迁移，也不需要升级到 Workers Paid。已有 D1 会在 Worker 启动时自动补上 `sync_fail_count` / `uid_baselined` 列；也可以手动执行一次 `migrations/0002_imap_sync_cursor.sql`。
 
 `/api/sync` 不带参数时仍返回全量，并附带 `cursor` 与 `epoch`。本仓库里的 Web、CLI、扩展和 nsh 会在后续请求带上 `?since=<cursor>&epoch=<epoch>`，只合并变更和 `deleted`。旧客户端忽略这两个字段即可。还原备份会增加 `epoch`，客户端下一次会重新拉全量。
