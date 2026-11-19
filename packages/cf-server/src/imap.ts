@@ -683,6 +683,17 @@ export function parseImapSearchUids(lines: string[]): number[] {
   return uids;
 }
 
+/** Oldest UIDs still above last_uid, so a run cannot skip a message it did not read. */
+export function selectNextUids(
+  uids: number[],
+  lastUid: number,
+  limit: number = IMAP_MAX_MESSAGES_PER_ACCOUNT
+): number[] {
+  const fresh = [...new Set(uids.filter((u) => Number.isFinite(u) && u > lastUid))].sort((a, b) => a - b);
+  const take = Math.max(0, Math.floor(limit));
+  return take === 0 ? [] : fresh.slice(0, take);
+}
+
 export function selectNewestUids(
   uids: number[],
   lastUid: number,
@@ -758,6 +769,21 @@ export function isWithinCodeWindow(
 export function shouldSkipStaleCode(date: Date | null, nowMs: number = Date.now()): boolean {
   if (!date) return false;
   return !isWithinCodeWindow(date, nowMs);
+}
+
+/** Permanent reasons only. Never include message contents. */
+const IMAP_DROP_REASONS = new Set([
+  'stale',
+  'filtered',
+  'alias_disabled',
+  'account_not_initialized',
+  'empty',
+  'baseline',
+]);
+
+export function logImapDrop(reason: string): void {
+  const safe = IMAP_DROP_REASONS.has(reason) ? reason : 'rejected';
+  console.log(`imap drop ${safe}`);
 }
 
 /**
@@ -1126,6 +1152,70 @@ async function readMailboxHighWater(client: WorkersImapClient): Promise<number> 
   return highest ?? 0;
 }
 
+type ImapReadOutcome =
+  | 'stored'
+  | 'stale'
+  | 'filtered'
+  | 'alias_disabled'
+  | 'account_not_initialized'
+  | 'empty'
+  | 'failed';
+
+function messageDateFromFetch(items: Array<{ line: string; literal: Uint8Array }>): Date | null {
+  for (const item of items) {
+    const dated = parseFetchInternalDate(item.line) ?? messageDateFromRaw(item.literal);
+    if (dated) return dated;
+  }
+  return null;
+}
+
+/**
+ * Date probe first so a stale message is not parsed or encrypted.
+ * A throw, including an oversized literal, is a failed read: the caller must not
+ * move last_uid past this UID.
+ */
+async function readOneImapMessage(
+  client: WorkersImapClient,
+  env: CfServerEnv,
+  uid: number,
+  envelopeTo: string | undefined
+): Promise<ImapReadOutcome> {
+  try {
+    const meta = await client.runCommand(`UID FETCH ${uid} (UID INTERNALDATE)`);
+    const receivedAt = messageDateFromFetch(meta);
+    if (shouldSkipStaleCode(receivedAt)) return 'stale';
+
+    const fetched = await client.runCommand(buildPartialBodyFetch(uid));
+    // INTERNALDATE is when the mailbox received the code. The Date header can be
+    // older (a forward, or a few minutes of transit) and must not discard it.
+    if (!receivedAt && shouldSkipStaleCode(messageDateFromFetch(fetched))) return 'stale';
+
+    let sawBody = false;
+    for (const item of fetched) {
+      if (item.literal.byteLength === 0) continue;
+      sawBody = true;
+      const res = await ingestRawEmail({
+        env,
+        rawMime: item.literal,
+        source: 'imap',
+        envelopeTo,
+      });
+      if (res.accepted) return 'stored';
+      if (
+        res.reason === 'filtered' ||
+        res.reason === 'alias_disabled' ||
+        res.reason === 'account_not_initialized'
+      ) {
+        return res.reason;
+      }
+      return 'failed';
+    }
+    return sawBody ? 'failed' : 'empty';
+  } catch {
+    return 'failed';
+  }
+}
+
 export async function syncImapAccount(
   env: CfServerEnv,
   accountId: string,
@@ -1189,56 +1279,47 @@ export async function syncImapAccount(
       await client.login(row.host, row.username, password);
       await client.selectInbox();
 
-      if (baseline) {
-        const highWater = await readMailboxHighWater(client);
-        await client.logout();
-        const lastUid = Math.max(row.last_uid ?? 0, highWater);
-        await markImapSuccess(env, row.id, lastUid);
-        return { synced: 0, baselined: true };
-      }
-
       const searchLines = await client.runCommand(buildVerificationUidSearch(row.last_uid ?? 0));
       const found = parseImapSearchUids(searchLines.map((item) => item.line));
-      const { fetch: targetUids, advanceTo } = selectNewestUids(
-        found,
-        row.last_uid ?? 0,
-        IMAP_MAX_MESSAGES_PER_ACCOUNT
-      );
+      const targetUids = selectNextUids(found, row.last_uid ?? 0, IMAP_MAX_MESSAGES_PER_ACCOUNT);
 
       const envelopeTo = row.username.trim() || undefined;
+      let committedUid = row.last_uid ?? 0;
+      let failed = false;
+
       for (const uid of targetUids) {
-        let fetched: Array<{ line: string; literal: Uint8Array }>;
-        try {
-          fetched = await client.runCommand(buildPartialBodyFetch(uid));
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (msg.includes('byte limit')) continue;
-          throw err;
+        const outcome = await readOneImapMessage(client, env, uid, envelopeTo);
+        if (outcome === 'failed') {
+          failed = true;
+          break;
         }
-        for (const item of fetched) {
-          const when = parseFetchInternalDate(item.line) ?? messageDateFromRaw(item.literal);
-          if (shouldSkipStaleCode(when)) continue;
-          if (item.literal.byteLength === 0) continue;
-          const res = await ingestRawEmail({
-            env,
-            rawMime: item.literal,
-            source: 'imap',
-            envelopeTo,
-          });
-          if (res.accepted) synced += 1;
-        }
-        if (uid > (row.last_uid ?? 0)) {
-          await env.DB.prepare(
-            'UPDATE imap_accounts SET last_uid = ? WHERE id = ? AND last_uid < ?'
-          )
-            .bind(uid, row.id, uid)
-            .run();
+        if (outcome === 'stored') synced += 1;
+        else logImapDrop(outcome);
+        committedUid = Math.max(committedUid, uid);
+        await env.DB.prepare(
+          'UPDATE imap_accounts SET last_uid = ? WHERE id = ? AND last_uid < ?'
+        )
+          .bind(committedUid, row.id, committedUid)
+          .run();
+      }
+
+      if (failed) {
+        throw new Error('IMAP message was not processed');
+      }
+
+      // Nothing in the code window: park last_uid at the mailbox high-water mark
+      // so the next alarm does not keep listing history that SINCE already excluded.
+      if (baseline && found.length === 0) {
+        const highWater = await readMailboxHighWater(client);
+        if (highWater > committedUid) {
+          logImapDrop('baseline');
+          committedUid = highWater;
         }
       }
 
       await client.logout();
-      await markImapSuccess(env, row.id, Math.max(row.last_uid ?? 0, advanceTo));
-      return { synced };
+      await markImapSuccess(env, row.id, committedUid);
+      return { synced, baselined: baseline };
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1249,6 +1330,29 @@ export async function syncImapAccount(
       await (client as WorkersImapClient).close();
     }
   }
+}
+
+/** The single enabled account that is past its throttle, oldest sync first. */
+export async function syncNextDueImapAccount(
+  env: CfServerEnv
+): Promise<ImapSyncResult & { moreDue: boolean }> {
+  await ensureSchema(env.DB);
+  const rows = await env.DB.prepare(
+    `SELECT id, last_sync_at, sync_fail_count
+     FROM imap_accounts
+     WHERE enabled = 1
+     ORDER BY last_sync_at IS NULL DESC, last_sync_at ASC, rowid ASC`
+  ).all<{ id: string; last_sync_at: string | null; sync_fail_count: number | null }>();
+  const all = rows.results ?? [];
+  const now = Date.now();
+  const due = all.filter(
+    (row) => !isSyncThrottled(row.last_sync_at, Number(row.sync_fail_count ?? 0), now)
+  );
+  if (due.length === 0) {
+    return { synced: 0, throttled: all.length > 0, moreDue: false };
+  }
+  const res = await syncImapAccount(env, due[0]!.id);
+  return { ...res, moreDue: due.length > 1 };
 }
 
 export async function syncImapInbox(

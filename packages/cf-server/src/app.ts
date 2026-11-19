@@ -26,6 +26,7 @@ import {
   queryEmails,
   saveEmailFilter,
 } from './email.js';
+import { armImapAlarmFromEnv } from './imap-alarm.js';
 import {
   ImapAccountValidationError,
   computeAggregateImapConfig,
@@ -34,7 +35,7 @@ import {
   listImapAccounts,
   resolveImapTestParams,
   saveImapAccount,
-  syncImapInbox,
+  syncNextDueImapAccount,
   testImapConnection,
   type SaveImapAccountInput,
 } from './imap.js';
@@ -1322,17 +1323,24 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       }
     }
 
-    const syncRes = await syncImapInbox(c.env, { accountId });
+    if (!c.env.WS_HUB) {
+      return c.json({ error: 'WS_HUB Durable Object not bound' }, 501);
+    }
+    const scheduled = await armImapAlarmFromEnv(c.env, { soon: true });
     const accounts = await listImapAccounts(c.env.DB);
-    return c.json({
-      ok: !syncRes.error,
-      synced: syncRes.synced,
-      throttled: Boolean(syncRes.throttled),
-      baselined: Boolean(syncRes.baselined),
-      error: syncRes.error ?? null,
-      accounts,
-      imap: computeAggregateImapConfig(accounts),
-    });
+    return c.json(
+      {
+        ok: scheduled,
+        scheduled,
+        synced: 0,
+        throttled: false,
+        baselined: false,
+        error: scheduled ? null : 'IMAP alarm was not scheduled',
+        accounts,
+        imap: computeAggregateImapConfig(accounts),
+      },
+      202
+    );
   });
 
   // External Cloudflare Email Worker Webhook (optional when forwarding from another Worker)
@@ -1635,12 +1643,18 @@ exit 1
   return app;
 }
 
-/** Minute Durable Object alarm: pull at most a couple of fresh verification codes per mailbox. */
-export async function runScheduledImapSync(env: CfServerEnv): Promise<void> {
+/**
+ * One mailbox per alarm. A follow-up alarm runs within a couple of seconds when
+ * another account is already due, so a minute tick never pays for every login.
+ */
+export async function runScheduledImapSync(env: CfServerEnv): Promise<{ moreDue: boolean }> {
   await ensureSchema(env.DB);
-  const now = new Date().toISOString();
-  await env.DB.prepare('DELETE FROM sessions WHERE expires_at < ?').bind(now).run();
-  await syncImapInbox(env);
+  const result = await syncNextDueImapAccount(env);
+  if (!result.moreDue) {
+    const now = new Date().toISOString();
+    await env.DB.prepare('DELETE FROM sessions WHERE expires_at < ?').bind(now).run();
+  }
+  return { moreDue: result.moreDue };
 }
 
 export async function runScheduledMaintenance(env: CfServerEnv): Promise<void> {
