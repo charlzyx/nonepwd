@@ -26,9 +26,13 @@ import {
   parseFetchInternalDate,
   parseImapSearchUids,
   selectNewestUids,
+  selectNextUids,
   shouldBaselineUid,
   shouldSkipStaleCode,
+  syncImapAccount,
+  syncImapInbox,
   syncMinIntervalMs,
+  syncNextDueImapAccount,
 } from '../src/imap.js';
 import { ensureImapSyncColumns } from '../src/schema.js';
 import { parseSyncSince } from '../src/sync-delta.js';
@@ -92,6 +96,7 @@ describe('IMAP sync planning', () => {
 
     expect(parseImapSearchUids(['* SEARCH 41 42 48', 'A0001 OK'])).toEqual([41, 42, 48]);
     expect(selectNewestUids([41, 42, 48], 40, 2)).toEqual({ fetch: [42, 48], advanceTo: 48 });
+    expect(selectNextUids([41, 42, 48], 40, 2)).toEqual([41, 42]);
     expect(selectNewestUids([41], 40, 2)).toEqual({ fetch: [41], advanceTo: 41 });
     expect(selectNewestUids([10], 40, 2)).toEqual({ fetch: [], advanceTo: 40 });
 
@@ -209,6 +214,7 @@ describe('IMAP sync on the worker', () => {
     uidNext?: number;
     search?: string;
     internalDate?: string;
+    body?: 'mime' | 'code' | 'plain' | 'huge';
     commands: string[];
   }) {
     return () => {
@@ -245,12 +251,40 @@ describe('IMAP sync on the worker', () => {
             } else if (upper.startsWith('UID SEARCH ')) {
               push(`* SEARCH ${options.search ?? ''}\r\n${tag} OK SEARCH\r\n`);
             } else if (upper.startsWith('UID FETCH ')) {
-              const mime = 'Subject: code\r\n\r\n123456\r\n';
-              const byteLen = enc.encode(mime).byteLength;
+              const uid = cmd.match(/UID FETCH\s+(\d+)/i)?.[1] ?? '48';
               const date = options.internalDate ?? '19-Nov-2026 14:59:00 +0000';
-              push(
-                `* 1 FETCH (UID 48 INTERNALDATE "${date}" BODY[HEADER] {${byteLen}}\r\n${mime})\r\n${tag} OK FETCH\r\n`
-              );
+              if (!upper.includes('BODY')) {
+                push(`* 1 FETCH (UID ${uid} INTERNALDATE "${date}")\r\n${tag} OK FETCH\r\n`);
+              } else if (options.body === 'huge') {
+                push(`* 1 FETCH (UID ${uid} BODY[HEADER] {99999999}\r\n`);
+              } else if (options.body === 'code' || options.body === 'plain') {
+                const header = [
+                  'From: Security <noreply@service.example.com>',
+                  'To: alice@qq.com',
+                  'Subject: Login verification code',
+                  'Date: Thu, 19 Nov 2026 16:00:00 +0000',
+                  'Content-Type: text/plain; charset=utf-8',
+                  '',
+                  '',
+                ].join('\r\n');
+                const text =
+                  options.body === 'code'
+                    ? 'Your verification code is 654321.\r\n'
+                    : 'Weekly digest with no one-time code.\r\n';
+                const headerBytes = enc.encode(header);
+                const textBytes = enc.encode(text);
+                push(`* 1 FETCH (UID ${uid} BODY[HEADER] {${headerBytes.byteLength}}\r\n`);
+                controllerRef?.enqueue(headerBytes);
+                push(` BODY[TEXT]<0> {${textBytes.byteLength}}\r\n`);
+                controllerRef?.enqueue(textBytes);
+                push(`)\r\n${tag} OK FETCH\r\n`);
+              } else {
+                const mime = 'Subject: code\r\n\r\n123456\r\n';
+                const byteLen = enc.encode(mime).byteLength;
+                push(
+                  `* 1 FETCH (UID ${uid} INTERNALDATE "${date}" BODY[HEADER] {${byteLen}}\r\n${mime})\r\n${tag} OK FETCH\r\n`
+                );
+              }
             } else if (upper === 'LOGOUT') {
               push(`* BYE\r\n${tag} OK LOGOUT\r\n`);
             } else {
@@ -330,11 +364,8 @@ describe('IMAP sync on the worker', () => {
     expect(emails.status).toBe(200);
     expect(connects).toBe(0);
 
-    const failed = await api('/api/imap/sync', { method: 'POST', headers: auth, body: '{}' });
-    expect(failed.status).toBe(200);
-    const failedJson = (await failed.json()) as { ok: boolean; error: string | null };
-    expect(failedJson.ok).toBe(false);
-    expect(failedJson.error).toBeTruthy();
+    const failed = await syncImapInbox(env);
+    expect(failed.error).toBeTruthy();
     expect(connects).toBe(1);
 
     const row = await env.DB.prepare(
@@ -350,10 +381,15 @@ describe('IMAP sync on the worker', () => {
     expect(row?.status).toBe('error');
     expect(Number(row?.uid_baselined)).toBe(0);
 
-    const retried = await api('/api/imap/sync', { method: 'POST', headers: auth, body: '{}' });
-    const retriedJson = (await retried.json()) as { throttled: boolean; ok: boolean };
-    expect(retriedJson.throttled).toBe(true);
-    expect(retriedJson.ok).toBe(true);
+    const retried = await syncImapInbox(env);
+    expect(retried.throttled).toBe(true);
+    expect(retried.error).toBeUndefined();
+    expect(connects).toBe(1);
+
+    const manual = await api('/api/imap/sync', { method: 'POST', headers: auth, body: '{}' });
+    expect(manual.status).toBe(202);
+    const manualJson = (await manual.json()) as { scheduled: boolean };
+    expect(manualJson.scheduled).toBe(true);
     expect(connects).toBe(1);
 
     mockConnectRef.fn = null;
@@ -387,20 +423,15 @@ describe('IMAP sync on the worker', () => {
     const { account } = (await created.json()) as { account: { id: string } };
 
     commands.length = 0;
-    const baseline = await api('/api/imap/sync', {
-      method: 'POST',
-      headers: auth,
-      body: JSON.stringify({ id: account.id }),
-    });
-    const baselineJson = (await baseline.json()) as { ok: boolean; synced: number; baselined: boolean };
-    expect(baselineJson.ok).toBe(true);
-    expect(baselineJson.synced).toBe(0);
-    expect(baselineJson.baselined).toBe(true);
-    expect(commands.some((cmd) => cmd.toUpperCase().startsWith('UID FETCH'))).toBe(false);
+    const baseline = await syncImapAccount(env, account.id);
+    expect(baseline.error).toBeUndefined();
+    expect(baseline.baselined).toBe(true);
     const afterBase = await env.DB.prepare('SELECT last_uid, uid_baselined FROM imap_accounts WHERE id = ?')
       .bind(account.id)
       .first<{ last_uid: number; uid_baselined: number }>();
-    expect(afterBase?.last_uid).toBe(49);
+    // Search hits are walked from the oldest. Stale ones are logged and committed;
+    // the mailbox high-water is not applied while any in-window UID is still unread.
+    expect(afterBase?.last_uid).toBe(42);
     expect(Number(afterBase?.uid_baselined)).toBe(1);
 
     await env.DB.prepare(
@@ -411,23 +442,17 @@ describe('IMAP sync on the worker', () => {
       .bind(new Date(Date.now() - 60_000).toISOString(), account.id)
       .run();
     commands.length = 0;
-    const fetched = await api('/api/imap/sync', {
-      method: 'POST',
-      headers: auth,
-      body: JSON.stringify({ id: account.id }),
-    });
-    const fetchedJson = (await fetched.json()) as { ok: boolean; synced: number };
-    expect(fetchedJson.ok).toBe(true);
-    expect(fetchedJson.synced).toBe(0);
+    const fetched = await syncImapAccount(env, account.id);
+    expect(fetched.error).toBeUndefined();
+    expect(fetched.synced).toBe(0);
 
     const search = commands.find((cmd) => cmd.toUpperCase().startsWith('UID SEARCH'));
     expect(search).toContain('UID 41:*');
     expect(search?.toUpperCase()).toContain('SINCE');
     const fetches = commands.filter((cmd) => cmd.toUpperCase().startsWith('UID FETCH'));
-    expect(fetches).toHaveLength(2);
-    expect(fetches.every((cmd) => cmd.includes(`BODY.PEEK[TEXT]<0.${IMAP_PARTIAL_TEXT_BYTES}>`))).toBe(true);
+    expect(fetches.length).toBeGreaterThan(0);
     expect(fetches.some((cmd) => cmd.includes('BODY.PEEK[]') || cmd.includes('BODY[]'))).toBe(false);
-    expect(fetches.some((cmd) => cmd.includes(' 41 '))).toBe(false);
+    expect(fetches.some((cmd) => cmd.includes(`BODY.PEEK[TEXT]<0.${IMAP_PARTIAL_TEXT_BYTES}>`))).toBe(false);
 
     const emails = (await (await api('/api/emails', { headers: { Authorization: `Bearer ${token}` } })).json()) as {
       emails: unknown[];
@@ -436,7 +461,7 @@ describe('IMAP sync on the worker', () => {
     const after = await env.DB.prepare('SELECT last_uid FROM imap_accounts WHERE id = ?')
       .bind(account.id)
       .first<{ last_uid: number }>();
-    expect(after?.last_uid).toBe(48);
+    expect(after?.last_uid).toBe(42);
 
     mockConnectRef.fn = null;
   });
@@ -513,5 +538,147 @@ describe('IMAP sync on the worker', () => {
     });
     const ancientJson = (await ancient.json()) as { incremental: boolean };
     expect(ancientJson.incremental).toBe(false);
+  });
+
+  it('stores a recent code from header and partial text literals, and does not advance past a failed read', async () => {
+    const { env, token, api } = await setupOwner();
+    const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const now = new Date();
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const internal = `${String(now.getUTCDate()).padStart(2, '0')}-${months[now.getUTCMonth()]}-${now.getUTCFullYear()} ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}:${String(now.getUTCSeconds()).padStart(2, '0')} +0000`;
+    const commands: string[] = [];
+    mockConnectRef.fn = () =>
+      scriptedImap({ commands, search: '10 11', internalDate: internal, body: 'code', uidNext: 12 })();
+
+    const created = await api('/api/imap/accounts', {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({
+        enabled: true,
+        host: 'imap.gmail.com',
+        port: 993,
+        tls: true,
+        username: 'alice@gmail.com',
+        password: 'app-password-16',
+      }),
+    });
+    const { account } = (await created.json()) as { account: { id: string } };
+    const stored = await syncImapAccount(env, account.id);
+    expect(stored.error).toBeUndefined();
+    expect(stored.synced).toBe(2);
+    const emails = (await (await api('/api/emails', { headers: { Authorization: `Bearer ${token}` } })).json()) as {
+      emails: unknown[];
+    };
+    expect(emails.emails).toHaveLength(2);
+    const uid = await env.DB.prepare('SELECT last_uid FROM imap_accounts WHERE id = ?')
+      .bind(account.id)
+      .first<{ last_uid: number }>();
+    expect(uid?.last_uid).toBe(11);
+
+    await env.DB.prepare(
+      `UPDATE imap_accounts SET last_uid = 11, last_sync_at = ?, sync_fail_count = 0 WHERE id = ?`
+    )
+      .bind(new Date(Date.now() - 60_000).toISOString(), account.id)
+      .run();
+    mockConnectRef.fn = () =>
+      scriptedImap({
+        commands,
+        search: '12',
+        internalDate: internal,
+        body: 'huge',
+        uidNext: 13,
+      })();
+    const failed = await syncImapAccount(env, account.id);
+    expect(failed.error).toBeTruthy();
+    const stuck = await env.DB.prepare('SELECT last_uid FROM imap_accounts WHERE id = ?')
+      .bind(account.id)
+      .first<{ last_uid: number }>();
+    expect(stuck?.last_uid).toBe(11);
+    mockConnectRef.fn = null;
+  });
+
+  it('logs a permanent filter drop without the message and still advances that UID', async () => {
+    const { env, token, api } = await setupOwner();
+    const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const now = new Date();
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const internal = `${String(now.getUTCDate()).padStart(2, '0')}-${months[now.getUTCMonth()]}-${now.getUTCFullYear()} ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}:${String(now.getUTCSeconds()).padStart(2, '0')} +0000`;
+    mockConnectRef.fn = () =>
+      scriptedImap({
+        commands: [],
+        search: '7',
+        internalDate: internal,
+        body: 'plain',
+        uidNext: 8,
+      })();
+    const created = await api('/api/imap/accounts', {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({
+        enabled: true,
+        host: 'imap.gmail.com',
+        port: 993,
+        tls: true,
+        username: 'alice@gmail.com',
+        password: 'app-password-16',
+      }),
+    });
+    const { account } = (await created.json()) as { account: { id: string } };
+    const filterRes = await api('/api/email-filter', {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({ enabled: true, otpOnly: true, mode: 'allow', rules: [] }),
+    });
+    expect(filterRes.status).toBe(200);
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      logs.push(args.map((part) => String(part)).join(' '));
+    });
+    try {
+      const dropped = await syncImapAccount(env, account.id);
+      expect(dropped.error).toBeUndefined();
+      expect(dropped.synced).toBe(0);
+      expect(logs.some((line) => line === 'imap drop filtered')).toBe(true);
+      expect(logs.some((line) => /digest|654321|Subject/i.test(line))).toBe(false);
+      const uid = await env.DB.prepare('SELECT last_uid FROM imap_accounts WHERE id = ?')
+        .bind(account.id)
+        .first<{ last_uid: number }>();
+      expect(uid?.last_uid).toBe(7);
+    } finally {
+      spy.mockRestore();
+      mockConnectRef.fn = null;
+    }
+  });
+
+  it('runs one due account per alarm and leaves the other for a follow-up', async () => {
+    const { env, token, api } = await setupOwner();
+    const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    let connects = 0;
+    mockConnectRef.fn = () => {
+      connects += 1;
+      return scriptedImap({ commands: [], search: '', uidNext: 3, internalDate: '01-Jan-2020 00:00:00 +0000' })();
+    };
+    for (const username of ['one@gmail.com', 'two@gmail.com']) {
+      const created = await api('/api/imap/accounts', {
+        method: 'POST',
+        headers: auth,
+        body: JSON.stringify({
+          enabled: true,
+          host: 'imap.gmail.com',
+          port: 993,
+          tls: true,
+          username,
+          password: 'app-password-16',
+        }),
+      });
+      expect(created.status).toBe(201);
+    }
+    const first = await syncNextDueImapAccount(env);
+    expect(first.moreDue).toBe(true);
+    expect(connects).toBe(1);
+    const second = await syncNextDueImapAccount(env);
+    expect(second.moreDue).toBe(false);
+    expect(connects).toBe(2);
+    mockConnectRef.fn = null;
   });
 });

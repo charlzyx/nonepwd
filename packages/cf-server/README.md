@@ -28,7 +28,7 @@ pnpm run deploy:wrangler
 
 ## Workers Free：验证码同步与增量 `/api/sync`
 
-IMAP 不在 `GET /api/sync`、`GET /api/emails` 或请求的 `waitUntil` 里跑。这个 Cloudflare 账号的 Workers Free Cron 名额已满（上限 5 个），所以同步改由已有的 `VaultWsHub` 类上名为 `imap` 的 Durable Object alarm 每分钟触发：账号串行，每账号最多 2 封，只取 `last_uid` 之后、验证码有效期内的邮件。配置里不要再加 `triggers.crons`，否则下次部署会再次撞上 Cron 上限。R2 快照仍由请求里的 `waitUntil(maybeAutoSnapshot)` 每 6 小时写一次。
+IMAP 不在 `GET /api/sync`、`GET /api/emails` 或请求的 `waitUntil` 里跑。`POST /api/imap/sync` 只把 Durable Object alarm 提前到约 1 秒后并返回 202，不在请求里拉信。这个 Cloudflare 账号的 Workers Free Cron 名额已满（上限 5 个），所以同步由已有的 `VaultWsHub` 类上名为 `imap` 的 alarm 触发：每次只处理一个到期账号，若还有别的账号到期则约 2 秒后再响；每个账号最多 2 封，从最旧的未读 UID 往后走，只解析验证码有效期内的正文（`BODY.PEEK[TEXT]<0.8192>`）。配置里不要再加 `triggers.crons`。R2 快照仍由请求里的 `waitUntil(maybeAutoSnapshot)` 每 6 小时写一次。
 
 部署后，下一次打到 Worker 的请求会给该 alarm 排上下一分钟（只写 alarm，不拉信）。之后即使没有客户端在线也会每分钟继续。不需要新的 Durable Object 迁移，也不需要升级到 Workers Paid。已有 D1 会在 Worker 启动时自动补上 `sync_fail_count` / `uid_baselined` 列；也可以手动执行一次 `migrations/0002_imap_sync_cursor.sql`。
 

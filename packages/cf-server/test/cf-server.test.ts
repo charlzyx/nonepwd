@@ -23,6 +23,7 @@ import {
   type VaultMetadata,
 } from '@nonepwd/core/worker';
 import { createCfApp, runScheduledMaintenance } from '../src/app.js';
+import { syncImapInbox } from '../src/imap.js';
 import { hashSecret, verifySecret } from '../src/auth.js';
 import { handleIncomingCfEmail } from '../src/email.js';
 import type { EmailMessageLike } from '../src/types.js';
@@ -964,39 +965,13 @@ describe('@nonepwd/cf-server', () => {
       ).json()) as { emails: EncryptedEmailRecord[] };
       expect(emailsAfterCreate.emails).toHaveLength(0);
 
-      // First sync baselines to the current max UID and does not backfill history.
-      const baselineRes = await api('/api/imap/sync', {
-        method: 'POST',
-        headers: authHeaders,
-        body: JSON.stringify({}),
-      });
-      expect(baselineRes.status).toBe(200);
-      const baselineJson = (await baselineRes.json()) as { ok: boolean; synced: number; baselined?: boolean };
-      expect(baselineJson.ok).toBe(true);
-      expect(baselineJson.synced).toBe(0);
+      // A message still inside the code window is stored. History behind last_uid is not.
+      const pulled = await syncImapInbox(env);
+      expect(pulled.synced).toBe(2);
       const baselinedUid = await env.DB.prepare('SELECT last_uid FROM imap_accounts WHERE id = ?')
         .bind(createdPersonal.account.id)
         .first<{ last_uid: number }>();
       expect(baselinedUid?.last_uid).toBe(101);
-      const emailsAfterBaseline = (await (
-        await api('/api/emails', { headers: { Authorization: `Bearer ${token}` } })
-      ).json()) as { emails: EncryptedEmailRecord[] };
-      expect(emailsAfterBaseline.emails).toHaveLength(0);
-
-      // A later run, inside the code window, fetches only mail newer than last_uid.
-      const recent = new Date(Date.now() - 60_000).toISOString();
-      await env.DB.prepare(
-        `UPDATE imap_accounts
-         SET last_uid = 100, last_sync_at = ?, uid_baselined = 1, sync_fail_count = 0`
-      )
-        .bind(recent)
-        .run();
-      const fetchRes = await api('/api/imap/sync', {
-        method: 'POST',
-        headers: authHeaders,
-        body: JSON.stringify({}),
-      });
-      expect(fetchRes.status).toBe(200);
       const emailsAfterFetch = (await (
         await api('/api/emails', { headers: { Authorization: `Bearer ${token}` } })
       ).json()) as { emails: EncryptedEmailRecord[] };
@@ -1123,19 +1098,21 @@ describe('@nonepwd/cf-server', () => {
       expect(syncJson.imapStatus.enabled).toBe(true);
       expect(syncJson.imapStatus.status).toBe('listening');
 
-      // 5. POST /api/imap/sync with explicit account id
+      // 5. POST /api/imap/sync only schedules the alarm; it does not open IMAP.
       const syncOneRes = await api('/api/imap/sync', {
         method: 'POST',
         headers: authHeaders,
         body: JSON.stringify({ id: createdWork.account.id }),
       });
-      expect(syncOneRes.status).toBe(200);
+      expect(syncOneRes.status).toBe(202);
       const syncOneJson = (await syncOneRes.json()) as {
         ok: boolean;
+        scheduled: boolean;
         accounts: ImapAccountPublic[];
         imap: ImapConfigPublic;
       };
       expect(syncOneJson.ok).toBe(true);
+      expect(syncOneJson.scheduled).toBe(true);
       expect(syncOneJson.accounts).toHaveLength(2);
 
       // 6. Delete one account; missing id returns 404

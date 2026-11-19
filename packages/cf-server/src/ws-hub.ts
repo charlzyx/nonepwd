@@ -1,5 +1,5 @@
 import { runScheduledImapSync } from './app.js';
-import { ensureImapAlarm, nextImapAlarmAt } from './imap-alarm.js';
+import { IMAP_ALARM_FOLLOWUP_MS, IMAP_ALARM_SOON_MS, ensureImapAlarm, nextImapAlarmAt } from './imap-alarm.js';
 import type { CfServerEnv } from './types.js';
 
 interface WsAttachment {
@@ -26,6 +26,10 @@ export class VaultWsHub implements DurableObject {
     const url = new URL(request.url);
 
     if (url.pathname === '/imap-alarm') {
+      if (url.searchParams.get('soon') === '1') {
+        await this.ctx.storage.setAlarm(Date.now() + IMAP_ALARM_SOON_MS);
+        return Response.json({ ok: true, armed: true, soon: true });
+      }
       const armed = await ensureImapAlarm(this.ctx.storage);
       return Response.json({ ok: true, armed });
     }
@@ -162,7 +166,10 @@ export class VaultWsHub implements DurableObject {
   async alarm(): Promise<void> {
     await this.ctx.storage.setAlarm(nextImapAlarmAt());
     try {
-      await runScheduledImapSync(this.env);
+      const { moreDue } = await runScheduledImapSync(this.env);
+      if (moreDue) {
+        await this.ctx.storage.setAlarm(Date.now() + IMAP_ALARM_FOLLOWUP_MS);
+      }
     } catch (err) {
       console.error('imap alarm failed', err instanceof Error ? err.message : String(err));
     }
