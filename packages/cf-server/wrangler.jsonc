@@ -51,9 +51,8 @@
       "new_sqlite_classes": ["AgentRelayHub"]
     }
   ],
-  // Free-plan cron: pull new verification codes. Snapshot stays on activity
-  // (waitUntil maybeAutoSnapshot) so this invocation does not serialize the vault.
-  "triggers": { "crons": ["* * * * *"] },
+  // No Cron Triggers. This Cloudflare account is already at the Workers Free
+  // limit of 5. IMAP verification-code sync is a VaultWsHub alarm named "imap".
   "vars": {
     "FORWARD_TO_EMAIL": ""
   }

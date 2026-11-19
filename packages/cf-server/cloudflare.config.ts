@@ -36,10 +36,8 @@ export default defineConfig({
       notFoundHandling: "single-page-application",
       runWorkerFirst: ["/api/*", "/agent/*", "/install.sh", "/downloads/*", "/llms.txt", "/SKILL.md", "/skill.md"],
     },
-    triggers: [{ type: "scheduled", schedule: "* * * * *" }],
-    // Minute cron syncs IMAP verification codes only.
-    // Activity-triggered waitUntil(maybeAutoSnapshot) still backs up D1 to R2.
-    // triggers: [{ type: "scheduled", schedule: "0 */6 * * *" }],
+    // No Cron Triggers. Workers Free on this account already has 5.
+    // IMAP sync is the VaultWsHub alarm named "imap", about once a minute.
     exports: {
       VaultWsHub: exports.durableObject({ storage: "sqlite" }),
       AgentRelayHub: exports.durableObject({ storage: "sqlite" }),
