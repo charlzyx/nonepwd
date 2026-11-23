@@ -1490,6 +1490,12 @@ function renderPopover() {
         `<span class="np-pill primary">${emailOtp.otpCode}</span>`,
         () => {
           fillOtpTarget(target, emailOtp.otpCode!);
+          if (emailOtp.id) {
+            void chrome.runtime.sendMessage({
+              type: 'NONEPWD_MARK_EMAIL_OTP_COPIED',
+              emailId: emailOtp.id,
+            });
+          }
           hidePopover();
         }
       );
@@ -1914,6 +1920,10 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
 
     if (msg?.type === 'NONEPWD_PROMPT_SAVE' && msg.capture) {
       void ensureThemeAndShowBanner(msg.capture as PendingCredentialCapture, Boolean(msg.unlocked));
+    } else if (msg?.type === 'NONEPWD_EMAIL_DELETED' && msg.id) {
+      if (liveEmailOverride?.id === msg.id) {
+        liveEmailOverride = null;
+      }
     } else if (msg?.type === 'NONEPWD_LIVE_OTP' && msg.email) {
       liveEmailOverride = msg.email as DecryptedEmailPayload & { id?: string };
       if (currentTarget && (currentTarget.kind === 'otp-single' || currentTarget.kind === 'otp-split')) {

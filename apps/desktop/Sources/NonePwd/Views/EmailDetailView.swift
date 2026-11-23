@@ -46,7 +46,7 @@ public struct EmailDetailView: View {
                                 .textSelection(.enabled)
                             Spacer()
                             Button {
-                                store.copySecret(code, label: "邮箱验证码")
+                                store.copyEmailOtp(email, code: code)
                             } label: {
                                 Text("复制验证码")
                                     .padding(.horizontal, 8)

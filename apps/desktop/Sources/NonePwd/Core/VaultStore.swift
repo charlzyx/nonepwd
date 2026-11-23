@@ -198,6 +198,10 @@ public final class VaultStore: ObservableObject {
     @Published public var customGroups: [String] = []
     @Published public private(set) var aiEmailExtractions: [String: AIEmailExtraction] = [:]
     @Published public private(set) var aiExtractingIds: Set<String> = []
+    @Published public private(set) var copiedEmailExpirations: [String: Date] = [:]
+
+    nonisolated public static let copiedEmailAutoDeleteSeconds: TimeInterval = 5 * 60
+    nonisolated private static let copiedEmailExpirationsDefaultsKey = "nonepwd.copied_email_expirations.v1"
 
     // Live TOTP ticker + 30s Clipboard Clear
     @Published public var totpSnapshot: [String: TotpResult] = [:]
@@ -222,8 +226,10 @@ public final class VaultStore: ObservableObject {
     private var lastCopiedChangeCount: Int?
     private var timer: Timer?
     private var aiAttemptedIds: Set<String> = []
+    private var deletingExpiredEmailIds: Set<String> = []
     private var lastEmailCronAt = Date()
     private var hasFinishedInit = false
+    private let isTestingMode: Bool
 
     public var isAIConfigured: Bool {
         if !aiApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -247,6 +253,7 @@ public final class VaultStore: ObservableObject {
     }()
 
     public init(forTesting: Bool = false) {
+        self.isTestingMode = forTesting
         let prefs = forTesting ? DesktopPrefs() : PrefsStore.load()
         self.serverURL = prefs.serverURL
         self.secretKey = prefs.secretKey ?? ""
@@ -261,6 +268,7 @@ public final class VaultStore: ObservableObject {
         self.aiAutoExtractEmail = prefs.aiAutoExtractEmail ?? true
         self.customGroups = prefs.savedGroups ?? []
         if !forTesting {
+            self.loadCopiedEmailExpirations()
             self.hasSavedTouchID = TouchIDKeychain.hasSavedQuickUnlock()
             _ = PrefsStore.syncBundledBrowserExtension()
             self.hasFinishedInit = true
@@ -310,6 +318,7 @@ public final class VaultStore: ObservableObject {
                 return
             }
             refreshTotps()
+            pruneExpiredCopiedEmails()
             if emailCronMinutes > 0 && Date().timeIntervalSince(lastEmailCronAt) >= Double(emailCronMinutes * 60) {
                 lastEmailCronAt = Date()
                 Task { @MainActor [weak self] in
@@ -366,6 +375,75 @@ public final class VaultStore: ObservableObject {
         lastCopiedChangeCount = nil
         clipboardRemaining = 0
         clipboardStatus = ""
+    }
+
+    // MARK: - Email OTP Copy & Auto-Expire (5 min)
+
+    public func copyEmailOtp(_ email: DecryptedEmailPayload, code: String) {
+        copySecret(code, label: "邮箱验证码（5 分钟后自动清除）")
+        scheduleEmailAutoDelete(email.id)
+    }
+
+    public func scheduleEmailAutoDelete(
+        _ emailId: String,
+        after seconds: TimeInterval = VaultStore.copiedEmailAutoDeleteSeconds,
+        now: Date = Date()
+    ) {
+        guard !emailId.isEmpty else { return }
+        if copiedEmailExpirations[emailId] == nil {
+            copiedEmailExpirations[emailId] = now.addingTimeInterval(seconds)
+            saveCopiedEmailExpirations()
+        }
+    }
+
+    public func pruneExpiredCopiedEmails(now: Date = Date()) {
+        guard !copiedEmailExpirations.isEmpty else { return }
+        let expiredIds = copiedEmailExpirations.compactMap { id, expiresAt in
+            expiresAt <= now ? id : nil
+        }
+        guard !expiredIds.isEmpty else { return }
+
+        var changed = false
+        for id in expiredIds {
+            if let email = emails.first(where: { $0.id == id }) {
+                if !deletingExpiredEmailIds.contains(id) {
+                    deletingExpiredEmailIds.insert(id)
+                    Task { @MainActor [weak self] in
+                        await self?.deleteEmail(email)
+                    }
+                }
+            } else if !deletingExpiredEmailIds.contains(id) {
+                copiedEmailExpirations.removeValue(forKey: id)
+                changed = true
+            }
+        }
+        if changed {
+            saveCopiedEmailExpirations()
+        }
+    }
+
+    private func loadCopiedEmailExpirations() {
+        guard !isTestingMode,
+              let raw = UserDefaults.standard.dictionary(forKey: Self.copiedEmailExpirationsDefaultsKey) as? [String: Double]
+        else { return }
+        var map: [String: Date] = [:]
+        for (id, ts) in raw {
+            map[id] = Date(timeIntervalSince1970: ts)
+        }
+        copiedEmailExpirations = map
+    }
+
+    private func saveCopiedEmailExpirations() {
+        guard !isTestingMode else { return }
+        if copiedEmailExpirations.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Self.copiedEmailExpirationsDefaultsKey)
+            return
+        }
+        var raw: [String: Double] = [:]
+        for (id, date) in copiedEmailExpirations {
+            raw[id] = date.timeIntervalSince1970
+        }
+        UserDefaults.standard.set(raw, forKey: Self.copiedEmailExpirationsDefaultsKey)
     }
 
     // MARK: - Filtered Collections & Security Audit
@@ -1046,6 +1124,7 @@ public final class VaultStore: ObservableObject {
             selectedEmailId = nil
         }
         refreshTotps()
+        pruneExpiredCopiedEmails()
 
         if aiAutoExtractEmail && isAIConfigured {
             Task { @MainActor [weak self] in
@@ -1532,10 +1611,17 @@ public final class VaultStore: ObservableObject {
 
     public func deleteEmail(_ email: DecryptedEmailPayload) async {
         struct OkResp: Decodable { let ok: Bool }
+        defer { deletingExpiredEmailIds.remove(email.id) }
         if let _: OkResp = try? await apiRequest("/api/emails/\(email.id)", method: "DELETE") {
             emails.removeAll { $0.id == email.id }
         } else {
             emails.removeAll { $0.id == email.id }
+        }
+        if copiedEmailExpirations.removeValue(forKey: email.id) != nil {
+            saveCopiedEmailExpirations()
+        }
+        if aiEmailExtractions.removeValue(forKey: email.id) != nil {
+            saveAICache()
         }
         if selectedEmailId == email.id {
             selectedEmailId = nil
@@ -1935,6 +2021,15 @@ public final class VaultStore: ObservableObject {
                         await self?.extractEmailOtpWithAI(opened, force: false)
                     }
                 }
+            }
+        } else if msg.type == "email.deleted", let id = msg.id {
+            emails.removeAll { $0.id == id }
+            deletingExpiredEmailIds.remove(id)
+            if copiedEmailExpirations.removeValue(forKey: id) != nil {
+                saveCopiedEmailExpirations()
+            }
+            if selectedEmailId == id {
+                selectedEmailId = nil
             }
         } else if msg.type == "item.upserted"
             || msg.type == "item.deleted"

@@ -55,6 +55,7 @@ export const EmailOtpView: React.FC<EmailOtpViewProps> = ({
     toggleAlias,
     deleteAlias,
     deleteEmail,
+    scheduleEmailAutoDelete,
   } = useVault();
   const [siteInput, setSiteInput] = useState('github.com');
   const [explicitAddr, setExplicitAddr] = useState('');
@@ -388,7 +389,11 @@ export const EmailOtpView: React.FC<EmailOtpViewProps> = ({
                                 {em.otpCode}
                               </div>
                             </div>
-                            <CopyButton value={em.otpCode} label="复制验证码" />
+                            <CopyButton
+                              value={em.otpCode}
+                              label="复制验证码"
+                              onCopy={() => scheduleEmailAutoDelete(em.id)}
+                            />
                           </div>
                         )}
 

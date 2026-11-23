@@ -882,6 +882,7 @@ export function createNonePwdServer(
     const id = c.req.param('id');
     const res = db.sqlite.prepare('DELETE FROM encrypted_emails WHERE id = ?').run(id);
     if (res.changes === 0) return c.json({ error: 'Email not found' }, 404);
+    wsHub.broadcast({ type: 'email.deleted', id }, { ownerOnly: true });
     return c.json({ ok: true });
   });
 

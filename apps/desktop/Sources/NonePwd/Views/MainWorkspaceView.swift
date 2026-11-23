@@ -948,7 +948,7 @@ public struct MainWorkspaceView: View {
                                 },
                                 onCopyOtp: { code in
                                     store.selectedEmailId = email.id
-                                    store.copySecret(code, label: "邮箱验证码")
+                                    store.copyEmailOtp(email, code: code)
                                 },
                                 onDelete: {
                                     Task { await store.deleteEmail(email) }

@@ -3,7 +3,7 @@
   "name": "nonepwd — Self-Hosted Vault & Email OTP",
   "version": "0.1.0",
   "description": "Zero-knowledge self-hosted password manager: Shadow DOM autofill, 2FA TOTP, and real-time Email OTP & Masked Aliases (Rust WASM).",
-  "permissions": ["storage", "activeTab", "tabs", "scripting"],
+  "permissions": ["storage", "activeTab", "tabs", "scripting", "alarms"],
   "host_permissions": ["<all_urls>"],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

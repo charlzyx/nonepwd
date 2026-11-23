@@ -8,6 +8,7 @@ interface CopyButtonProps {
   copiedLabel?: string;
   className?: string;
   variant?: 'default' | 'minimal';
+  onCopy?: () => void;
 }
 
 async function copyTextWithFallback(text: string): Promise<boolean> {
@@ -52,6 +53,7 @@ export const CopyButton: React.FC<CopyButtonProps> = ({
   copiedLabel,
   className = '',
   variant = 'default',
+  onCopy,
 }) => {
   const { isZh } = useLocale();
   const [copied, setCopied] = useState(false);
@@ -60,6 +62,7 @@ export const CopyButton: React.FC<CopyButtonProps> = ({
     e.stopPropagation();
     const ok = await copyTextWithFallback(value);
     if (ok) {
+      onCopy?.();
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     }

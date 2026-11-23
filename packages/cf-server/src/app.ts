@@ -974,6 +974,7 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     const id = c.req.param('id');
     const removed = await deleteStoredEmail(c.env, id);
     if (!removed) return c.json({ error: 'Email not found' }, 404);
+    await broadcastEvent(c.env, { type: 'email.deleted', id }, { ownerOnly: true });
     return c.json({ ok: true });
   });
 

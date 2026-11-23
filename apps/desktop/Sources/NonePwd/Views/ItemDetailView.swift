@@ -221,7 +221,7 @@ public struct ItemDetailView: View {
                 .tracking(2)
 
             Button("复制") {
-                store.copySecret(code, label: "邮箱验证码")
+                store.copyEmailOtp(email, code: code)
             }
             .buttonStyle(.borderedProminent)
             .tint(.green)

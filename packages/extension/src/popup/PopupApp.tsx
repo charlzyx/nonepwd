@@ -1257,7 +1257,13 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
               {tabId && (
                 <button
                   type="button"
-                  onClick={() => void handleFillOtp(latestOtpEmail.otpCode!)}
+                  onClick={() => {
+                    void chrome.runtime.sendMessage({
+                      type: 'NONEPWD_MARK_EMAIL_OTP_COPIED',
+                      emailId: latestOtpEmail.id,
+                    });
+                    void handleFillOtp(latestOtpEmail.otpCode!);
+                  }}
                   className="h-7.5 rounded-[8px] bg-primary px-3.5 text-[12.5px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
                 >
                   填入
@@ -1265,9 +1271,15 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
               )}
               <button
                 type="button"
-                onClick={() => void copyValue('email-otp', latestOtpEmail.otpCode!)}
+                onClick={() => {
+                  void chrome.runtime.sendMessage({
+                    type: 'NONEPWD_MARK_EMAIL_OTP_COPIED',
+                    emailId: latestOtpEmail.id,
+                  });
+                  void copyValue('email-otp', latestOtpEmail.otpCode!);
+                }}
                 className="inline-flex h-7.5 w-7.5 items-center justify-center rounded-[8px] bg-background/85 text-foreground transition-colors hover:bg-muted"
-                title="复制验证码"
+                title="复制验证码（5 分钟后自动清除）"
               >
                 {copiedId === 'email-otp' ? (
                   <Check className="h-4 w-4 text-emerald-600" strokeWidth={1.65} />

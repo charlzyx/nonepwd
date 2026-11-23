@@ -38,6 +38,9 @@ import type { ExtendedVaultItem } from './types.js';
 const PERSISTED_SESSION_KEY = 'nonepwd_persisted_session';
 const PENDING_QR_IMPORT_KEY = 'pendingQrImport';
 const PENDING_QR_TTL_MS = 10 * 60_000;
+const COPIED_EMAIL_EXPIRATIONS_KEY = 'nonepwd_copied_email_expirations';
+const COPIED_EMAIL_TTL_MS = 5 * 60_000;
+const EMAIL_EXPIRE_ALARM_PREFIX = 'nonepwd_expire_email:';
 
 export interface PendingQrImport {
   uris: string[];
@@ -89,7 +92,121 @@ interface SessionCache {
 let memoryFallbackSession: SessionCache | null = null;
 let memoryPendingCaptures: Record<string, PendingCredentialCapture> = {};
 let memoryPendingQrImport: PendingQrImport | null = null;
+let memoryCopiedEmailExpirations: Record<string, number> = {};
+const deletingExpiredEmailIds = new Set<string>();
 let activeWs: WebSocket | null = null;
+
+async function getCopiedEmailExpirations(): Promise<Record<string, number>> {
+  let raw: Record<string, number> = memoryCopiedEmailExpirations;
+  try {
+    const res = await chrome.storage.local?.get(COPIED_EMAIL_EXPIRATIONS_KEY);
+    if (res?.[COPIED_EMAIL_EXPIRATIONS_KEY] && typeof res[COPIED_EMAIL_EXPIRATIONS_KEY] === 'object') {
+      raw = res[COPIED_EMAIL_EXPIRATIONS_KEY] as Record<string, number>;
+      memoryCopiedEmailExpirations = { ...raw };
+    }
+  } catch {
+    // ignore
+  }
+  return { ...raw };
+}
+
+async function saveCopiedEmailExpirations(map: Record<string, number>): Promise<void> {
+  memoryCopiedEmailExpirations = { ...map };
+  try {
+    if (Object.keys(map).length === 0) {
+      await chrome.storage.local?.remove(COPIED_EMAIL_EXPIRATIONS_KEY);
+    } else {
+      await chrome.storage.local?.set({ [COPIED_EMAIL_EXPIRATIONS_KEY]: map });
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function notifyTabsEmailDeleted(emailId: string): Promise<void> {
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (!tab.id) continue;
+      void chrome.tabs.sendMessage(tab.id, { type: 'NONEPWD_EMAIL_DELETED', id: emailId }).catch(() => {});
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function scheduleEmailAutoDelete(emailId: string, ttlMs = COPIED_EMAIL_TTL_MS): Promise<number> {
+  const cleanId = emailId.trim();
+  if (!cleanId) return 0;
+  const map = await getCopiedEmailExpirations();
+  if (typeof map[cleanId] === 'number' && map[cleanId] > Date.now()) {
+    return map[cleanId];
+  }
+  const expiresAt = Date.now() + ttlMs;
+  map[cleanId] = expiresAt;
+  await saveCopiedEmailExpirations(map);
+
+  try {
+    if (typeof chrome !== 'undefined' && chrome.alarms?.create) {
+      await chrome.alarms.create(`${EMAIL_EXPIRE_ALARM_PREFIX}${cleanId}`, { when: expiresAt });
+    } else {
+      setTimeout(() => {
+        void purgeExpiredCopiedEmails();
+      }, ttlMs);
+    }
+  } catch {
+    setTimeout(() => {
+      void purgeExpiredCopiedEmails();
+    }, ttlMs);
+  }
+  return expiresAt;
+}
+
+async function purgeExpiredCopiedEmails(): Promise<void> {
+  const map = await getCopiedEmailExpirations();
+  const now = Date.now();
+  const expiredIds = Object.entries(map)
+    .filter(([, expiresAt]) => typeof expiresAt === 'number' && expiresAt <= now)
+    .map(([id]) => id);
+  if (expiredIds.length === 0) return;
+
+  const session = await getSession();
+  let mapChanged = false;
+  let sessionChanged = false;
+
+  for (const emailId of expiredIds) {
+    if (deletingExpiredEmailIds.has(emailId)) continue;
+    deletingExpiredEmailIds.add(emailId);
+    try {
+      if (session) {
+        try {
+          await apiJson(session.serverUrl, `/api/emails/${encodeURIComponent(emailId)}`, session.token, {
+            method: 'DELETE',
+          });
+        } catch {
+          // Ignore 404 or transient network errors; remove locally regardless
+        }
+        const before = session.decryptedEmails.length;
+        session.decryptedEmails = session.decryptedEmails.filter((e) => e.id !== emailId);
+        if (session.decryptedEmails.length !== before) {
+          sessionChanged = true;
+        }
+        await notifyTabsEmailDeleted(emailId);
+      }
+      delete map[emailId];
+      mapChanged = true;
+    } finally {
+      deletingExpiredEmailIds.delete(emailId);
+    }
+  }
+
+  if (session && sessionChanged) {
+    await saveSession(session);
+  }
+  if (mapChanged) {
+    await saveCopiedEmailExpirations(map);
+  }
+}
 
 async function getPrefs(): Promise<LocalPrefs> {
   const res = await chrome.storage.local.get(['serverUrl', 'email', 'secretKey']);
@@ -649,9 +766,23 @@ function connectWs(session: SessionCache): void {
         const msg = JSON.parse(String(evt.data)) as {
           type: string;
           email?: EncryptedEmailRecord;
+          id?: string;
         };
         const current = await getSession();
         if (!current) return;
+
+        if (msg.type === 'email.deleted' && msg.id) {
+          const deletedId = msg.id;
+          current.decryptedEmails = current.decryptedEmails.filter((e) => e.id !== deletedId);
+          await saveSession(current);
+          const expMap = await getCopiedEmailExpirations();
+          if (deletedId in expMap) {
+            delete expMap[deletedId];
+            await saveCopiedEmailExpirations(expMap);
+          }
+          await notifyTabsEmailDeleted(deletedId);
+          return;
+        }
 
         if (msg.type === 'email.received' && msg.email) {
           const opened = await openSealedJson<DecryptedEmailPayload>(
@@ -786,10 +917,14 @@ async function queryForTabUrl(tabUrl: string, tabId?: number) {
     ? loginsWithTotp.find((x) => x.item.id === activePending.itemId) ?? null
     : null;
 
+  await purgeExpiredCopiedEmails();
+  const copiedExpirations = await getCopiedEmailExpirations();
   const recentCutoff = now - 15 * 60 * 1000;
   const latestOtpEmail =
     session.decryptedEmails.find((em) => {
       if (!em.otpCode) return false;
+      const exp = copiedExpirations[em.id];
+      if (typeof exp === 'number' && exp <= now) return false;
       if (new Date(em.receivedAt).getTime() < recentCutoff) return false;
       if (activePending?.emailAlias && em.to.toLowerCase() === activePending.emailAlias.toLowerCase()) {
         return true;
@@ -818,6 +953,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       await initNonePwdCore();
       switch (message?.type) {
         case 'NONEPWD_GET_STATE': {
+          await purgeExpiredCopiedEmails();
           const prefs = await getPrefs();
           const session = await getSession();
           const tabId = typeof message.tabId === 'number' ? message.tabId : sender.tab?.id;
@@ -835,6 +971,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             pendingCapture,
             pendingQrImport,
           });
+          return;
+        }
+
+        case 'NONEPWD_MARK_EMAIL_OTP_COPIED': {
+          const emailId = typeof message.emailId === 'string' ? message.emailId : '';
+          const expiresAt = await scheduleEmailAutoDelete(emailId);
+          sendResponse({ ok: true, expiresAt });
           return;
         }
 
@@ -1525,8 +1668,19 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onInstalled) {
   });
 }
 
+if (typeof chrome !== 'undefined' && chrome.alarms?.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name.startsWith(EMAIL_EXPIRE_ALARM_PREFIX)) {
+      void initNonePwdCore().then(() => purgeExpiredCopiedEmails());
+    }
+  });
+}
+
 void initNonePwdCore().then(() =>
   getSession().then((s) => {
-    if (s) connectWs(s);
+    if (s) {
+      connectWs(s);
+      void purgeExpiredCopiedEmails();
+    }
   })
 );

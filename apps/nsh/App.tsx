@@ -181,7 +181,7 @@ function App() {
   const isWideDesktop = computed(() => platform.desktop && windowSize().width >= 720);
 
   // Auth & Connection state
-  const phase = signal<"locked" | "setup" | "unlocked">("locked");
+  const phase = signal<"bootstrapping" | "locked" | "setup" | "unlocked">("bootstrapping");
   const serverUrl = signal(DEFAULT_SERVER_URL);
   const secretKeyInput = signal("");
   const masterPasswordInput = signal("");
@@ -360,20 +360,33 @@ function App() {
           ),
           emailPrivateKeyPkcs8B64: remembered.emailPrivateKeyPkcs8B64,
         };
+        batch(() => {
+          session.set(restored);
+          phase.set("unlocked");
+          syncing.set(true);
+        });
         try {
           await performSync(restored);
           if (cancelled) return;
-          batch(() => {
-            session.set(restored);
-            phase.set("unlocked");
-          });
           void syncAutofillNow();
           void refreshAutofillAndPending();
         } catch (err) {
+          if (cancelled) return;
           if (err instanceof ApiError && err.status === 401) {
             await clearRememberedSession();
+            batch(() => {
+              session.set(null);
+              phase.set("locked");
+              authError.set("免密会话已过期，请重新输入主密码解锁");
+            });
+          } else {
+            showToast(err instanceof Error ? err.message : "同步失败，请稍后重试", "error");
           }
+        } finally {
+          if (!cancelled) syncing.set(false);
         }
+      } else {
+        phase.set("locked");
       }
     })();
     return () => {
@@ -730,6 +743,26 @@ function App() {
       showToast(err instanceof Error ? err.message : "同步失败", "error");
     } finally {
       syncing.set(false);
+    }
+  }
+
+  const copiedEmailDeleteTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  async function handleCopyEmailOtp(em: DecryptedEmailItem, code: string) {
+    if (!code) return;
+    await Clipboard.writeText(code);
+    Haptics.notification("success");
+    showToast("已复制邮箱验证码（5 分钟后自动清除）", "ok");
+    if (!copiedEmailDeleteTimers.has(em.id)) {
+      const timer = setTimeout(() => {
+        copiedEmailDeleteTimers.delete(em.id);
+        const cur = session();
+        if (!cur) return;
+        void deleteEmail(cur.serverUrl, cur.token, em.id).catch(() => {});
+        emails.update((prev) => prev.filter((e) => e.id !== em.id));
+        if (expandedEmailId() === em.id) expandedEmailId.set(null);
+      }, 5 * 60_000);
+      copiedEmailDeleteTimers.set(em.id, timer);
     }
   }
 
@@ -2126,7 +2159,7 @@ function App() {
                     <If when={em().otpCode}>
                       {(code) => (
                         <Button
-                          onPress={() => void handleCopyText(code(), "邮箱验证码")}
+                          onPress={() => void handleCopyEmailOtp(em(), code())}
                           class="flex-row items-center justify-between gap-3 rounded-xl bg-input px-4 py-3 active:opacity-80"
                         >
                           <View class="flex-1 min-w-0 gap-1">
@@ -2139,7 +2172,7 @@ function App() {
                             label="复制"
                             icon={copyIcon}
                             variant="primary"
-                            onPress={() => void handleCopyText(code(), "邮箱验证码")}
+                            onPress={() => void handleCopyEmailOtp(em(), code())}
                           />
                         </Button>
                       )}
@@ -2605,9 +2638,27 @@ function App() {
     );
   }
 
+  function renderBootstrappingView() {
+    return (
+      <View class="flex-1 bg-background items-center justify-center px-6">
+        <View class="items-center gap-3">
+          <Text class="text-xl font-semibold text-foreground">NonePwd</Text>
+          <CaptionText>正在恢复登录状态...</CaptionText>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View class="flex-1 bg-background">
-      <If when={phase() === "unlocked"} else={renderAuthView()}>
+      <If
+        when={phase() === "unlocked"}
+        else={
+          <If when={phase() === "bootstrapping"} else={renderAuthView()}>
+            {renderBootstrappingView()}
+          </If>
+        }
+      >
         {renderUnlockedShell()}
       </If>
 

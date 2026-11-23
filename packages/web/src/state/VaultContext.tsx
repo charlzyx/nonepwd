@@ -106,6 +106,36 @@ export type AuthPhase = 'loading' | 'uninitialized' | 'locked' | 'unlocked' | 's
 
 const TRUSTED_DEVICE_KEY = 'nonepwd.trusted_device.v1';
 const CUSTOM_GROUPS_KEY = 'nonepwd.custom_groups.v1';
+const COPIED_EMAIL_EXPIRATIONS_KEY = 'nonepwd.copied_email_expirations.v1';
+const COPIED_EMAIL_TTL_MS = 5 * 60_000;
+
+function loadCopiedEmailExpirations(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(COPIED_EMAIL_EXPIRATIONS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function saveCopiedEmailExpirations(map: Record<string, number>): void {
+  try {
+    if (Object.keys(map).length === 0) {
+      localStorage.removeItem(COPIED_EMAIL_EXPIRATIONS_KEY);
+    } else {
+      localStorage.setItem(COPIED_EMAIL_EXPIRATIONS_KEY, JSON.stringify(map));
+    }
+  } catch {
+    // ignore storage failures
+  }
+}
 
 interface TrustedDevicePrefs {
   email: string;
@@ -231,6 +261,7 @@ interface VaultContextValue {
   toggleAlias(id: string, enabled: boolean): Promise<void>;
   deleteAlias(id: string): Promise<void>;
   deleteEmail(id: string): Promise<void>;
+  scheduleEmailAutoDelete(id: string): void;
   createServiceAccount(
     name: string,
     vaultIds: string[]
@@ -310,6 +341,8 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const syncCursorRef = useRef<string | null>(null);
   const syncEpochRef = useRef<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const copiedEmailExpirationsRef = useRef<Record<string, number>>(loadCopiedEmailExpirations());
+  const deletingExpiredEmailsRef = useRef<Set<string>>(new Set());
 
   const apiFetch = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
     const headers: Record<string, string> = {
@@ -503,6 +536,13 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           // Also refresh alias counts silently
           const aliasRes = await apiFetch<{ aliases: AliasRecord[] }>('/api/aliases');
           setAliases(aliasRes.aliases);
+        } else if (msg.type === 'email.deleted' && msg.id) {
+          const deletedId = msg.id;
+          setEmails((prev) => prev.filter((e) => e.id !== deletedId));
+          if (deletedId in copiedEmailExpirationsRef.current) {
+            delete copiedEmailExpirationsRef.current[deletedId];
+            saveCopiedEmailExpirations(copiedEmailExpirationsRef.current);
+          }
         } else if (msg.type === 'alias.upserted' && msg.alias) {
           const upserted = msg.alias;
           setAliases((prev) => [upserted, ...prev.filter((a) => a.id !== upserted.id)]);
@@ -988,11 +1028,71 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const deleteEmail = useCallback<VaultContextValue['deleteEmail']>(
     async (id) => {
-      await apiFetch(`/api/emails/${id}`, { method: 'DELETE' });
-      setEmails((prev) => prev.filter((e) => e.id !== id));
+      try {
+        await apiFetch(`/api/emails/${id}`, { method: 'DELETE' });
+      } finally {
+        setEmails((prev) => prev.filter((e) => e.id !== id));
+        if (id in copiedEmailExpirationsRef.current) {
+          delete copiedEmailExpirationsRef.current[id];
+          saveCopiedEmailExpirations(copiedEmailExpirationsRef.current);
+        }
+      }
     },
     [apiFetch]
   );
+
+  const scheduleEmailAutoDelete = useCallback<VaultContextValue['scheduleEmailAutoDelete']>(
+    (id) => {
+      const cleanId = id.trim();
+      if (!cleanId) return;
+      const existing = copiedEmailExpirationsRef.current[cleanId];
+      if (typeof existing === 'number' && existing > Date.now()) {
+        return;
+      }
+      copiedEmailExpirationsRef.current[cleanId] = Date.now() + COPIED_EMAIL_TTL_MS;
+      saveCopiedEmailExpirations(copiedEmailExpirationsRef.current);
+    },
+    []
+  );
+
+  const purgeExpiredCopiedEmails = useCallback(() => {
+    if (phase !== 'unlocked' || !sessionTokenRef.current) return;
+    const map = copiedEmailExpirationsRef.current;
+    const now = Date.now();
+    const expiredIds = Object.entries(map)
+      .filter(([, exp]) => typeof exp === 'number' && exp <= now)
+      .map(([id]) => id);
+    if (expiredIds.length === 0) return;
+
+    let mapChanged = false;
+    for (const id of expiredIds) {
+      if (deletingExpiredEmailsRef.current.has(id)) continue;
+      const stillPresent = emails.some((em) => em.id === id);
+      if (stillPresent) {
+        deletingExpiredEmailsRef.current.add(id);
+        void deleteEmail(id)
+          .catch(() => {
+            // ignore 404 or transient errors
+          })
+          .finally(() => {
+            deletingExpiredEmailsRef.current.delete(id);
+          });
+      } else {
+        delete map[id];
+        mapChanged = true;
+      }
+    }
+    if (mapChanged) {
+      saveCopiedEmailExpirations(map);
+    }
+  }, [deleteEmail, emails, phase]);
+
+  useEffect(() => {
+    if (phase !== 'unlocked') return;
+    purgeExpiredCopiedEmails();
+    const timer = window.setInterval(purgeExpiredCopiedEmails, 10_000);
+    return () => window.clearInterval(timer);
+  }, [phase, purgeExpiredCopiedEmails]);
 
   const createServiceAccount = useCallback<VaultContextValue['createServiceAccount']>(
     async (name, vaultIds) => {
@@ -1342,6 +1442,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       toggleAlias,
       deleteAlias,
       deleteEmail,
+      scheduleEmailAutoDelete,
       createServiceAccount,
       revokeServiceAccount,
       updateSettings,
@@ -1392,6 +1493,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       toggleAlias,
       deleteAlias,
       deleteEmail,
+      scheduleEmailAutoDelete,
       createServiceAccount,
       revokeServiceAccount,
       updateSettings,

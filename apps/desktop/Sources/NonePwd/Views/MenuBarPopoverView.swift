@@ -328,7 +328,7 @@ public struct MenuBarPopoverView: View {
                                     .controlSize(.mini)
                             } else if let code = resolvedCode {
                                 Button {
-                                    store.copySecret(code, label: "邮箱验证码")
+                                    store.copyEmailOtp(email, code: code)
                                     flashCopied("email-\(email.id)")
                                 } label: {
                                     Text(isCopied ? "已复制" : code)

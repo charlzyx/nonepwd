@@ -1544,6 +1544,13 @@ async fn handle_delete_email(
     if changes == 0 {
         return json_err(StatusCode::NOT_FOUND, "Email not found");
     }
+    state.ws_hub.broadcast(
+        &json!({ "type": "email.deleted", "id": id }),
+        BroadcastOptions {
+            vault_id: None,
+            owner_only: true,
+        },
+    );
     Json(json!({ "ok": true })).into_response()
 }
 

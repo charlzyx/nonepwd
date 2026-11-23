@@ -55,8 +55,16 @@ const IDENTITY_FIELD_ROWS: Array<{ key: keyof IdentityDetails; label: string }> 
 ];
 
 export const ItemDetail: React.FC<ItemDetailProps> = ({ item, onEdit, onSelectGroup }) => {
-  const { vaults, emails, allGroups, securityIssues, deleteItem, saveItem, toggleItemGroup } =
-    useVault();
+  const {
+    vaults,
+    emails,
+    allGroups,
+    securityIssues,
+    deleteItem,
+    saveItem,
+    toggleItemGroup,
+    scheduleEmailAutoDelete,
+  } = useVault();
   const [revealPassword, setRevealPassword] = useState(false);
   const [revealPassphrase, setRevealPassphrase] = useState(false);
   const [revealCard, setRevealCard] = useState(false);
@@ -345,7 +353,11 @@ export const ItemDetail: React.FC<ItemDetailProps> = ({ item, onEdit, onSelectGr
                 </div>
               </div>
             </div>
-            <CopyButton value={matchedEmailOtp.otpCode} label="复制验证码" />
+            <CopyButton
+              value={matchedEmailOtp.otpCode}
+              label="复制验证码"
+              onCopy={() => scheduleEmailAutoDelete(matchedEmailOtp.id)}
+            />
           </div>
         )}
 
