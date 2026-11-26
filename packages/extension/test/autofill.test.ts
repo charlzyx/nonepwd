@@ -1,8 +1,13 @@
 import { JSDOM } from 'jsdom';
 import { describe, expect, it } from 'vitest';
-import { classifyCapturedCredential } from '../src/capture.js';
+import { classifyCapturedCredential, urlsMatchWithLocalhost } from '../src/capture.js';
 import { POPOVER_CSS } from '../src/content.js';
-import { detectInputTarget, extractSubmittedLogin, findFormFields } from '../src/detector.js';
+import {
+  detectInputTarget,
+  extractSubmittedLogin,
+  findFormFields,
+  isVisibleElement,
+} from '../src/detector.js';
 import {
   fillCardCvv,
   fillCardForm,
@@ -553,5 +558,79 @@ describe('@nonepwd/extension DOM detection & autofill', () => {
     } finally {
       (globalThis as { chrome?: unknown }).chrome = prevChrome;
     }
+  });
+
+  it('enforces port isolation on localhost/127.0.0.1 and rejects HTTPS -> HTTP downgrades in urlsMatchWithLocalhost', () => {
+    // HTTPS -> HTTP downgrade must be rejected
+    expect(urlsMatchWithLocalhost('http://example.com/login', 'https://example.com/login')).toBe(
+      false
+    );
+    expect(urlsMatchWithLocalhost('http://localhost:8787', 'https://localhost:8787')).toBe(false);
+
+    // Same HTTPS protocol or HTTP -> HTTPS upgrade continues to match
+    expect(urlsMatchWithLocalhost('https://app.example.com/login', 'https://example.com')).toBe(
+      true
+    );
+    expect(urlsMatchWithLocalhost('https://example.com/login', 'http://example.com/login')).toBe(
+      true
+    );
+    // Stored bare domain (e.g. email senderDomain) still matches
+    expect(urlsMatchWithLocalhost('http://example.com/login', 'example.com')).toBe(true);
+
+    // Localhost/127.0.0.1 port isolation when stored URL specifies an explicit port
+    expect(urlsMatchWithLocalhost('http://localhost:3000', 'http://127.0.0.1:8787')).toBe(false);
+    expect(urlsMatchWithLocalhost('http://localhost', 'http://127.0.0.1:8787')).toBe(false);
+    expect(urlsMatchWithLocalhost('http://localhost:8787', 'http://127.0.0.1:8787')).toBe(true);
+    expect(urlsMatchWithLocalhost('http://127.0.0.1:8787/auth', 'http://localhost:8787/login')).toBe(
+      true
+    );
+    // Localhost never matches non-localhost
+    expect(urlsMatchWithLocalhost('http://localhost:8787', 'http://example.com:8787')).toBe(false);
+  });
+
+  it('rejects invisible or near-transparent inputs and tiny elements while preserving JSDOM 0x0 fallback', () => {
+    const dom = new JSDOM(`
+      <form>
+        <input id="normal" type="password" autocomplete="current-password" />
+        <input id="zero-opacity" type="password" autocomplete="current-password" style="opacity: 0" />
+        <input id="faint-opacity" type="password" autocomplete="current-password" style="opacity: 0.05" />
+        <input id="visible-opacity" type="password" autocomplete="current-password" style="opacity: 0.5" />
+        <input id="tiny" type="password" autocomplete="current-password" />
+        <input id="sized" type="password" autocomplete="current-password" />
+      </form>
+    `);
+    const doc = dom.window.document;
+    const normal = doc.getElementById('normal') as HTMLInputElement;
+    const zeroOpacity = doc.getElementById('zero-opacity') as HTMLInputElement;
+    const faintOpacity = doc.getElementById('faint-opacity') as HTMLInputElement;
+    const visibleOpacity = doc.getElementById('visible-opacity') as HTMLInputElement;
+    const tiny = doc.getElementById('tiny') as HTMLInputElement;
+    const sized = doc.getElementById('sized') as HTMLInputElement;
+
+    // JSDOM default 0x0 rect fallback still considered visible
+    expect(isVisibleElement(normal)).toBe(true);
+    expect(detectInputTarget(normal)?.kind).toBe('password');
+
+    // opacity <= 0.05 must be rejected
+    expect(isVisibleElement(zeroOpacity)).toBe(false);
+    expect(detectInputTarget(zeroOpacity)).toBeNull();
+    expect(isVisibleElement(faintOpacity)).toBe(false);
+    expect(detectInputTarget(faintOpacity)).toBeNull();
+
+    // opacity > 0.05 is allowed
+    expect(isVisibleElement(visibleOpacity)).toBe(true);
+    expect(detectInputTarget(visibleOpacity)?.kind).toBe('password');
+
+    // Non-zero bounding rect smaller than 20x12 is rejected
+    tiny.getBoundingClientRect = () =>
+      ({ width: 1, height: 1, top: 0, left: 0, right: 1, bottom: 1, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+    expect(isVisibleElement(tiny)).toBe(false);
+    expect(detectInputTarget(tiny)).toBeNull();
+
+    // Non-zero bounding rect >= 20x12 is accepted
+    sized.getBoundingClientRect = () =>
+      ({ width: 160, height: 32, top: 0, left: 0, right: 160, bottom: 32, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+    expect(isVisibleElement(sized)).toBe(true);
+    expect(detectInputTarget(sized)?.kind).toBe('password');
   });
 });

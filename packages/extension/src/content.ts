@@ -5,6 +5,7 @@ import {
   extractSubmittedLogin,
   isCardKind,
   isIdentityKind,
+  type DetectedInputKind,
   type DetectedTarget,
   type FormFieldElement,
 } from './detector.js';
@@ -54,12 +55,14 @@ interface TabLoginMatch {
   totpRemaining: number;
 }
 
+type SanitizedCardItem = ExtendedVaultItem & { hasCvv?: boolean };
+
 interface TabQueryResponse {
   ok: boolean;
   unlocked: boolean;
   aliasDomain?: string;
   logins: TabLoginMatch[];
-  cards: ExtendedVaultItem[];
+  cards: SanitizedCardItem[];
   identities: ExtendedVaultItem[];
   pendingItem: TabLoginMatch | null;
   latestOtpEmail: (DecryptedEmailPayload & { id: string }) | null;
@@ -710,7 +713,7 @@ function ensureShadowUi(): ShadowRoot {
   badgeBtn.title = 'NonePwd 自动填充（可拖动位置，悬停点 × 可隐藏）';
   badgeBtn.innerHTML = THREE_KEYS_SVG;
   badgeBtn.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return;
+    if (!e.isTrusted || e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
 
@@ -1391,11 +1394,13 @@ function hideAllOverlays() {
   currentTarget = null;
 }
 
-async function queryBackground(): Promise<TabQueryResponse> {
+async function queryBackground(targetKind?: DetectedInputKind): Promise<TabQueryResponse> {
   try {
     const res = (await chrome.runtime.sendMessage({
       type: 'NONEPWD_QUERY_TAB',
       url: window.location.href,
+      includeCards: Boolean(targetKind && isCardKind(targetKind)),
+      includeIdentities: Boolean(targetKind && isIdentityKind(targetKind)),
     })) as TabQueryResponse;
     return res;
   } catch {
@@ -1474,6 +1479,7 @@ function renderPopover() {
     btn.querySelector('.np-item-title')!.textContent = title;
     btn.querySelector('.np-item-sub')!.textContent = subtitle;
     btn.addEventListener('mousedown', (e) => {
+      if (!e.isTrusted) return;
       e.preventDefault();
       e.stopPropagation();
       onSelect();
@@ -1534,7 +1540,7 @@ function renderPopover() {
       popoverEl.appendChild(waitBar);
     }
   } else if (target.kind === 'cc-csc') {
-    const cardsWithCvv = (data.cards ?? []).filter((c) => Boolean(c.card?.cvv));
+    const cardsWithCvv = (data.cards ?? []).filter((c) => Boolean(c.hasCvv));
     for (const item of cardsWithCvv) {
       const { label } = formatCardDisplay(item.card, item.title);
       addOption(
@@ -1542,10 +1548,20 @@ function renderPopover() {
         `${item.title} · 点击填入安全码`,
         '<span class="np-pill">CVV</span>',
         () => {
-          if (item.card?.cvv) {
-            fillCardCvv(target.anchor, item.card.cvv);
-          }
-          hidePopover();
+          void (async () => {
+            try {
+              const res = (await chrome.runtime.sendMessage({
+                type: 'NONEPWD_GET_CARD_CVV',
+                itemId: item.id,
+              })) as { ok: boolean; cvv?: string };
+              if (res?.ok && res.cvv) {
+                fillCardCvv(target.anchor, res.cvv);
+              }
+            } catch {
+              // ignore fetch failure
+            }
+            hidePopover();
+          })();
         },
         true
       );
@@ -1691,7 +1707,7 @@ async function openPopoverForTarget(target: DetectedTarget) {
   ensureShadowUi();
   syncHostTheme();
   currentTarget = target;
-  lastQueryData = await queryBackground();
+  lastQueryData = await queryBackground(target.kind);
   renderPopover();
 }
 
@@ -1771,6 +1787,7 @@ if (typeof document !== 'undefined') {
   document.addEventListener(
     'focusin',
     (evt) => {
+      if (!evt.isTrusted) return;
       const el = evt.target;
       if (
         !(
@@ -1800,6 +1817,7 @@ if (typeof document !== 'undefined') {
   document.addEventListener(
     'keydown',
     (evt) => {
+      if (!evt.isTrusted) return;
       if (evt.key === 'Enter' && evt.target instanceof HTMLInputElement) {
         const scope = evt.target.closest('form') ?? document;
         tryCaptureCredentials(scope);
@@ -1834,6 +1852,7 @@ if (typeof document !== 'undefined') {
   document.addEventListener(
     'mousedown',
     (evt) => {
+      if (!evt.isTrusted) return;
       if (evt.target === hostEl) return;
       if (
         (evt.target instanceof HTMLInputElement ||

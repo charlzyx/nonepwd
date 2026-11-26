@@ -27,17 +27,53 @@ export type CaptureClassification =
       existingItem: VaultItemPayload;
     };
 
-export function urlsMatchWithLocalhost(urlA: string, urlB: string): boolean {
-  const hostA = extractHost(urlA);
-  const hostB = extractHost(urlB);
+function parseUrlParts(raw: string): { protocol: string | null; host: string; port: string } | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed);
+  try {
+    const parsed = new URL(hasScheme ? trimmed : `http://${trimmed}`);
+    return {
+      protocol: hasScheme ? parsed.protocol.toLowerCase() : null,
+      host: parsed.hostname.toLowerCase(),
+      port: parsed.port,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function urlsMatchWithLocalhost(pageUrl: string, storedUrl: string): boolean {
+  const hostA = extractHost(pageUrl);
+  const hostB = extractHost(storedUrl);
   if (!hostA || !hostB) return false;
-  if (
-    (hostA === 'localhost' || hostA === '127.0.0.1') &&
-    (hostB === 'localhost' || hostB === '127.0.0.1')
-  ) {
+
+  const partsA = parseUrlParts(pageUrl);
+  const partsB = parseUrlParts(storedUrl);
+
+  // Reject https -> http protocol downgrades when stored URL explicitly requires HTTPS
+  if (partsB?.protocol === 'https:' && partsA?.protocol === 'http:') {
+    return false;
+  }
+
+  const isLocalhost = (h: string) => h === 'localhost' || h === '127.0.0.1';
+  if (isLocalhost(hostA) || isLocalhost(hostB)) {
+    if (!(isLocalhost(hostA) && isLocalhost(hostB))) {
+      return false;
+    }
+    const storedPort = partsB?.port || '';
+    if (storedPort) {
+      const pagePort =
+        partsA?.port ||
+        (partsA?.protocol === 'https:' ? '443' : partsA?.protocol === 'http:' ? '80' : '');
+      if (pagePort !== storedPort) {
+        return false;
+      }
+    }
     return true;
   }
-  return domainsMatch(urlA, urlB);
+
+  return domainsMatch(pageUrl, storedUrl);
 }
 
 export function normalizeOriginUrl(rawUrl: string): string {

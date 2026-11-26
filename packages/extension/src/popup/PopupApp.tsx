@@ -49,7 +49,7 @@ import {
   type ThemePreference,
   type UnlockDuration,
 } from '../theme';
-import type { PendingCredentialCapture } from '../capture';
+import { urlsMatchWithLocalhost, type PendingCredentialCapture } from '../capture';
 import type { ExtendedVaultItem } from '../types';
 
 interface PendingQrImport {
@@ -101,18 +101,9 @@ function getHostname(url: string): string {
   }
 }
 
-function matchesHostname(item: ExtendedVaultItem, hostname: string): boolean {
-  const cleanHost = hostname.trim().toLowerCase();
-  if (!cleanHost) return false;
-  if (item.title.toLowerCase().includes(cleanHost)) return true;
-  return item.urls.some((u) => {
-    try {
-      const h = new URL(u.includes('://') ? u : `https://${u}`).hostname.toLowerCase();
-      return h === cleanHost || cleanHost.endsWith(`.${h}`) || h.endsWith(`.${cleanHost}`);
-    } catch {
-      return u.toLowerCase().includes(cleanHost);
-    }
-  });
+function matchesTabUrl(item: ExtendedVaultItem, currentTabUrl: string): boolean {
+  if (!currentTabUrl) return false;
+  return item.urls.some((u) => urlsMatchWithLocalhost(currentTabUrl, u));
 }
 
 const CountdownPie: React.FC<{ remaining: number; period: number }> = ({
@@ -582,7 +573,7 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
   const handleFillLogin = useCallback(
     async (item: ExtendedVaultItem) => {
       if (!tabId) return;
-      await chrome.tabs.sendMessage(tabId, { type: 'NONEPWD_FILL_FROM_POPUP', item });
+      await chrome.tabs.sendMessage(tabId, { type: 'NONEPWD_FILL_FROM_POPUP', item }, { frameId: 0 });
       if (!isPinnedWindow) window.close();
     },
     [tabId]
@@ -591,7 +582,7 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
   const handleFillOtp = useCallback(
     async (code: string) => {
       if (!tabId) return;
-      await chrome.tabs.sendMessage(tabId, { type: 'NONEPWD_FILL_OTP_FROM_POPUP', code });
+      await chrome.tabs.sendMessage(tabId, { type: 'NONEPWD_FILL_OTP_FROM_POPUP', code }, { frameId: 0 });
       if (!isPinnedWindow) window.close();
     },
     [tabId]
@@ -600,7 +591,7 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
   const handleFillCard = useCallback(
     async (item: ExtendedVaultItem) => {
       if (!tabId) return;
-      await chrome.tabs.sendMessage(tabId, { type: 'NONEPWD_FILL_CARD_FROM_POPUP', item });
+      await chrome.tabs.sendMessage(tabId, { type: 'NONEPWD_FILL_CARD_FROM_POPUP', item }, { frameId: 0 });
       if (!isPinnedWindow) window.close();
     },
     [tabId]
@@ -609,7 +600,7 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
   const handleFillCvv = useCallback(
     async (item: ExtendedVaultItem) => {
       if (!tabId) return;
-      await chrome.tabs.sendMessage(tabId, { type: 'NONEPWD_FILL_CVV_FROM_POPUP', item });
+      await chrome.tabs.sendMessage(tabId, { type: 'NONEPWD_FILL_CVV_FROM_POPUP', item }, { frameId: 0 });
       if (!isPinnedWindow) window.close();
     },
     [tabId]
@@ -618,7 +609,11 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
   const handleFillIdentity = useCallback(
     async (item: ExtendedVaultItem) => {
       if (!tabId) return;
-      await chrome.tabs.sendMessage(tabId, { type: 'NONEPWD_FILL_IDENTITY_FROM_POPUP', item });
+      await chrome.tabs.sendMessage(
+        tabId,
+        { type: 'NONEPWD_FILL_IDENTITY_FROM_POPUP', item },
+        { frameId: 0 }
+      );
       if (!isPinnedWindow) window.close();
     },
     [tabId]
@@ -671,13 +666,13 @@ export const PopupApp: React.FC<{ initialTheme?: ThemePreference }> = ({
   const totpItems = useMemo(() => {
     const withTotp = (state?.items ?? []).filter((i) => Boolean(i.totp?.trim()));
     return [...withTotp].sort((a, b) => {
-      const aMatch = matchesHostname(a, hostname) ? 0 : 1;
-      const bMatch = matchesHostname(b, hostname) ? 0 : 1;
+      const aMatch = matchesTabUrl(a, tabUrl) ? 0 : 1;
+      const bMatch = matchesTabUrl(b, tabUrl) ? 0 : 1;
       if (aMatch !== bMatch) return aMatch - bMatch;
       if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
       return a.title.localeCompare(b.title);
     });
-  }, [hostname, state?.items]);
+  }, [tabUrl, state?.items]);
 
   const filteredSiteLogins = useMemo(() => {
     const q = localFilter.trim().toLowerCase();

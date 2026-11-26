@@ -78,12 +78,22 @@ function isTextAreaElement(el: Element): el is HTMLTextAreaElement {
   return win?.HTMLTextAreaElement ? el instanceof win.HTMLTextAreaElement : el.tagName === 'TEXTAREA';
 }
 
-function isVisibleElement(el: HTMLElement): boolean {
+export function isVisibleElement(el: HTMLElement): boolean {
   try {
     const win = el.ownerDocument.defaultView;
     if (win) {
       const style = win.getComputedStyle(el);
       if (style.display === 'none' || style.visibility === 'hidden') {
+        return false;
+      }
+      const opacity = Number.parseFloat(style.opacity || '1');
+      if (Number.isFinite(opacity) && opacity <= 0.05) {
+        return false;
+      }
+    }
+    if (typeof el.getBoundingClientRect === 'function') {
+      const rect = el.getBoundingClientRect();
+      if ((rect.width > 0 || rect.height > 0) && (rect.width < 20 || rect.height < 12)) {
         return false;
       }
     }

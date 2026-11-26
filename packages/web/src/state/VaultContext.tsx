@@ -108,6 +108,15 @@ const TRUSTED_DEVICE_KEY = 'nonepwd.trusted_device.v1';
 const CUSTOM_GROUPS_KEY = 'nonepwd.custom_groups.v1';
 const COPIED_EMAIL_EXPIRATIONS_KEY = 'nonepwd.copied_email_expirations.v1';
 const COPIED_EMAIL_TTL_MS = 5 * 60_000;
+const MIN_KDF_ITERATIONS = 1_000;
+const MAX_KDF_ITERATIONS = 5_000_000;
+
+function clampKdfIterations(raw: number): number {
+  if (!Number.isFinite(raw)) {
+    throw new Error('Invalid KDF iteration count from server');
+  }
+  return Math.min(MAX_KDF_ITERATIONS, Math.max(MIN_KDF_ITERATIONS, Math.floor(raw)));
+}
 
 function loadCopiedEmailExpirations(): Record<string, number> {
   try {
@@ -445,6 +454,9 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           it.encryptedData,
           AAD.vaultItem(it.vaultId, it.id)
         );
+        if (payload.id !== it.id || payload.vaultId !== it.vaultId) {
+          continue;
+        }
         decryptedItems.push(payload);
       } catch {
         // skip unreadable item
@@ -702,7 +714,7 @@ export const VaultProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         masterPassword,
         secretKey,
         params.kdfSalt,
-        params.kdfIterations
+        clampKdfIterations(params.kdfIterations)
       );
 
       const loginRes = await apiFetch<{

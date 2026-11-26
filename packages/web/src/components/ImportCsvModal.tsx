@@ -31,6 +31,8 @@ import {
   startQrCameraScan,
 } from '../utils/qr';
 
+const MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024;
+
 interface ImportCsvModalProps {
   defaultVaultId: string;
   onClose: () => void;
@@ -311,6 +313,14 @@ export const ImportCsvModal: React.FC<ImportCsvModalProps> = ({ defaultVaultId, 
     setErr(null);
     setQrHint(null);
     setResult(null);
+    if (file.size > MAX_IMPORT_FILE_BYTES) {
+      setFileName(file.name);
+      setRawText(null);
+      setCsvEntries([]);
+      setTotpEntries([]);
+      setErr('导入文件过大（超过 10 MB 上限），请拆分或精简后重试。');
+      return;
+    }
     try {
       const text = await file.text();
       const lowerName = file.name.toLowerCase();
