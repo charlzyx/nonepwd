@@ -10,8 +10,29 @@ fn two_level_tlds() -> &'static HashSet<&'static str> {
     SET.get_or_init(|| {
         [
             "co.uk", "org.uk", "ac.uk", "gov.uk", "com.cn", "net.cn", "org.cn", "gov.cn",
-            "edu.cn", "co.jp", "ne.jp", "or.jp", "com.au", "net.au", "org.au", "com.br",
-            "com.tw", "com.hk", "co.kr", "co.in",
+            "edu.cn", "co.jp", "ne.jp", "or.jp", "com.au", "net.au", "org.au", "gov.au",
+            "edu.au", "com.br", "com.tw", "com.hk", "co.kr", "co.in", "co.nz", "org.nz",
+            "com.sg", "edu.sg", "com.mx", "co.za", "com.my", "co.id", "com.tr", "com.ar",
+        ]
+        .into_iter()
+        .collect()
+    })
+}
+
+fn multi_tenant_two_label_suffixes() -> &'static HashSet<&'static str> {
+    static SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    SET.get_or_init(|| {
+        [
+            "github.io",
+            "pages.dev",
+            "vercel.app",
+            "netlify.app",
+            "herokuapp.com",
+            "fly.dev",
+            "onrender.com",
+            "web.app",
+            "firebaseapp.com",
+            "azurewebsites.net",
         ]
         .into_iter()
         .collect()
@@ -55,12 +76,20 @@ pub fn extract_email_address(raw_header: &str) -> String {
     raw_header.trim().to_ascii_lowercase()
 }
 
+fn looks_like_email_header(trimmed: &str) -> bool {
+    trimmed.contains('@')
+        && !trimmed.contains("://")
+        && !trimmed.contains('/')
+        && !trimmed.contains('?')
+        && !trimmed.contains('#')
+}
+
 pub fn extract_host(input: &str) -> String {
     let trimmed = input.trim().to_ascii_lowercase();
     if trimmed.is_empty() {
         return String::new();
     }
-    if trimmed.contains('@') && !trimmed.contains("://") {
+    if looks_like_email_header(&trimmed) {
         let addr = extract_email_address(&trimmed);
         return addr.rsplit_once('@').map(|(_, h)| h.to_string()).unwrap_or_default();
     }
@@ -86,6 +115,36 @@ pub fn extract_host(input: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn extract_explicit_port(trimmed_lower: &str) -> Option<u16> {
+    if trimmed_lower.is_empty() || looks_like_email_header(trimmed_lower) {
+        return None;
+    }
+    let with_proto = if trimmed_lower.contains("://") {
+        trimmed_lower.to_string()
+    } else {
+        format!("https://{trimmed_lower}")
+    };
+    let u = Url::parse(&with_proto).ok()?;
+    if let Some(port) = u.port() {
+        return Some(port);
+    }
+    // `url::Url::port()` omits the port when it equals the scheme default (e.g. `:80` on `http://`).
+    let authority = trimmed_lower
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed_lower)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    let host_port = authority.rsplit_once('@').map(|(_, hp)| hp).unwrap_or(authority);
+    let port_str = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split_once("]:").map(|(_, p)| p)
+    } else {
+        host_port.rsplit_once(':').map(|(_, p)| p)
+    }?;
+    port_str.parse::<u16>().ok()
+}
+
 pub fn extract_registrable_domain(host_or_email_or_url: &str) -> String {
     let host = extract_host(host_or_email_or_url)
         .trim_end_matches('.')
@@ -105,19 +164,55 @@ pub fn extract_registrable_domain(host_or_email_or_url: &str) -> String {
         return parts.join(".");
     }
     let last_two = format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]);
-    if two_level_tlds().contains(last_two.as_str()) && parts.len() >= 3 {
+    // Multi-tenant cloud suffixes with region/account intermediate labels:
+    // - workers.dev hosts apps at `<worker>.<account>.workers.dev` (4 labels)
+    // - amazonaws.com hosts tenant endpoints across service/region labels
+    if last_two == "workers.dev" {
+        return if parts.len() >= 4 {
+            parts[parts.len() - 4..].join(".")
+        } else {
+            parts.join(".")
+        };
+    }
+    if last_two == "amazonaws.com" {
+        return parts.join(".");
+    }
+    if (two_level_tlds().contains(last_two.as_str())
+        || multi_tenant_two_label_suffixes().contains(last_two.as_str()))
+        && parts.len() >= 3
+    {
         return format!("{}.{}", parts[parts.len() - 3], last_two);
     }
     last_two
 }
 
 pub fn domains_match(url_or_host_a: &str, url_or_host_b: &str) -> bool {
+    let trimmed_a = url_or_host_a.trim().to_ascii_lowercase();
+    let trimmed_b = url_or_host_b.trim().to_ascii_lowercase();
+    let is_https_a = trimmed_a.starts_with("https://");
+    let is_http_a = trimmed_a.starts_with("http://");
+    let is_https_b = trimmed_b.starts_with("https://");
+    let is_http_b = trimmed_b.starts_with("http://");
+    if (is_https_a && is_http_b) || (is_http_a && is_https_b) {
+        return false;
+    }
+
     let host_a = extract_host(url_or_host_a);
     let host_b = extract_host(url_or_host_b);
     if host_a.is_empty() || host_b.is_empty() {
         return false;
     }
     if host_a == host_b {
+        if matches!(host_a.as_str(), "localhost" | "127.0.0.1" | "[::1]") {
+            if let (Some(port_a), Some(port_b)) = (
+                extract_explicit_port(&trimmed_a),
+                extract_explicit_port(&trimmed_b),
+            ) {
+                if port_a != port_b {
+                    return false;
+                }
+            }
+        }
         return true;
     }
     let reg_a = extract_registrable_domain(&host_a);

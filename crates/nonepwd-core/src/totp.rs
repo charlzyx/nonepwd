@@ -77,6 +77,13 @@ pub fn parse_otp_input(input: &str) -> Result<ParsedTotpConfig, String> {
 
     if trimmed.to_ascii_lowercase().starts_with("otpauth://") {
         let url = Url::parse(trimmed).map_err(|e| format!("Invalid otpauth URI: {e}"))?;
+        let kind = url.host_str().unwrap_or("");
+        if kind.eq_ignore_ascii_case("hotp") {
+            return Err("HOTP otpauth URIs are not supported (only TOTP is supported)".to_string());
+        }
+        if !kind.eq_ignore_ascii_case("totp") {
+            return Err(format!("Unsupported otpauth type \"{kind}\" (expected totp)"));
+        }
         let mut secret = String::new();
         let mut issuer_param: Option<String> = None;
         let mut digits_raw = 6u32;

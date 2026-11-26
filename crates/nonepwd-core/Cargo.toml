@@ -19,6 +19,7 @@ sha1 = "0.10"
 sha2 = "0.10"
 url = "2"
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+zeroize = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 getrandom = "0.2"

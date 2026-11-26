@@ -10,6 +10,7 @@ import {
   encodeServiceAccountToken,
   encryptJson,
   extractEmailOtp,
+  extractHost,
   extractRegistrableDomain,
   generateEmailAlias,
   generateEmailKeyPair,
@@ -22,14 +23,17 @@ import {
   injectSecretRefs,
   itemImportFingerprint,
   normalizeSecretKey,
+  openSealedEnvelope,
   openSealedJson,
   parseAuthenticatorExport,
   parseDotEnv,
+  parseOtpInput,
   parsePasswordCsv,
   parseSecretRef,
   planTotpImport,
   randomBytes,
   resolveItemField,
+  sealForPublicKey,
   sealJsonForPublicKey,
   toBase32,
   toBase64Url,
@@ -500,5 +504,60 @@ describe('@nonepwd/core Secret References & Generators', () => {
       title: 'Stripe',
       username: 'billing@example.com',
     });
+  });
+});
+
+describe('@nonepwd/core security hardening', () => {
+  it('enforces multi-tenant PSL isolation, protocol downgrade rejection, localhost ports, and @ query parsing', () => {
+    expect(extractRegistrableDomain('https://alice.github.io')).toBe('alice.github.io');
+    expect(extractRegistrableDomain('https://app.alice.workers.dev')).toBe('app.alice.workers.dev');
+    expect(domainsMatch('https://a.github.io', 'https://b.github.io')).toBe(false);
+    expect(domainsMatch('https://a.alice.workers.dev', 'https://b.bob.workers.dev')).toBe(false);
+    expect(domainsMatch('https://a.vercel.app', 'https://b.vercel.app')).toBe(false);
+    expect(domainsMatch('https://a.pages.dev', 'https://b.pages.dev')).toBe(false);
+    expect(domainsMatch('https://a.s3.us-east-1.amazonaws.com', 'https://b.s3.us-east-1.amazonaws.com')).toBe(false);
+
+    expect(extractRegistrableDomain('shop.example.co.nz')).toBe('example.co.nz');
+    expect(extractRegistrableDomain('portal.agency.gov.au')).toBe('agency.gov.au');
+
+    expect(extractHost('evil.com/login?user=victim@github.com')).toBe('evil.com');
+    expect(domainsMatch('evil.com/login?user=victim@github.com', 'https://github.com')).toBe(false);
+
+    expect(domainsMatch('https://github.com', 'http://github.com')).toBe(false);
+    expect(domainsMatch('http://github.com', 'https://github.com')).toBe(false);
+
+    expect(domainsMatch('http://localhost:3000', 'http://localhost:8787')).toBe(false);
+    expect(domainsMatch('http://localhost:8787', 'http://localhost:8787/app')).toBe(true);
+    expect(domainsMatch('http://127.0.0.1:3000', 'http://127.0.0.1:8787')).toBe(false);
+  });
+
+  it('rejects low-order X25519 zero public keys, invalid KDF bounds, and HOTP URIs', async () => {
+    const zeroPubB64 = toBase64Url(new Uint8Array(32));
+    await expect(sealForPublicKey(zeroPubB64, utf8Encode('secret'))).rejects.toThrow(/Non-contributory/i);
+
+    const kp = await generateEmailKeyPair();
+    await expect(
+      openSealedEnvelope(kp.privateKeyPkcs8B64, {
+        v: 1,
+        epk: zeroPubB64,
+        iv: toBase64Url(new Uint8Array(12)),
+        ct: toBase64Url(new Uint8Array(32)),
+      })
+    ).rejects.toThrow(/Non-contributory/i);
+
+    const sk = generateSecretKey();
+    const validSalt = toBase64Url(randomBytes(16));
+    const shortSalt = toBase64Url(randomBytes(8));
+    await expect(deriveAccountKeys('Pass#1', sk, validSalt, 1)).rejects.toThrow(/iterations/i);
+    await expect(deriveAccountKeys('Pass#1', sk, validSalt, 5_000_001)).rejects.toThrow(/iterations/i);
+    await expect(deriveAccountKeys('Pass#1', sk, validSalt, 4_294_967_297)).rejects.toThrow(/iterations/i);
+    await expect(deriveAccountKeys('Pass#1', sk, shortSalt, 1_000)).rejects.toThrow(/salt/i);
+
+    expect(() =>
+      parseOtpInput('otpauth://hotp/Legacy:old?secret=JBSWY3DPEHPK3PXP&counter=1')
+    ).toThrow(/HOTP/i);
+    await expect(
+      generateTotp('otpauth://hotp/Legacy:old?secret=JBSWY3DPEHPK3PXP&counter=1', 59_000)
+    ).rejects.toThrow(/HOTP/i);
   });
 });

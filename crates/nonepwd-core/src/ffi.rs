@@ -3,6 +3,7 @@ use std::slice;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use zeroize::Zeroize;
 
 use crate::crypto::{
     decode_service_account_token, decrypt_bytes, derive_account_keys,
@@ -47,10 +48,14 @@ struct InvokeResponse {
     error: Option<String>,
 }
 
+const MAX_RANDOM_BYTES_LEN: usize = 1_048_576;
+
 #[no_mangle]
 pub extern "C" fn np_alloc(len: usize) -> *mut u8 {
     let safe_len = len.max(1);
-    let layout = Layout::from_size_align(safe_len, 1).expect("valid layout");
+    let Ok(layout) = Layout::from_size_align(safe_len, 1) else {
+        return std::ptr::null_mut();
+    };
     unsafe { alloc(layout) }
 }
 
@@ -60,8 +65,13 @@ pub extern "C" fn np_dealloc(ptr: *mut u8, len: usize) {
         return;
     }
     let safe_len = len.max(1);
-    let layout = Layout::from_size_align(safe_len, 1).expect("valid layout");
-    unsafe { dealloc(ptr, layout) }
+    let Ok(layout) = Layout::from_size_align(safe_len, 1) else {
+        return;
+    };
+    unsafe {
+        slice::from_raw_parts_mut(ptr, safe_len).zeroize();
+        dealloc(ptr, layout);
+    }
 }
 
 #[no_mangle]
@@ -72,11 +82,18 @@ pub extern "C" fn np_free_result(ptr: *mut u8, len: usize) {
 fn dispatch(req: InvokeRequest) -> Result<Value, String> {
     match req.op.as_str() {
         "random_bytes" => {
-            let len = req.args["len"].as_u64().unwrap_or(0) as usize;
+            let len_u64 = req.args["len"].as_u64().unwrap_or(0);
+            let len = usize::try_from(len_u64)
+                .map_err(|_| format!("random_bytes len exceeds maximum ({MAX_RANDOM_BYTES_LEN})"))?;
+            if len > MAX_RANDOM_BYTES_LEN {
+                return Err(format!("random_bytes len exceeds maximum ({MAX_RANDOM_BYTES_LEN})"));
+            }
             Ok(Value::String(to_base64_url(&random_bytes(len)?)))
         }
         "random_int" => {
-            let max = req.args["max"].as_u64().unwrap_or(1) as usize;
+            let max_u64 = req.args["max"].as_u64().unwrap_or(1);
+            let max = usize::try_from(max_u64)
+                .map_err(|_| format!("random_int max out of range: {max_u64}"))?;
             Ok(Value::Number((random_int(max)? as u64).into()))
         }
         "random_id" => Ok(Value::String(random_id()?)),
@@ -98,11 +115,21 @@ fn dispatch(req: InvokeRequest) -> Result<Value, String> {
             Ok(Value::Bool(constant_time_eq(&a, &b)))
         }
         "derive_account_keys" => {
+            let iterations = match req.args.get("iterations") {
+                None | Some(Value::Null) => 600_000u32,
+                Some(v) => {
+                    let raw = v.as_u64().ok_or_else(|| {
+                        "Invalid KDF iterations (expected non-negative integer)".to_string()
+                    })?;
+                    u32::try_from(raw)
+                        .map_err(|_| format!("KDF iterations out of range: {raw}"))?
+                }
+            };
             let res = derive_account_keys(
                 req.args["masterPassword"].as_str().unwrap_or(""),
                 req.args["secretKey"].as_str().unwrap_or(""),
                 req.args["kdfSaltB64"].as_str().unwrap_or(""),
-                req.args["iterations"].as_u64().unwrap_or(600_000) as u32,
+                iterations,
             )?;
             serde_json::to_value(res).map_err(|e| e.to_string())
         }
@@ -300,11 +327,27 @@ fn invoke_raw_bytes(input_slice: &[u8]) -> (*mut u8, usize) {
         .unwrap_or_else(|_| br#"{"ok":false,"error":"Serialization error"}"#.to_vec());
     let out_len = bytes.len();
     let out_ptr = np_alloc(out_len);
+    if out_ptr.is_null() {
+        bytes.zeroize();
+        return (std::ptr::null_mut(), 0);
+    }
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr, out_len);
     }
-    bytes.clear();
+    bytes.zeroize();
     (out_ptr, out_len)
+}
+
+fn alloc_panic_error() -> (*mut u8, usize) {
+    const ERR_BYTES: &[u8] = br#"{"ok":false,"error":"Internal panic in nonepwd-core"}"#;
+    let out_ptr = np_alloc(ERR_BYTES.len());
+    if out_ptr.is_null() {
+        return (std::ptr::null_mut(), 0);
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(ERR_BYTES.as_ptr(), out_ptr, ERR_BYTES.len());
+    }
+    (out_ptr, ERR_BYTES.len())
 }
 
 /// 64-bit native-safe C ABI entry point: reads `in_len` bytes of JSON from `in_ptr`,
@@ -316,12 +359,15 @@ pub unsafe extern "C" fn np_invoke_native(
     in_len: usize,
     out_len: *mut usize,
 ) -> *mut u8 {
-    let input_slice = if in_ptr.is_null() || in_len == 0 {
-        &[][..]
-    } else {
-        unsafe { slice::from_raw_parts(in_ptr, in_len) }
-    };
-    let (ptr, len) = invoke_raw_bytes(input_slice);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let input_slice = if in_ptr.is_null() || in_len == 0 {
+            &[][..]
+        } else {
+            unsafe { slice::from_raw_parts(in_ptr, in_len) }
+        };
+        invoke_raw_bytes(input_slice)
+    }));
+    let (ptr, len) = result.unwrap_or_else(|_| alloc_panic_error());
     if !out_len.is_null() {
         unsafe {
             *out_len = len;
@@ -331,13 +377,17 @@ pub unsafe extern "C" fn np_invoke_native(
 }
 
 /// WASM 32-bit packed C ABI entry point returning `((out_ptr as u64) << 32) | (out_len as u64)`.
+#[cfg(target_arch = "wasm32")]
 #[no_mangle]
-pub extern "C" fn np_invoke(ptr: *const u8, len: usize) -> u64 {
-    let input_slice = if ptr.is_null() || len == 0 {
-        &[][..]
-    } else {
-        unsafe { slice::from_raw_parts(ptr, len) }
-    };
-    let (out_ptr, out_len) = invoke_raw_bytes(input_slice);
+pub unsafe extern "C" fn np_invoke(ptr: *const u8, len: usize) -> u64 {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let input_slice = if ptr.is_null() || len == 0 {
+            &[][..]
+        } else {
+            unsafe { slice::from_raw_parts(ptr, len) }
+        };
+        invoke_raw_bytes(input_slice)
+    }));
+    let (out_ptr, out_len) = result.unwrap_or_else(|_| alloc_panic_error());
     ((out_ptr as u64) << 32) | (out_len as u64)
 }

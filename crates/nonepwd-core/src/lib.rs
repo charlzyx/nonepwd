@@ -10,7 +10,6 @@ pub mod secret_ref;
 pub mod totp;
 pub mod totp_import;
 pub mod types;
-pub mod wasm_ffi;
 
 #[cfg(test)]
 mod tests {
@@ -605,5 +604,159 @@ GitHub,https://github.com/login,octocat,\"p@ss,with\"\"quote\"\"\",\"line 1\nlin
         np_free_result(out_ptr, out_len);
         assert_eq!(resp["ok"], true);
         assert!(resp["result"].as_str().unwrap().starts_with("NP3-"));
+    }
+
+    #[test]
+    fn psl_multi_tenant_protocol_downgrade_and_at_query_host_parsing() {
+        use super::otp_extractor::extract_host;
+
+        // Multi-tenant hosting isolation
+        assert_eq!(extract_registrable_domain("https://alice.github.io"), "alice.github.io");
+        assert_eq!(extract_registrable_domain("https://sub.alice.github.io"), "alice.github.io");
+        assert!(!domains_match("https://a.github.io", "https://b.github.io"));
+        assert!(!domains_match("https://a.pages.dev", "https://b.pages.dev"));
+        assert!(!domains_match("https://a.vercel.app", "https://b.vercel.app"));
+        assert!(!domains_match("https://a.netlify.app", "https://b.netlify.app"));
+        assert!(!domains_match("https://a.herokuapp.com", "https://b.herokuapp.com"));
+        assert!(!domains_match("https://a.fly.dev", "https://b.fly.dev"));
+        assert!(!domains_match("https://a.onrender.com", "https://b.onrender.com"));
+        assert!(!domains_match("https://a.web.app", "https://b.web.app"));
+        assert!(!domains_match("https://a.firebaseapp.com", "https://b.firebaseapp.com"));
+        assert!(!domains_match("https://a.azurewebsites.net", "https://b.azurewebsites.net"));
+        assert_eq!(
+            extract_registrable_domain("https://app.alice.workers.dev"),
+            "app.alice.workers.dev"
+        );
+        assert!(!domains_match(
+            "https://a.alice.workers.dev",
+            "https://b.bob.workers.dev"
+        ));
+        assert!(!domains_match(
+            "https://bucket-a.s3.us-east-1.amazonaws.com",
+            "https://bucket-b.s3.us-east-1.amazonaws.com"
+        ));
+
+        // Added 2-level ccTLDs
+        assert_eq!(extract_registrable_domain("auth.shop.co.nz"), "shop.co.nz");
+        assert_eq!(extract_registrable_domain("www.school.edu.sg"), "school.edu.sg");
+        assert_eq!(extract_registrable_domain("portal.agency.gov.au"), "agency.gov.au");
+        assert_eq!(extract_registrable_domain("app.bank.co.za"), "bank.co.za");
+        assert_eq!(extract_registrable_domain("mail.store.com.ar"), "store.com.ar");
+        assert!(!domains_match("https://a.co.nz", "https://b.co.nz"));
+
+        // Scheme-less URL containing `@` in path/query/fragment must NOT be parsed as email
+        assert_eq!(extract_host("evil.com/login?user=victim@github.com"), "evil.com");
+        assert_eq!(extract_host("evil.com?user=victim@github.com"), "evil.com");
+        assert_eq!(extract_host("evil.com#victim@github.com"), "evil.com");
+        assert_eq!(extract_host("GitHub <noreply@github.com>"), "github.com");
+        assert!(!domains_match(
+            "evil.com/login?user=victim@github.com",
+            "https://github.com"
+        ));
+
+        // Protocol downgrade rejection (https:// vs http://)
+        assert!(!domains_match("https://github.com", "http://github.com"));
+        assert!(!domains_match("http://github.com", "https://github.com"));
+        assert!(domains_match("https://github.com", "github.com"));
+        assert!(domains_match("https://app.github.com", "noreply@github.com"));
+
+        // Localhost / 127.0.0.1 explicit port isolation
+        assert!(!domains_match("http://localhost:3000", "http://localhost:8787"));
+        assert!(domains_match("http://localhost:8787", "http://localhost:8787/login"));
+        assert!(!domains_match("http://127.0.0.1:3000", "http://127.0.0.1:8787"));
+        assert!(domains_match("http://127.0.0.1:8787", "http://127.0.0.1:8787"));
+    }
+
+    #[test]
+    fn x25519_rejects_low_order_zero_public_key() {
+        use super::crypto::{open_sealed_envelope, seal_for_public_key};
+        use super::types::SealedEnvelope;
+
+        let zero_pub_b64 = to_base64_url(&[0u8; 32]);
+        let seal_err = seal_for_public_key(&zero_pub_b64, b"secret", "nonepwd-email-v1")
+            .expect_err("zero public key must be rejected");
+        assert!(seal_err.contains("Non-contributory"), "unexpected err: {seal_err}");
+
+        let kp = generate_email_key_pair().unwrap();
+        let bad_env = SealedEnvelope {
+            v: 1,
+            epk: zero_pub_b64,
+            iv: to_base64_url(&[0u8; 12]),
+            ct: to_base64_url(&[0u8; 32]),
+        };
+        let open_err = open_sealed_envelope(&kp.private_key_pkcs8_b64, &bad_env, "nonepwd-email-v1")
+            .expect_err("zero ephemeral public key must be rejected");
+        assert!(open_err.contains("Non-contributory"), "unexpected err: {open_err}");
+    }
+
+    #[test]
+    fn kdf_bounds_and_ffi_safety() {
+        let sk = generate_secret_key().unwrap();
+        let valid_salt = to_base64_url(&random_bytes(16).unwrap());
+        let short_salt = to_base64_url(&random_bytes(8).unwrap());
+
+        assert!(derive_account_keys_raw("Pass#1", &sk, &valid_salt, 0).is_err());
+        assert!(derive_account_keys_raw("Pass#1", &sk, &valid_salt, 999).is_err());
+        assert!(derive_account_keys_raw("Pass#1", &sk, &valid_salt, 5_000_001).is_err());
+        assert!(derive_account_keys_raw("Pass#1", &sk, &short_salt, 1_000).is_err());
+        assert!(derive_account_keys_raw("Pass#1", &sk, &valid_salt, 1_000).is_ok());
+
+        // Oversized u64 iterations (would have truncated to 1 with `as u32`) must error via FFI
+        let req = serde_json::json!({
+            "op": "derive_account_keys",
+            "args": {
+                "masterPassword": "Pass#1",
+                "secretKey": sk,
+                "kdfSaltB64": valid_salt,
+                "iterations": 4_294_967_297u64
+            }
+        });
+        let req_bytes = serde_json::to_vec(&req).unwrap();
+        let in_ptr = np_alloc(req_bytes.len());
+        let mut out_len: usize = 0;
+        let out_ptr = unsafe {
+            std::ptr::copy_nonoverlapping(req_bytes.as_ptr(), in_ptr, req_bytes.len());
+            np_invoke_native(in_ptr, req_bytes.len(), &mut out_len)
+        };
+        np_dealloc(in_ptr, req_bytes.len());
+        let resp: serde_json::Value =
+            serde_json::from_slice(unsafe { std::slice::from_raw_parts(out_ptr, out_len) }).unwrap();
+        np_free_result(out_ptr, out_len);
+        assert_eq!(resp["ok"], false);
+
+        // random_bytes cap > 1 MiB must error via FFI
+        let cap_req = br#"{"op":"random_bytes","args":{"len":1048577}}"#;
+        let in_ptr = np_alloc(cap_req.len());
+        let mut out_len: usize = 0;
+        let out_ptr = unsafe {
+            std::ptr::copy_nonoverlapping(cap_req.as_ptr(), in_ptr, cap_req.len());
+            np_invoke_native(in_ptr, cap_req.len(), &mut out_len)
+        };
+        np_dealloc(in_ptr, cap_req.len());
+        let cap_resp: serde_json::Value =
+            serde_json::from_slice(unsafe { std::slice::from_raw_parts(out_ptr, out_len) }).unwrap();
+        np_free_result(out_ptr, out_len);
+        assert_eq!(cap_resp["ok"], false);
+
+        // Invalid layout length must return null instead of panicking
+        assert!(np_alloc(usize::MAX).is_null());
+    }
+
+    #[test]
+    fn random_int_above_u32_max_and_hotp_rejection() {
+        use super::random::random_int;
+        use super::totp::parse_otp_input;
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            let bound = (u32::MAX as usize) + 12_345;
+            let val = random_int(bound).unwrap();
+            assert!(val < bound);
+        }
+
+        let err = parse_otp_input("otpauth://hotp/Legacy:old?secret=JBSWY3DPEHPK3PXP&counter=1")
+            .expect_err("HOTP URI must be rejected");
+        assert!(err.to_ascii_lowercase().contains("hotp"), "unexpected err: {err}");
+        assert!(generate_totp("otpauth://hotp/Legacy:old?secret=JBSWY3DPEHPK3PXP&counter=1", 59_000).is_err());
     }
 }

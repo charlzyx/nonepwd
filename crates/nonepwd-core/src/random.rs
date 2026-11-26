@@ -34,15 +34,29 @@ pub fn random_int(max_exclusive: usize) -> Result<usize, String> {
     if max_exclusive == 1 {
         return Ok(0);
     }
-    let m = max_exclusive as u64;
-    let total = u32::MAX as u64 + 1;
-    let limit = total - (total % m);
-    let mut raw = [0u8; 4];
-    loop {
-        fill_random(&mut raw)?;
-        let val = u32::from_le_bytes(raw) as u64;
-        if val < limit {
-            return Ok((val % m) as usize);
+    if max_exclusive <= (u32::MAX as usize) {
+        let m = max_exclusive as u64;
+        let total = u32::MAX as u64 + 1;
+        let limit = total - (total % m);
+        let mut raw = [0u8; 4];
+        loop {
+            fill_random(&mut raw)?;
+            let val = u32::from_le_bytes(raw) as u64;
+            if val < limit {
+                return Ok((val % m) as usize);
+            }
+        }
+    } else {
+        let m = max_exclusive as u128;
+        let total = (u64::MAX as u128) + 1;
+        let limit = total - (total % m);
+        let mut raw = [0u8; 8];
+        loop {
+            fill_random(&mut raw)?;
+            let val = u64::from_le_bytes(raw) as u128;
+            if val < limit {
+                return Ok((val % m) as usize);
+            }
         }
     }
 }

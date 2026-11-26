@@ -100,7 +100,7 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     }
     let mut diff: u8 = 0;
     for (&x, &y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
+        diff |= std::hint::black_box(x ^ y);
     }
-    diff == 0
+    std::hint::black_box(diff) == 0
 }

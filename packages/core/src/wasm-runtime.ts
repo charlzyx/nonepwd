@@ -98,6 +98,10 @@ function getSyncWasmExports(): WasmExports {
 function invokeWithExports<T>(exports: WasmExports, op: string, args: unknown): T {
   const reqBytes = textEncoder.encode(JSON.stringify({ op, args }));
   const inPtr = exports.np_alloc(reqBytes.length);
+  if (inPtr === 0) {
+    reqBytes.fill(0);
+    throw new Error(`WASM np_alloc failed for op "${op}" (${reqBytes.length} bytes)`);
+  }
   let outPtr = 0;
   let outLen = 0;
   try {
@@ -105,6 +109,9 @@ function invokeWithExports<T>(exports: WasmExports, op: string, args: unknown): 
     const packed = exports.np_invoke(inPtr, reqBytes.length);
     outPtr = Number(packed >> 32n);
     outLen = Number(packed & 0xffffffffn);
+    if (outPtr === 0 || outLen === 0) {
+      throw new Error(`Rust WASM op "${op}" returned empty allocation`);
+    }
     const respBytes = new Uint8Array(exports.memory.buffer, outPtr, outLen);
     const respText = textDecoder.decode(respBytes);
     const parsed = JSON.parse(respText) as { ok: boolean; result?: T; error?: string };
@@ -113,8 +120,13 @@ function invokeWithExports<T>(exports: WasmExports, op: string, args: unknown): 
     }
     return parsed.result as T;
   } finally {
+    reqBytes.fill(0);
+    if (reqBytes.length > 0) {
+      new Uint8Array(exports.memory.buffer, inPtr, reqBytes.length).fill(0);
+    }
     exports.np_dealloc(inPtr, reqBytes.length);
     if (outPtr !== 0 && outLen > 0) {
+      new Uint8Array(exports.memory.buffer, outPtr, outLen).fill(0);
       exports.np_dealloc(outPtr, outLen);
     }
   }

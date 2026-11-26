@@ -6,10 +6,15 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroize;
 
 use crate::encoding::{from_base64_url, normalize_secret_key, to_base64_url};
 use crate::random::fill_random;
 use crate::types::{SealedEnvelope, ServiceAccountTokenPayload};
+
+pub const MIN_KDF_SALT_BYTES: usize = 16;
+pub const MIN_KDF_ITERATIONS: u32 = 1_000;
+pub const MAX_KDF_ITERATIONS: u32 = 5_000_000;
 
 const X25519_PKCS8_PREFIX: [u8; 16] = [
     0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
@@ -29,12 +34,26 @@ pub fn derive_account_keys_raw(
     kdf_salt_b64: &str,
     iterations: u32,
 ) -> Result<([u8; 32], String), String> {
-    let normalized_sk = normalize_secret_key(secret_key);
-    let ikm = format!("{normalized_sk}\x00{master_password}");
+    if !(MIN_KDF_ITERATIONS..=MAX_KDF_ITERATIONS).contains(&iterations) {
+        return Err(format!(
+            "KDF iterations must be between {MIN_KDF_ITERATIONS} and {MAX_KDF_ITERATIONS}, got {iterations}"
+        ));
+    }
     let salt_bytes = from_base64_url(kdf_salt_b64)?;
+    if salt_bytes.len() < MIN_KDF_SALT_BYTES {
+        return Err(format!(
+            "KDF salt must be at least {MIN_KDF_SALT_BYTES} bytes, got {}",
+            salt_bytes.len()
+        ));
+    }
+
+    let mut normalized_sk = normalize_secret_key(secret_key);
+    let mut ikm = format!("{normalized_sk}\x00{master_password}");
 
     let mut full = [0u8; 64];
     pbkdf2_hmac::<Sha256>(ikm.as_bytes(), &salt_bytes, iterations, &mut full);
+    ikm.zeroize();
+    normalized_sk.zeroize();
 
     let mut muk = [0u8; 32];
     muk.copy_from_slice(&full[..32]);
@@ -42,10 +61,17 @@ pub fn derive_account_keys_raw(
 
     let hk = Hkdf::<Sha256>::new(Some(&salt_bytes), auth_seed);
     let mut verifier = [0u8; 32];
-    hk.expand(b"nonepwd-auth-verifier-v1", &mut verifier)
-        .map_err(|_| "HKDF expand failed".to_string())?;
+    let expand_res = hk.expand(b"nonepwd-auth-verifier-v1", &mut verifier);
+    full.zeroize();
+    if expand_res.is_err() {
+        muk.zeroize();
+        verifier.zeroize();
+        return Err("HKDF expand failed".to_string());
+    }
 
-    Ok((muk, to_base64_url(&verifier)))
+    let verifier_b64 = to_base64_url(&verifier);
+    verifier.zeroize();
+    Ok((muk, verifier_b64))
 }
 
 pub fn derive_account_keys(
@@ -54,10 +80,12 @@ pub fn derive_account_keys(
     kdf_salt_b64: &str,
     iterations: u32,
 ) -> Result<DerivedAccountKeys, String> {
-    let (muk, auth_verifier_b64) =
+    let (mut muk, auth_verifier_b64) =
         derive_account_keys_raw(master_password, secret_key, kdf_salt_b64, iterations)?;
+    let master_unlock_key_b64 = to_base64_url(&muk);
+    muk.zeroize();
     Ok(DerivedAccountKeys {
-        master_unlock_key_b64: to_base64_url(&muk),
+        master_unlock_key_b64,
         auth_verifier_b64,
     })
 }
@@ -158,30 +186,36 @@ pub fn generate_email_key_pair() -> Result<EmailKeyPair, String> {
     let mut seed = [0u8; 32];
     fill_random(&mut seed)?;
     let secret = StaticSecret::from(seed);
+    seed.zeroize();
     let public = PublicKey::from(&secret);
 
     let mut pkcs8 = Vec::with_capacity(48);
     pkcs8.extend_from_slice(&X25519_PKCS8_PREFIX);
     pkcs8.extend_from_slice(&secret.to_bytes());
+    let private_key_pkcs8_b64 = to_base64_url(&pkcs8);
+    pkcs8.zeroize();
 
     Ok(EmailKeyPair {
         public_key_b64: to_base64_url(public.as_bytes()),
-        private_key_pkcs8_b64: to_base64_url(&pkcs8),
+        private_key_pkcs8_b64,
     })
 }
 
 fn decode_x25519_private_pkcs8(b64: &str) -> Result<StaticSecret, String> {
-    let raw = from_base64_url(b64)?;
+    let mut raw = from_base64_url(b64)?;
     let mut scalar = [0u8; 32];
-    if raw.len() == 48 && raw[..16] == X25519_PKCS8_PREFIX {
+    let res = if raw.len() == 48 && raw[..16] == X25519_PKCS8_PREFIX {
         scalar.copy_from_slice(&raw[16..48]);
-        return Ok(StaticSecret::from(scalar));
-    }
-    if raw.len() == 32 {
+        Ok(StaticSecret::from(scalar))
+    } else if raw.len() == 32 {
         scalar.copy_from_slice(&raw);
-        return Ok(StaticSecret::from(scalar));
-    }
-    Err(format!("Unsupported X25519 private key length: {}", raw.len()))
+        Ok(StaticSecret::from(scalar))
+    } else {
+        Err(format!("Unsupported X25519 private key length: {}", raw.len()))
+    };
+    raw.zeroize();
+    scalar.zeroize();
+    res
 }
 
 fn decode_x25519_public_raw(b64: &str) -> Result<PublicKey, String> {
@@ -211,15 +245,21 @@ pub fn seal_for_public_key(
     let mut eph_seed = [0u8; 32];
     fill_random(&mut eph_seed)?;
     let eph_secret = StaticSecret::from(eph_seed);
+    eph_seed.zeroize();
     let eph_pub = PublicKey::from(&eph_secret);
 
     let shared = eph_secret.diffie_hellman(&recipient_pub);
-    let aes_key = derive_sealed_aes_key(shared.as_bytes(), eph_pub.as_bytes(), info)?;
+    if !shared.was_contributory() {
+        return Err("Non-contributory X25519 public key".to_string());
+    }
+    let mut aes_key = derive_sealed_aes_key(shared.as_bytes(), eph_pub.as_bytes(), info)?;
 
     let mut iv = [0u8; 12];
     fill_random(&mut iv)?;
-    let cipher = Aes256Gcm::new_from_slice(&aes_key)
-        .map_err(|_| "Failed to init AES-256-GCM".to_string())?;
+    let cipher_res = Aes256Gcm::new_from_slice(&aes_key)
+        .map_err(|_| "Failed to init AES-256-GCM".to_string());
+    aes_key.zeroize();
+    let cipher = cipher_res?;
     let ct = cipher
         .encrypt(
             Nonce::from_slice(&iv),
@@ -249,16 +289,22 @@ pub fn open_sealed_envelope(
     let priv_secret = decode_x25519_private_pkcs8(recipient_private_key_pkcs8_b64)?;
     let eph_pub = decode_x25519_public_raw(&envelope.epk)?;
     let shared = priv_secret.diffie_hellman(&eph_pub);
-    let aes_key = derive_sealed_aes_key(shared.as_bytes(), eph_pub.as_bytes(), info)?;
+    if !shared.was_contributory() {
+        return Err("Non-contributory X25519 public key".to_string());
+    }
+    let mut aes_key = derive_sealed_aes_key(shared.as_bytes(), eph_pub.as_bytes(), info)?;
 
     let iv = from_base64_url(&envelope.iv)?;
     if iv.len() != 12 {
+        aes_key.zeroize();
         return Err("Invalid sealed envelope IV length".to_string());
     }
     let ct = from_base64_url(&envelope.ct)?;
 
-    let cipher = Aes256Gcm::new_from_slice(&aes_key)
-        .map_err(|_| "Failed to init AES-256-GCM".to_string())?;
+    let cipher_res = Aes256Gcm::new_from_slice(&aes_key)
+        .map_err(|_| "Failed to init AES-256-GCM".to_string());
+    aes_key.zeroize();
+    let cipher = cipher_res?;
     cipher
         .decrypt(
             Nonce::from_slice(&iv),
