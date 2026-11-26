@@ -1,10 +1,17 @@
-import { verifyAuthResponse } from '@nonepwd/agent-relay';
+import {
+  generateRendezvousCode,
+  isGetRendezvousMessage,
+  parseByteArray,
+  verifyAuthResponse,
+} from '@nonepwd/agent-relay';
 import type { CfServerEnv } from './types.js';
 
 const AUTH_TIMEOUT_MS = 5_000;
 const IDLE_TIMEOUT_MS = 120_000;
 const RENDEZVOUS_TTL_MS = 300_000;
-const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+const MAX_RENDEZVOUS_PER_FINGERPRINT = 8;
+const DESTINATION_BYTES = 32;
+const MAX_PAYLOAD_BYTES = 65_536;
 
 interface AuthAttachment {
   phase: 'auth';
@@ -54,7 +61,9 @@ export class AgentRelayHub implements DurableObject {
     };
     server.serializeAttachment(attachment);
     server.send(JSON.stringify({ AuthChallenge: attachment.challenge }));
-    await this.ctx.storage.setAlarm(Date.now() + 60_000);
+    if ((await this.ctx.storage.getAlarm()) === null) {
+      await this.ctx.storage.setAlarm(Date.now() + 60_000);
+    }
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -70,9 +79,9 @@ export class AgentRelayHub implements DurableObject {
         ws.close(1008, 'auth timeout');
         return;
       }
-      let parsed: Record<string, unknown>;
+      let parsed: unknown;
       try {
-        parsed = JSON.parse(message) as Record<string, unknown>;
+        parsed = JSON.parse(message);
       } catch {
         ws.close(1008, 'bad auth');
         return;
@@ -94,28 +103,61 @@ export class AgentRelayHub implements DurableObject {
 
     const ready: ReadyAttachment = { ...attachment, seenAt: Date.now() };
     ws.serializeAttachment(ready);
-    let parsed: Record<string, unknown>;
+    let parsed: unknown;
     try {
-      parsed = JSON.parse(message) as Record<string, unknown>;
+      parsed = JSON.parse(message);
     } catch {
       return;
     }
 
-    if ('GetRendezvous' in parsed) {
-      const code = freshCode();
+    if (isGetRendezvousMessage(parsed)) {
+      const now = Date.now();
+      const existing = await this.ctx.storage.list<StoredRendezvous>({ prefix: 'rv:' });
+      const activeForFp: Array<[string, StoredRendezvous]> = [];
+      for (const [k, v] of existing) {
+        if (v.used || now - v.createdAt > RENDEZVOUS_TTL_MS) {
+          await this.ctx.storage.delete(k);
+        } else if (v.fingerprint === ready.fingerprint) {
+          activeForFp.push([k, v]);
+        }
+      }
+      if (activeForFp.length >= MAX_RENDEZVOUS_PER_FINGERPRINT) {
+        activeForFp.sort((a, b) => a[1].createdAt - b[1].createdAt);
+        const excess = activeForFp.length - MAX_RENDEZVOUS_PER_FINGERPRINT + 1;
+        for (let i = 0; i < excess; i++) {
+          await this.ctx.storage.delete(activeForFp[i]![0]);
+        }
+      }
+      let code: string | null = null;
+      for (let i = 0; i < 16; i++) {
+        const candidate = generateRendezvousCode();
+        if (!existing.has(`rv:${candidate}`)) {
+          code = candidate;
+          break;
+        }
+      }
+      if (!code) return;
       const record: StoredRendezvous = {
         fingerprint: ready.fingerprint,
-        createdAt: Date.now(),
+        createdAt: now,
         used: false,
       };
       await this.ctx.storage.put(`rv:${code}`, record);
+      if ((await this.ctx.storage.getAlarm()) === null) {
+        await this.ctx.storage.setAlarm(now + 60_000);
+      }
       ws.send(JSON.stringify({ RendezvousInfo: { code } }));
       return;
     }
 
-    if ('GetIdentity' in parsed) {
-      const body = parsed.GetIdentity as { code?: string } | null;
-      const code = body?.code ?? '';
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    const msg = parsed as Record<string, unknown>;
+
+    if ('GetIdentity' in msg) {
+      const body = msg.GetIdentity;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return;
+      const code = (body as { code?: unknown }).code;
+      if (typeof code !== 'string' || code.length === 0 || code.length > 32) return;
       const record = await this.ctx.storage.get<StoredRendezvous>(`rv:${code}`);
       if (!record) return;
       if (record.used || Date.now() - record.createdAt > RENDEZVOUS_TTL_MS) {
@@ -138,15 +180,19 @@ export class AgentRelayHub implements DurableObject {
       return;
     }
 
-    if ('Send' in parsed) {
-      const body = parsed.Send as { destination?: number[]; payload?: number[] } | null;
-      if (!body?.destination || !body.payload) return;
-      const destination = bytesToHex(Uint8Array.from(body.destination));
+    if ('Send' in msg) {
+      const body = msg.Send;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return;
+      const sendObj = body as { destination?: unknown; payload?: unknown };
+      const destBytes = parseByteArray(sendObj.destination, DESTINATION_BYTES, DESTINATION_BYTES);
+      const payloadBytes = parseByteArray(sendObj.payload, 0, MAX_PAYLOAD_BYTES);
+      if (!destBytes || !payloadBytes) return;
+      const destination = bytesToHex(destBytes);
       const text = JSON.stringify({
         Send: {
           source: hexToBytes(ready.fingerprint),
-          destination: body.destination,
-          payload: body.payload,
+          destination: [...destBytes],
+          payload: [...payloadBytes],
         },
       });
       for (const peer of this.ctx.getWebSockets()) {
@@ -179,10 +225,15 @@ export class AgentRelayHub implements DurableObject {
       if (now - seen > limit) ws.close(1000, 'idle');
     }
     const keys = await this.ctx.storage.list<StoredRendezvous>({ prefix: 'rv:' });
+    let remainingKeys = 0;
     for (const [key, value] of keys) {
-      if (now - value.createdAt > RENDEZVOUS_TTL_MS) await this.ctx.storage.delete(key);
+      if (now - value.createdAt > RENDEZVOUS_TTL_MS) {
+        await this.ctx.storage.delete(key);
+      } else {
+        remainingKeys += 1;
+      }
     }
-    if (this.ctx.getWebSockets().length > 0) {
+    if (this.ctx.getWebSockets().length > 0 || remainingKeys > 0) {
       await this.ctx.storage.setAlarm(now + 60_000);
     }
   }
@@ -194,13 +245,6 @@ export class AgentRelayHub implements DurableObject {
     }
     return undefined;
   }
-}
-
-function freshCode(): string {
-  const raw = crypto.getRandomValues(new Uint8Array(9));
-  let code = '';
-  for (let i = 0; i < 9; i++) code += ALPHABET[raw[i]! % ALPHABET.length];
-  return `${code.slice(0, 3)}-${code.slice(3, 6)}-${code.slice(6)}`;
 }
 
 function bytesToHex(bytes: Uint8Array): string {

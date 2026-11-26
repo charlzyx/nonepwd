@@ -12,6 +12,8 @@ interface ConnectedClient {
 export interface WsHub {
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void;
   broadcast(event: Record<string, unknown>, options?: { vaultId?: string; ownerOnly?: boolean }): void;
+  closeByTokenHash(tokenHash: string): void;
+  closeByServiceAccount(serviceAccountId: string): void;
   clientCount(): number;
   closeAll(): void;
 }
@@ -57,8 +59,18 @@ export function createWsHub(db: NonePwdDb): WsHub {
 
     broadcast(event, options) {
       const serialized = JSON.stringify(event);
+      const now = Date.now();
       for (const client of clients) {
         if (client.ws.readyState !== WebSocket.OPEN) continue;
+        if (client.auth.expiresAt <= now) {
+          clients.delete(client);
+          try {
+            client.ws.close(1008, 'Session expired');
+          } catch {
+            // ignore
+          }
+          continue;
+        }
         if (options?.ownerOnly && client.auth.kind !== 'owner') continue;
         if (
           options?.vaultId &&
@@ -68,6 +80,35 @@ export function createWsHub(db: NonePwdDb): WsHub {
           continue;
         }
         client.ws.send(serialized);
+      }
+    },
+
+    closeByTokenHash(tokenHash: string) {
+      for (const client of clients) {
+        if (client.auth.tokenHash === tokenHash) {
+          clients.delete(client);
+          try {
+            client.ws.close(1008, 'Session revoked');
+          } catch {
+            // ignore
+          }
+        }
+      }
+    },
+
+    closeByServiceAccount(serviceAccountId: string) {
+      for (const client of clients) {
+        if (
+          client.auth.kind === 'service_account' &&
+          client.auth.serviceAccountId === serviceAccountId
+        ) {
+          clients.delete(client);
+          try {
+            client.ws.close(1008, 'Service account revoked');
+          } catch {
+            // ignore
+          }
+        }
       }
     },
 

@@ -1174,4 +1174,193 @@ describe('@nonepwd/cf-server', () => {
       mockConnectRef.fn = null;
     }
   });
+
+  it('re-encrypts IMAP passwords on webhook secret rotation, preserves manual R2 snapshots, restores account keyset, and enforces WS ACL & optimistic locking', async () => {
+    const { env, bucket, broadcasts } = createMockCfEnv();
+    const app = createCfApp();
+    const api = (path: string, init?: RequestInit) =>
+      app.fetch(new Request(`https://vault.example.com${path}`, init), env);
+
+    const secretKey = generateSecretKey();
+    const kdfSalt = toBase64Url(randomBytes(16));
+    const { masterUnlockKeyBytes, authVerifierB64 } = await deriveAccountKeys(
+      'RotatePass!42',
+      secretKey,
+      kdfSalt,
+      10_000
+    );
+    const rootKey = generateRawAesKey();
+    const emailKp = await generateEmailKeyPair();
+    const encRootKeyset = await encryptJson(
+      masterUnlockKeyBytes,
+      { rootKeyB64: toBase64Url(rootKey), emailPrivateKeyPkcs8B64: emailKp.privateKeyPkcs8B64 },
+      AAD.ROOT_KEYSET
+    );
+
+    // Reject out-of-range kdfIterations
+    const badKdf = await api('/api/auth/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'owner@example.com',
+        kdfSalt,
+        kdfIterations: 100,
+        authVerifier: authVerifierB64,
+        encryptedRootKeyset: encRootKeyset,
+        emailPublicKey: emailKp.publicKeyB64,
+      }),
+    });
+    expect(badKdf.status).toBe(400);
+
+    const setupRes = await api('/api/auth/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'owner@example.com',
+        kdfSalt,
+        kdfIterations: 10_000,
+        authVerifier: authVerifierB64,
+        encryptedRootKeyset: encRootKeyset,
+        emailPublicKey: emailKp.publicKeyB64,
+        vaults: [
+          { id: 'v1', encryptedKey: 'ek1', encryptedMeta: 'em1' },
+          { id: 'v2', encryptedKey: 'ek2', encryptedMeta: 'em2' },
+        ],
+      }),
+    });
+    expect(setupRes.status).toBe(201);
+    const { token, account: setupAcct } = (await setupRes.json()) as {
+      token: string;
+      account: { cfWebhookSecret: string };
+    };
+    const authHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+
+    // 1. Save IMAP account, rotate webhook secret, verify password still decrypts
+    const imapCreate = await api('/api/imap/accounts', {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        enabled: false,
+        host: 'imap.example.com',
+        port: 993,
+        tls: true,
+        username: 'user@example.com',
+        password: 'super-imap-secret',
+      }),
+    });
+    expect(imapCreate.status).toBe(201);
+    const { account: imapAcc } = (await imapCreate.json()) as { account: { id: string } };
+
+    const rotateRes = await api('/api/settings', {
+      method: 'PATCH',
+      headers: authHeaders,
+      body: JSON.stringify({ rotateWebhookSecret: true }),
+    });
+    expect(rotateRes.status).toBe(200);
+    const { settings: newSettings } = (await rotateRes.json()) as {
+      settings: { cfWebhookSecret: string };
+    };
+    expect(newSettings.cfWebhookSecret).not.toBe(setupAcct.cfWebhookSecret);
+
+    const { resolveImapTestParams } = await import('../src/imap.js');
+    const resolvedAfterRotate = await resolveImapTestParams(
+      env.DB,
+      newSettings.cfWebhookSecret,
+      { id: imapAcc.id }
+    );
+    expect(resolvedAfterRotate.password).toBe('super-imap-secret');
+
+    // 2. Manual R2 snapshot survives >30 scheduled snapshots
+    const { createEncryptedSnapshot, restoreEncryptedSnapshot } = await import('../src/r2-backup.js');
+    const manualSnap = await createEncryptedSnapshot(env, 'manual');
+    for (let i = 0; i < 33; i++) {
+      await createEncryptedSnapshot(env, 'scheduled');
+    }
+    const keysAfterPrune = bucket.keys().filter((k) => k.startsWith('backups/snapshot-'));
+    expect(keysAfterPrune).toContain(manualSnap.key);
+    expect(keysAfterPrune.filter((k) => k.includes('-scheduled-')).length).toBeLessThanOrEqual(30);
+
+    // 3. Restore onto fresh recovery server replaces account.encrypted_root_keyset
+    const recovery = createMockCfEnv();
+    const rawManual = await bucket.get(manualSnap.key);
+    await recovery.bucket.put(manualSnap.key, await rawManual!.text());
+    const recoveryApp = createCfApp();
+    const recApi = (path: string, init?: RequestInit) =>
+      recoveryApp.fetch(new Request(`https://recovery.example.com${path}`, init), recovery.env);
+    await recApi('/api/auth/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'temp@example.com',
+        kdfSalt,
+        kdfIterations: 10_000,
+        authVerifier: authVerifierB64,
+        encryptedRootKeyset: 'different-temp-keyset',
+        emailPublicKey: emailKp.publicKeyB64,
+      }),
+    });
+    await restoreEncryptedSnapshot(recovery.env, manualSnap.key);
+    const restoredAcct = await recovery.env.DB.prepare(
+      'SELECT email, encrypted_root_keyset FROM account WHERE id = 1'
+    ).first<{ email: string; encrypted_root_keyset: string }>();
+    expect(restoredAcct?.email).toBe('owner@example.com');
+    expect(restoredAcct?.encrypted_root_keyset).toBe(encRootKeyset);
+
+    // 4. Optimistic locking on PUT items + batch version increment & cross-vault 409
+    const put1 = await api('/api/vaults/v1/items/item-a', {
+      method: 'PUT',
+      headers: authHeaders,
+      body: JSON.stringify({ encryptedData: 'd1' }),
+    });
+    expect(put1.status).toBe(200);
+    const putConflict = await api('/api/vaults/v1/items/item-a', {
+      method: 'PUT',
+      headers: authHeaders,
+      body: JSON.stringify({ encryptedData: 'd2', expectedVersion: 99 }),
+    });
+    expect(putConflict.status).toBe(409);
+
+    const batchSameVault = await api('/api/vaults/v1/items/batch', {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ items: [{ id: 'item-a', encryptedData: 'd2' }] }),
+    });
+    expect(batchSameVault.status).toBe(201);
+    const batchJson = (await batchSameVault.json()) as { items: Array<{ version: number }> };
+    expect(batchJson.items[0]!.version).toBe(2);
+
+    const batchCrossVault = await api('/api/vaults/v2/items/batch', {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ items: [{ id: 'item-a', encryptedData: 'steal' }] }),
+    });
+    expect(batchCrossVault.status).toBe(409);
+
+    // 5. email.received WS broadcast must have ownerOnly: true
+    broadcasts.length = 0;
+    const simRes = await api('/api/emails/simulate', {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        from: 'noreply@test.com',
+        to: 'owner@example.com',
+        subject: 'Code 123456',
+        text: 'Your code is 123456',
+      }),
+    });
+    expect(simRes.status).toBe(201);
+    const emailBroadcast = broadcasts.find((b) => b.event.type === 'email.received');
+    expect(emailBroadcast?.options?.ownerOnly).toBe(true);
+
+    // 6. VaultWsHub rejects invalid x-np-auth-kind
+    const { VaultWsHub } = await import('../src/ws-hub.js');
+    const hub = new VaultWsHub(
+      { acceptWebSocket() {}, getWebSockets: () => [] } as unknown as DurableObjectState,
+      env
+    );
+    const badWsUpgrade = await hub.fetch(
+      new Request('https://do.internal/upgrade', { headers: { upgrade: 'websocket' } })
+    );
+    expect(badWsUpgrade.status).toBe(401);
+  });
 });

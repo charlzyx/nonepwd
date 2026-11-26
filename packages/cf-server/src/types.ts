@@ -5,6 +5,7 @@ export interface CfServerEnv {
   AGENT_RELAY?: DurableObjectNamespace;
   ASSETS?: { fetch(request: Request): Promise<Response> };
   FORWARD_TO_EMAIL?: string;
+  IMAP_ENCRYPTION_KEY?: string;
 }
 
 export type EmailFilterMode = 'allow' | 'deny';

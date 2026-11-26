@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use hmac::{Hmac, Mac};
@@ -21,11 +22,13 @@ const SCRYPT_KEYLEN: usize = 32;
 pub enum AuthContext {
     Owner {
         token_hash: String,
+        expires_at_ms: i64,
     },
     ServiceAccount {
         token_hash: String,
         service_account_id: String,
         allowed_vault_ids: HashSet<String>,
+        expires_at_ms: i64,
     },
 }
 
@@ -39,8 +42,24 @@ impl AuthContext {
 
     pub fn token_hash(&self) -> &str {
         match self {
-            AuthContext::Owner { token_hash } => token_hash,
+            AuthContext::Owner { token_hash, .. } => token_hash,
             AuthContext::ServiceAccount { token_hash, .. } => token_hash,
+        }
+    }
+
+    pub fn expires_at_ms(&self) -> i64 {
+        match self {
+            AuthContext::Owner { expires_at_ms, .. } => *expires_at_ms,
+            AuthContext::ServiceAccount { expires_at_ms, .. } => *expires_at_ms,
+        }
+    }
+
+    pub fn service_account_id(&self) -> Option<&str> {
+        match self {
+            AuthContext::Owner { .. } => None,
+            AuthContext::ServiceAccount {
+                service_account_id, ..
+            } => Some(service_account_id),
         }
     }
 }
@@ -176,20 +195,52 @@ pub fn hash_secret_with_salt(secret: &str, salt: &[u8]) -> String {
 
 pub fn verify_secret(secret: &str, stored: &str) -> bool {
     let parts: Vec<&str> = stored.split('$').collect();
-    if parts.len() != 3 || parts[0] != "s1" {
-        return false;
+    if parts.len() == 3 && parts[0] == "s1" {
+        let Ok(salt) = from_base64_url(parts[1]) else {
+            return false;
+        };
+        let Ok(expected) = from_base64_url(parts[2]) else {
+            return false;
+        };
+        if salt.len() < 8 || expected.len() < 32 || expected.len() > 128 {
+            return false;
+        }
+        let actual = scrypt_derive(secret.as_bytes(), &salt, expected.len());
+        return constant_time_eq(&actual, &expected);
     }
-    let Ok(salt) = from_base64_url(parts[1]) else {
-        return false;
-    };
-    let Ok(expected) = from_base64_url(parts[2]) else {
-        return false;
-    };
-    if expected.is_empty() || expected.len() > 128 {
-        return false;
+    if parts.len() == 4 && parts[0] == "pbkdf2" {
+        let Ok(iterations) = parts[1].parse::<u32>() else {
+            return false;
+        };
+        if !(1_000..=1_000_000).contains(&iterations) {
+            return false;
+        }
+        let Ok(salt) = from_base64_url(parts[2]) else {
+            return false;
+        };
+        let Ok(expected) = from_base64_url(parts[3]) else {
+            return false;
+        };
+        if salt.len() < 8 || expected.len() < 32 || expected.len() > 128 {
+            return false;
+        }
+        let mut actual = vec![0u8; expected.len()];
+        pbkdf2_hmac::<Sha256>(secret.as_bytes(), &salt, iterations, &mut actual);
+        return constant_time_eq(&actual, &expected);
     }
-    let actual = scrypt_derive(secret.as_bytes(), &salt, expected.len());
-    constant_time_eq(&actual, &expected)
+    false
+}
+
+pub async fn hash_secret_async(secret: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || hash_secret(&secret))
+        .await
+        .map_err(|e| format!("Hashing task failed: {e}"))?
+}
+
+pub async fn verify_secret_async(secret: String, stored: String) -> bool {
+    tokio::task::spawn_blocking(move || verify_secret(&secret, &stored))
+        .await
+        .unwrap_or(false)
 }
 
 pub fn hash_session_token(token: &str) -> String {
@@ -228,11 +279,10 @@ pub fn create_session(
     Ok(raw_token)
 }
 
-fn is_expired(expires_at: &str) -> bool {
-    match DateTime::parse_from_rfc3339(expires_at) {
-        Ok(dt) => dt.timestamp_millis() < Utc::now().timestamp_millis(),
-        Err(_) => true,
-    }
+fn parse_expires_at_ms(expires_at: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(expires_at)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
 }
 
 pub fn authenticate_token(db: &NonePwdDb, raw_token: Option<&str>) -> Option<AuthContext> {
@@ -254,7 +304,14 @@ pub fn authenticate_token(db: &NonePwdDb, raw_token: Option<&str>) -> Option<Aut
         .flatten();
 
     let (kind, sa_id, expires_at) = row?;
-    if is_expired(&expires_at) {
+    let Some(expires_at_ms) = parse_expires_at_ms(&expires_at) else {
+        let _ = conn.execute(
+            "DELETE FROM sessions WHERE token_hash = ?1",
+            params![token_hash],
+        );
+        return None;
+    };
+    if expires_at_ms < Utc::now().timestamp_millis() {
         let _ = conn.execute(
             "DELETE FROM sessions WHERE token_hash = ?1",
             params![token_hash],
@@ -263,7 +320,10 @@ pub fn authenticate_token(db: &NonePwdDb, raw_token: Option<&str>) -> Option<Aut
     }
 
     if kind == "owner" {
-        return Some(AuthContext::Owner { token_hash });
+        return Some(AuthContext::Owner {
+            token_hash,
+            expires_at_ms,
+        });
     }
 
     let sa_id = sa_id?;
@@ -300,6 +360,7 @@ pub fn authenticate_token(db: &NonePwdDb, raw_token: Option<&str>) -> Option<Aut
         token_hash,
         service_account_id: sa_id,
         allowed_vault_ids,
+        expires_at_ms,
     })
 }
 
@@ -356,4 +417,39 @@ pub fn verify_webhook_hmac(
         .to_ascii_lowercase();
 
     constant_time_eq(provided.as_bytes(), expected_hex.as_bytes())
+}
+
+const MAX_REPLAY_CACHE_SIZE: usize = 4096;
+
+pub fn claim_webhook_signature(
+    timestamp_header: &str,
+    signature_header: &str,
+    ttl_secs: i64,
+) -> bool {
+    static CACHE: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = cache.lock().unwrap_or_else(|p| p.into_inner());
+    let now = Utc::now().timestamp();
+    map.retain(|_, exp| *exp > now);
+
+    let normalized_sig = signature_header
+        .strip_prefix("v1=")
+        .unwrap_or(signature_header)
+        .trim()
+        .to_ascii_lowercase();
+    let key = format!("{}.{normalized_sig}", timestamp_header.trim());
+    if map.contains_key(&key) {
+        return false;
+    }
+    if map.len() >= MAX_REPLAY_CACHE_SIZE {
+        if let Some(oldest_key) = map
+            .iter()
+            .min_by_key(|(_, exp)| *exp)
+            .map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest_key);
+        }
+    }
+    map.insert(key, now + ttl_secs);
+    true
 }

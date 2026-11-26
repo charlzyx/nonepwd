@@ -119,6 +119,114 @@ describe('agent-access relay', () => {
     expect(liar.closed).toBe(true);
     expect(liarConn.isAuthenticated()).toBe(false);
   });
+
+  it('handles unit-variant GetRendezvous string, object form, primitives, pseudo-array OOM payloads, CBOR limits, and rendezvous caps', async () => {
+    const relay = new AgentRelay();
+    const a = new FakeSocket();
+    const b = new FakeSocket();
+    const aConn = relay.open(a);
+    const bConn = relay.open(b);
+
+    // Non-object JSON in auth phase drops cleanly without throwing TypeError
+    const badAuth = new FakeSocket();
+    const badAuthConn = relay.open(badAuth);
+    badAuthConn.onMessage('null');
+    await waitFor(() => badAuth.closed);
+    expect(badAuth.closed).toBe(true);
+
+    // Pseudo-array with 2 GiB length in AuthResponse returns null immediately (no OOM)
+    const challenge = Uint8Array.from(
+      (JSON.parse(a.sent[0]!) as { AuthChallenge: number[] }).AuthChallenge
+    );
+    expect(
+      await verifyAuthResponse(challenge, {
+        AuthResponse: [
+          { cose_key_bytes: { length: 2_147_483_647 } },
+          { cose_sign1_bytes: { length: 2_147_483_647 } },
+        ],
+      })
+    ).toBeNull();
+    expect(await verifyAuthResponse(challenge, null)).toBeNull();
+    expect(await verifyAuthResponse(challenge, 'GetRendezvous')).toBeNull();
+
+    // Reject CBOR nesting deeper than 4 and wrong kty/crv
+    const deepCbor = [0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x00];
+    expect(
+      await verifyAuthResponse(challenge, {
+        AuthResponse: [{ cose_key_bytes: deepCbor }, { cose_sign1_bytes: [0x84] }],
+      })
+    ).toBeNull();
+
+    const aKeys = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign']);
+    const bKeys = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign']);
+    const aPub = new Uint8Array(await crypto.subtle.exportKey('raw', aKeys.publicKey));
+    const bPub = new Uint8Array(await crypto.subtle.exportKey('raw', bKeys.publicKey));
+    const bChallenge = Uint8Array.from(
+      (JSON.parse(b.sent[0]!) as { AuthChallenge: number[] }).AuthChallenge
+    );
+    const aAuth = await signChallenge(aKeys.privateKey, aPub, challenge);
+    const bAuth = await signChallenge(bKeys.privateKey, bPub, bChallenge);
+
+    // Mutate kty (byte index 2: 0x01 -> 0x02) -> must be rejected
+    const badKty = JSON.parse(aAuth.authMessage) as {
+      AuthResponse: [{ cose_key_bytes: number[] }, { cose_sign1_bytes: number[] }];
+    };
+    badKty.AuthResponse[0].cose_key_bytes[2] = 0x02;
+    expect(await verifyAuthResponse(challenge, badKty)).toBeNull();
+
+    // Mutate crv (byte index 6: 0x27 -> 0x06) -> must be rejected
+    const badCrv = JSON.parse(aAuth.authMessage) as {
+      AuthResponse: [{ cose_key_bytes: number[] }, { cose_sign1_bytes: number[] }];
+    };
+    badCrv.AuthResponse[0].cose_key_bytes[6] = 0x06;
+    expect(await verifyAuthResponse(challenge, badCrv)).toBeNull();
+
+    aConn.onMessage(aAuth.authMessage);
+    bConn.onMessage(bAuth.authMessage);
+    await waitFor(() => aConn.isAuthenticated() && bConn.isAuthenticated());
+
+    // Ready phase primitives & pseudo-array Send must not crash or close honest socket
+    aConn.onMessage('null');
+    aConn.onMessage('123');
+    aConn.onMessage(
+      JSON.stringify({
+        Send: { destination: { length: 2_147_483_647 }, payload: { length: 2_147_483_647 } },
+      })
+    );
+
+    // Unit-variant string "GetRendezvous" (as serialized by ap-relay-protocol)
+    aConn.onMessage(JSON.stringify('GetRendezvous'));
+    await waitFor(() => a.sent.length === 2);
+    const rv1 = (JSON.parse(a.sent[1]!) as { RendezvousInfo: { code: string } }).RendezvousInfo
+      .code;
+    expect(rv1).toMatch(/^[A-Z0-9]{3}-[A-Z0-9]{3}-[A-Z0-9]{3}$/);
+
+    // Object form { GetRendezvous: null } also works
+    aConn.onMessage(JSON.stringify({ GetRendezvous: null }));
+    await waitFor(() => a.sent.length === 3);
+    const rv2 = (JSON.parse(a.sent[2]!) as { RendezvousInfo: { code: string } }).RendezvousInfo
+      .code;
+    expect(rv2).toMatch(/^[A-Z0-9]{3}-[A-Z0-9]{3}-[A-Z0-9]{3}$/);
+
+    // Request 10 more codes so oldest codes get evicted by per-fingerprint cap (8)
+    for (let i = 0; i < 10; i++) {
+      aConn.onMessage(JSON.stringify('GetRendezvous'));
+    }
+    await waitFor(() => a.sent.length === 13);
+    const latestCode = (JSON.parse(a.sent[12]!) as { RendezvousInfo: { code: string } })
+      .RendezvousInfo.code;
+
+    // Oldest code (rv1) was evicted, latest code still resolves identity
+    bConn.onMessage(JSON.stringify({ GetIdentity: { code: rv1 } }));
+    bConn.onMessage(JSON.stringify({ GetIdentity: { code: latestCode } }));
+    await waitFor(() => b.sent.length === 2);
+    const idInfo = JSON.parse(b.sent[1]!) as {
+      IdentityInfo: { fingerprint: number[]; identity: { cose_key_bytes: number[] } };
+    };
+    expect(bytesToHex(Uint8Array.from(idInfo.IdentityInfo.fingerprint))).toBe(aAuth.fingerprintHex);
+    expect(a.closed).toBe(false);
+    expect(b.closed).toBe(false);
+  });
 });
 
 async function sha256(bytes: Uint8Array): Promise<Uint8Array> {

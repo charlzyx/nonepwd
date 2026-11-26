@@ -5,11 +5,19 @@ import type { CfServerEnv } from './types.js';
 interface WsAttachment {
   kind: 'owner' | 'service_account';
   allowedVaultIds: string[];
+  tokenHash: string;
+  serviceAccountId?: string;
+  expiresAt: number;
 }
 
 export interface BroadcastOptions {
   vaultId?: string;
   ownerOnly?: boolean;
+}
+
+export interface RevokeWsFilter {
+  tokenHash?: string;
+  serviceAccountId?: string;
 }
 
 /**
@@ -40,8 +48,21 @@ export class VaultWsHub implements DurableObject {
       }
 
       const kindHeader = request.headers.get('x-np-auth-kind');
-      const kind: WsAttachment['kind'] =
-        kindHeader === 'service_account' ? 'service_account' : 'owner';
+      if (kindHeader !== 'owner' && kindHeader !== 'service_account') {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      const kind: WsAttachment['kind'] = kindHeader;
+
+      const tokenHash = request.headers.get('x-np-token-hash')?.trim() ?? '';
+      const expiresAtRaw = request.headers.get('x-np-expires-at');
+      const expiresAt = expiresAtRaw ? Number(expiresAtRaw) : Number.NaN;
+      const serviceAccountId = request.headers.get('x-np-service-account-id')?.trim() || undefined;
+      if (!tokenHash || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      if (kind === 'service_account' && !serviceAccountId) {
+        return new Response('Unauthorized', { status: 401 });
+      }
 
       let allowedVaultIds: string[] = [];
       const vaultsHeader = request.headers.get('x-np-allowed-vaults');
@@ -64,7 +85,13 @@ export class VaultWsHub implements DurableObject {
       const server = pair[1];
 
       this.ctx.acceptWebSocket(server);
-      const attachment: WsAttachment = { kind, allowedVaultIds };
+      const attachment: WsAttachment = {
+        kind,
+        allowedVaultIds,
+        tokenHash,
+        ...(serviceAccountId ? { serviceAccountId } : {}),
+        expiresAt,
+      };
       server.serializeAttachment(attachment);
 
       try {
@@ -82,6 +109,28 @@ export class VaultWsHub implements DurableObject {
       return new Response(null, { status: 101, webSocket: client });
     }
 
+    if (url.pathname === '/revoke' && request.method === 'POST') {
+      const filter = (await request.json()) as RevokeWsFilter;
+      let closed = 0;
+      for (const ws of this.ctx.getWebSockets()) {
+        const attachment = ws.deserializeAttachment() as WsAttachment | null;
+        if (!attachment) continue;
+        const matchToken = Boolean(filter.tokenHash && attachment.tokenHash === filter.tokenHash);
+        const matchSa = Boolean(
+          filter.serviceAccountId && attachment.serviceAccountId === filter.serviceAccountId
+        );
+        if (matchToken || matchSa) {
+          try {
+            ws.close(1008, 'Session revoked');
+          } catch {
+            // ignore
+          }
+          closed += 1;
+        }
+      }
+      return Response.json({ closed });
+    }
+
     if (url.pathname === '/broadcast' && request.method === 'POST') {
       const body = (await request.json()) as {
         event?: Record<string, unknown>;
@@ -93,13 +142,19 @@ export class VaultWsHub implements DurableObject {
 
       const serialized = JSON.stringify(body.event);
       const options = body.options;
+      const now = Date.now();
       let delivered = 0;
 
       for (const ws of this.ctx.getWebSockets()) {
-        const attachment = (ws.deserializeAttachment() as WsAttachment | null) ?? {
-          kind: 'owner',
-          allowedVaultIds: [],
-        };
+        const attachment = ws.deserializeAttachment() as WsAttachment | null;
+        if (!attachment || !Number.isFinite(attachment.expiresAt) || attachment.expiresAt <= now) {
+          try {
+            ws.close(1008, 'Session expired');
+          } catch {
+            // ignore
+          }
+          continue;
+        }
 
         if (options?.ownerOnly && attachment.kind !== 'owner') {
           continue;
@@ -192,5 +247,23 @@ export async function broadcastEvent(
     });
   } catch {
     // WebSocket broadcast is best-effort so core D1 mutations never fail
+  }
+}
+
+export async function revokeWsSessions(
+  env: CfServerEnv,
+  filter: RevokeWsFilter
+): Promise<void> {
+  if (!env.WS_HUB) return;
+  try {
+    const id = env.WS_HUB.idFromName('global');
+    const stub = env.WS_HUB.get(id);
+    await stub.fetch('https://do.internal/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(filter),
+    });
+  } catch {
+    // Best-effort WS session revocation
   }
 }

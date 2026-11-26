@@ -3,6 +3,7 @@ const textEncoder = new TextEncoder();
 export interface OwnerAuthContext {
   kind: 'owner';
   tokenHash: string;
+  expiresAt: number;
 }
 
 export interface ServiceAccountAuthContext {
@@ -10,6 +11,7 @@ export interface ServiceAccountAuthContext {
   tokenHash: string;
   serviceAccountId: string;
   allowedVaultIds: Set<string>;
+  expiresAt: number;
 }
 
 export type AuthContext = OwnerAuthContext | ServiceAccountAuthContext;
@@ -243,7 +245,7 @@ export async function verifySecret(secret: string, stored: string): Promise<bool
     }
     const salt = base64UrlToBytes(parts[2]);
     const expected = base64UrlToBytes(parts[3]);
-    if (!salt || !expected || expected.length === 0 || expected.length > 128) return false;
+    if (!salt || !expected || salt.length < 8 || expected.length < 32 || expected.length > 128) return false;
     const actual = await pbkdf2Sha256(
       textEncoder.encode(secret),
       salt,
@@ -256,7 +258,7 @@ export async function verifySecret(secret: string, stored: string): Promise<bool
   if (parts[0] === 's1' && parts.length === 3) {
     const salt = base64UrlToBytes(parts[1]);
     const expected = base64UrlToBytes(parts[2]);
-    if (!salt || !expected || expected.length === 0 || expected.length > 128) return false;
+    if (!salt || !expected || salt.length < 8 || expected.length < 32 || expected.length > 128) return false;
     const actual = await scryptVerifyDerive(textEncoder.encode(secret), salt, expected.length);
     return constantTimeEqualBytes(actual, expected);
   }
@@ -325,7 +327,7 @@ export async function authenticateToken(
   }
 
   if (row.kind === 'owner') {
-    return { kind: 'owner', tokenHash };
+    return { kind: 'owner', tokenHash, expiresAt: expMs };
   }
 
   if (!row.service_account_id) return null;
@@ -349,6 +351,7 @@ export async function authenticateToken(
     tokenHash,
     serviceAccountId: row.service_account_id,
     allowedVaultIds: new Set((vaultsRes.results ?? []).map((v) => v.vault_id)),
+    expiresAt: expMs,
   };
 }
 
@@ -395,4 +398,29 @@ export async function verifyWebhookHmac(
   const providedBytes = textEncoder.encode(providedStr);
 
   return constantTimeEqualBytes(providedBytes, expectedBytes);
+}
+
+const webhookReplayCache = new Map<string, number>();
+const MAX_REPLAY_CACHE_SIZE = 4096;
+
+export function claimWebhookSignature(
+  timestampHeader: string,
+  signatureHeader: string,
+  ttlMs: number = 310_000
+): boolean {
+  const now = Date.now();
+  for (const [k, exp] of webhookReplayCache) {
+    if (exp <= now) webhookReplayCache.delete(k);
+  }
+  const normalizedSig = signatureHeader.startsWith('v1=')
+    ? signatureHeader.slice(3).trim().toLowerCase()
+    : signatureHeader.trim().toLowerCase();
+  const key = `${timestampHeader.trim()}.${normalizedSig}`;
+  if (webhookReplayCache.has(key)) return false;
+  if (webhookReplayCache.size >= MAX_REPLAY_CACHE_SIZE) {
+    const oldest = webhookReplayCache.keys().next().value;
+    if (oldest !== undefined) webhookReplayCache.delete(oldest);
+  }
+  webhookReplayCache.set(key, now + ttlMs);
+  return true;
 }

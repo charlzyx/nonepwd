@@ -14,6 +14,7 @@ import {
 } from '@nonepwd/core';
 import {
   authenticateToken,
+  claimWebhookSignature,
   createSession,
   extractBearerToken,
   hashSecret,
@@ -149,15 +150,14 @@ export function createNonePwdServer(
 
   app.get('/api/auth/params', (c) => {
     const row = db.sqlite
-      .prepare('SELECT email, kdf_salt, kdf_iterations FROM account WHERE id = 1')
-      .get() as { email: string; kdf_salt: string; kdf_iterations: number } | undefined;
+      .prepare('SELECT kdf_salt, kdf_iterations FROM account WHERE id = 1')
+      .get() as { kdf_salt: string; kdf_iterations: number } | undefined;
 
     if (!row) {
       return c.json({ initialized: false });
     }
     return c.json({
       initialized: true,
-      email: row.email,
       kdfSalt: row.kdf_salt,
       kdfIterations: row.kdf_iterations,
     });
@@ -184,6 +184,15 @@ export function createNonePwdServer(
       !body.emailPublicKey
     ) {
       return c.json({ error: 'Missing required setup fields' }, 400);
+    }
+
+    if (
+      typeof body.kdfIterations !== 'number' ||
+      !Number.isInteger(body.kdfIterations) ||
+      body.kdfIterations < 1_000 ||
+      body.kdfIterations > 5_000_000
+    ) {
+      return c.json({ error: 'kdfIterations must be an integer between 1000 and 5000000' }, 400);
     }
 
     const now = new Date().toISOString();
@@ -341,6 +350,7 @@ export function createNonePwdServer(
     const auth = getAuth(c);
     if (auth) {
       db.sqlite.prepare('DELETE FROM sessions WHERE token_hash = ?').run(auth.tokenHash);
+      wsHub.closeByTokenHash(auth.tokenHash);
     }
     return c.json({ ok: true });
   });
@@ -623,9 +633,16 @@ export function createNonePwdServer(
     }
 
     const now = new Date().toISOString();
-    const stmt = db.sqlite.prepare(
-      `INSERT OR REPLACE INTO items (id, vault_id, encrypted_data, created_at, updated_at, version)
+    const selectStmt = db.sqlite.prepare(
+      'SELECT vault_id, created_at, version FROM items WHERE id = ?'
+    );
+    const insertStmt = db.sqlite.prepare(
+      `INSERT INTO items (id, vault_id, encrypted_data, created_at, updated_at, version)
        VALUES (?, ?, ?, ?, ?, 1)`
+    );
+    const updateStmt = db.sqlite.prepare(
+      `UPDATE items SET encrypted_data = ?, updated_at = ?, version = ?
+       WHERE id = ? AND vault_id = ?`
     );
 
     const inserted: Array<{
@@ -640,21 +657,45 @@ export function createNonePwdServer(
     db.sqlite.exec('BEGIN IMMEDIATE');
     try {
       for (const entry of body.items) {
-        const id = entry.id ?? randomId();
+        const id = entry.id?.trim() || randomId();
         const encryptedData = entry.encryptedData!;
-        stmt.run(id, vaultId, encryptedData, now, now);
-        inserted.push({
-          id,
-          vaultId,
-          encryptedData,
-          createdAt: now,
-          updatedAt: now,
-          version: 1,
-        });
+        const existing = selectStmt.get(id) as
+          | { vault_id: string; created_at: string; version: number }
+          | undefined;
+        if (existing) {
+          if (existing.vault_id !== vaultId) {
+            db.sqlite.exec('ROLLBACK');
+            return c.json({ error: `Item ${id} belongs to another vault` }, 409);
+          }
+          const nextVersion = existing.version + 1;
+          updateStmt.run(encryptedData, now, nextVersion, id, vaultId);
+          inserted.push({
+            id,
+            vaultId,
+            encryptedData,
+            createdAt: existing.created_at,
+            updatedAt: now,
+            version: nextVersion,
+          });
+        } else {
+          insertStmt.run(id, vaultId, encryptedData, now, now);
+          inserted.push({
+            id,
+            vaultId,
+            encryptedData,
+            createdAt: now,
+            updatedAt: now,
+            version: 1,
+          });
+        }
       }
       db.sqlite.exec('COMMIT');
     } catch (err) {
-      db.sqlite.exec('ROLLBACK');
+      try {
+        db.sqlite.exec('ROLLBACK');
+      } catch {
+        // ignore
+      }
       throw err;
     }
 
@@ -668,7 +709,7 @@ export function createNonePwdServer(
 
     const vaultId = c.req.param('vaultId');
     const itemId = c.req.param('itemId');
-    const body = (await c.req.json()) as { encryptedData?: string };
+    const body = (await c.req.json()) as { encryptedData?: string; expectedVersion?: number };
     if (!body.encryptedData) {
       return c.json({ error: 'Missing encryptedData' }, 400);
     }
@@ -681,20 +722,41 @@ export function createNonePwdServer(
     let version = 1;
     let createdAt = now;
     if (existing) {
+      if (body.expectedVersion !== undefined && existing.version !== body.expectedVersion) {
+        return c.json(
+          { error: 'Version conflict', currentVersion: existing.version },
+          409
+        );
+      }
       version = existing.version + 1;
       createdAt = existing.created_at;
-      db.sqlite
-        .prepare('UPDATE items SET encrypted_data = ?, updated_at = ?, version = ? WHERE id = ?')
-        .run(body.encryptedData, now, version, itemId);
+      const updateRes = db.sqlite
+        .prepare(
+          'UPDATE items SET encrypted_data = ?, updated_at = ?, version = ? WHERE id = ? AND vault_id = ? AND version = ?'
+        )
+        .run(body.encryptedData, now, version, itemId, vaultId, existing.version);
+      if (updateRes.changes === 0) {
+        return c.json({ error: 'Version conflict' }, 409);
+      }
     } else {
+      if (body.expectedVersion !== undefined && body.expectedVersion !== 0) {
+        return c.json({ error: 'Version conflict', currentVersion: 0 }, 409);
+      }
       const vault = db.sqlite.prepare('SELECT id FROM vaults WHERE id = ?').get(vaultId);
       if (!vault) return c.json({ error: 'Vault not found' }, 404);
-      db.sqlite
-        .prepare(
-          `INSERT INTO items (id, vault_id, encrypted_data, created_at, updated_at, version)
-           VALUES (?, ?, ?, ?, ?, 1)`
-        )
-        .run(itemId, vaultId, body.encryptedData, now, now);
+      try {
+        db.sqlite
+          .prepare(
+            `INSERT INTO items (id, vault_id, encrypted_data, created_at, updated_at, version)
+             VALUES (?, ?, ?, ?, ?, 1)`
+          )
+          .run(itemId, vaultId, body.encryptedData, now, now);
+      } catch (err) {
+        return c.json(
+          { error: err instanceof Error ? err.message : 'Item conflict' },
+          409
+        );
+      }
     }
 
     const item = {
@@ -1005,6 +1067,7 @@ export function createNonePwdServer(
     db.sqlite.prepare('DELETE FROM sessions WHERE service_account_id = ?').run(id);
     const res = db.sqlite.prepare('DELETE FROM service_accounts WHERE id = ?').run(id);
     if (res.changes === 0) return c.json({ error: 'Service Account not found' }, 404);
+    wsHub.closeByServiceAccount(id);
     return c.json({ ok: true });
   });
 
@@ -1166,6 +1229,10 @@ export function createNonePwdServer(
       )
     ) {
       return c.json({ error: 'Invalid webhook signature' }, 401);
+    }
+
+    if (!claimWebhookSignature(timestampHeader!, signatureHeader!)) {
+      return c.json({ error: 'Webhook signature replay detected' }, 401);
     }
 
     const contentType = (c.req.header('content-type') ?? '').toLowerCase();

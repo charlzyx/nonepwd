@@ -361,7 +361,7 @@ async fn opens_copy_of_db_created_by_node_server() {
     let (st_params, params_json) = http_json(srv.addr, "GET", "/api/auth/params", None, None).await;
     assert_eq!(st_params, 200);
     assert_eq!(params_json["initialized"], true);
-    assert_eq!(params_json["email"], "node-owner@example.com");
+    assert!(params_json.get("email").is_none());
     assert_eq!(params_json["kdfIterations"], 600_000);
 
     // Existing Node session token must authenticate directly on /api/sync
@@ -800,6 +800,32 @@ async fn full_api_ws_webhook_email_filter_batch_and_imap_idle_e2e() {
         }
     });
 
+    // Verify private/loopback IMAP host is blocked by default (SSRF protection)
+    std::env::remove_var("NONEPWD_ALLOW_PRIVATE_IMAP");
+    let (st_ssrf, ssrf_json) = http_json(
+        srv.addr,
+        "POST",
+        "/api/imap/test",
+        Some(&token),
+        Some(json!({
+            "host": "127.0.0.1",
+            "port": imap_port,
+            "tls": false,
+            "username": "me@example.com",
+            "password": "app-password-123"
+        })),
+    )
+    .await;
+    assert_eq!(st_ssrf, 200);
+    assert_eq!(ssrf_json["ok"], false);
+    assert!(ssrf_json["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("blocked"));
+
+    // Allow loopback IMAP explicitly for local mock test
+    std::env::set_var("NONEPWD_ALLOW_PRIVATE_IMAP", "1");
+
     let (st_imap_test, imap_test_json) = http_json(
         srv.addr,
         "POST",
@@ -865,4 +891,267 @@ async fn full_api_ws_webhook_email_filter_batch_and_imap_idle_e2e() {
     srv.shutdown().await;
     let _ = fs::remove_dir_all(&data_dir);
     let _ = fs::remove_dir_all(&web_dir);
+}
+
+#[tokio::test]
+async fn hardening_ws_acl_revocation_optimistic_lock_pbkdf2_host_validation_and_replay() {
+    use nonepwd_server::auth::verify_secret;
+
+    // Empty/short hashes rejected; pbkdf2$ supported
+    assert!(!verify_secret("secret", "s1$aaaaaaaaaaaaaaaaaaaaaa$"));
+    let salt = [7u8; 16];
+    let mut derived = [0u8; 32];
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(b"cf-migrated-secret", &salt, 10_000, &mut derived);
+    let pbkdf2_hash = format!(
+        "pbkdf2$10000${}${}",
+        to_base64_url(&salt),
+        to_base64_url(&derived)
+    );
+    assert!(verify_secret("cf-migrated-secret", &pbkdf2_hash));
+    assert!(!verify_secret("wrong-secret", &pbkdf2_hash));
+
+    let data_dir = make_temp_dir("np-rust-hardening");
+    let srv = start_server(ServerOptions {
+        host: "127.0.0.1".into(),
+        port: 0,
+        data_dir: Some(data_dir.clone()),
+        web_dist: None,
+        bin_dist: None,
+    })
+    .await
+    .unwrap();
+
+    // /install.sh rejects malicious Host header
+    let mut stream = tokio::net::TcpStream::connect(srv.addr).await.unwrap();
+    stream
+        .write_all(b"GET /install.sh HTTP/1.1\r\nHost: evil.com\";id;#\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp_buf = Vec::new();
+    let _ = stream.read_to_end(&mut resp_buf).await;
+    let resp_str = String::from_utf8_lossy(&resp_buf);
+    assert!(resp_str.starts_with("HTTP/1.1 400"), "got: {resp_str}");
+
+    let sk = generate_secret_key().unwrap();
+    let kdf_salt = to_base64_url(&random_bytes(16).unwrap());
+    let (muk, verifier) = derive_account_keys_raw("Pass!999", &sk, &kdf_salt, 10_000).unwrap();
+    let root_key = generate_raw_aes_key().unwrap();
+    let email_kp = generate_email_key_pair().unwrap();
+    let enc_root = encrypt_json(
+        &muk,
+        &RootKeysetPayload {
+            root_key_b64: to_base64_url(&root_key),
+            email_private_key_pkcs8_b64: email_kp.private_key_pkcs8_b64.clone(),
+        },
+        Some(aad::ROOT_KEYSET),
+    )
+    .unwrap();
+
+    // kdfIterations out of range -> 400
+    let (st_bad_kdf, _) = http_json(
+        srv.addr,
+        "POST",
+        "/api/auth/setup",
+        None,
+        Some(json!({
+            "email": "sec@example.com",
+            "kdfSalt": kdf_salt,
+            "kdfIterations": 100,
+            "authVerifier": verifier,
+            "encryptedRootKeyset": enc_root,
+            "emailPublicKey": email_kp.public_key_b64,
+        })),
+    )
+    .await;
+    assert_eq!(st_bad_kdf, 400);
+
+    let (st_setup, setup_json) = http_json(
+        srv.addr,
+        "POST",
+        "/api/auth/setup",
+        None,
+        Some(json!({
+            "email": "sec@example.com",
+            "kdfSalt": kdf_salt,
+            "kdfIterations": 10_000,
+            "authVerifier": verifier,
+            "encryptedRootKeyset": enc_root,
+            "emailPublicKey": email_kp.public_key_b64,
+            "vaults": [
+                { "id": "v1", "encryptedKey": "ek1", "encryptedMeta": "em1" },
+                { "id": "v2", "encryptedKey": "ek2", "encryptedMeta": "em2" }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(st_setup, 201);
+    let token = setup_json["token"].as_str().unwrap().to_string();
+    let cf_secret = setup_json["account"]["cfWebhookSecret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Optimistic locking on PUT + batch version increment & cross-vault 409
+    let (st_put1, _) = http_json(
+        srv.addr,
+        "PUT",
+        "/api/vaults/v1/items/i1",
+        Some(&token),
+        Some(json!({ "encryptedData": "c1" })),
+    )
+    .await;
+    assert_eq!(st_put1, 200);
+
+    let (st_conflict, _) = http_json(
+        srv.addr,
+        "PUT",
+        "/api/vaults/v1/items/i1",
+        Some(&token),
+        Some(json!({ "encryptedData": "c2", "expectedVersion": 5 })),
+    )
+    .await;
+    assert_eq!(st_conflict, 409);
+
+    let (st_batch_ok, batch_json) = http_json(
+        srv.addr,
+        "POST",
+        "/api/vaults/v1/items/batch",
+        Some(&token),
+        Some(json!({ "items": [{ "id": "i1", "encryptedData": "c2" }] })),
+    )
+    .await;
+    assert_eq!(st_batch_ok, 201);
+    assert_eq!(batch_json["items"][0]["version"], 2);
+
+    let (st_batch_cross, _) = http_json(
+        srv.addr,
+        "POST",
+        "/api/vaults/v2/items/batch",
+        Some(&token),
+        Some(json!({ "items": [{ "id": "i1", "encryptedData": "steal" }] })),
+    )
+    .await;
+    assert_eq!(st_batch_cross, 409);
+
+    // Webhook signature replay rejected with 401
+    let ts = Utc::now().timestamp().to_string();
+    let raw_mail = b"From: a@b.com\r\nTo: sec@example.com\r\nSubject: OTP 123456\r\n\r\n123456";
+    let sig = sign_cf_webhook(&cf_secret, &ts, raw_mail);
+    let (st_wh1, _, _) = raw_http(
+        srv.addr,
+        "POST",
+        "/api/webhooks/email/cf",
+        &[
+            ("Content-Type", "message/rfc822"),
+            ("X-NonePwd-Timestamp", &ts),
+            ("X-NonePwd-Signature", &sig),
+        ],
+        Some(raw_mail),
+    )
+    .await;
+    assert_eq!(st_wh1, 200);
+    let (st_wh_replay, _, _) = raw_http(
+        srv.addr,
+        "POST",
+        "/api/webhooks/email/cf",
+        &[
+            ("Content-Type", "message/rfc822"),
+            ("X-NonePwd-Timestamp", &ts),
+            ("X-NonePwd-Signature", &sig),
+        ],
+        Some(raw_mail),
+    )
+    .await;
+    assert_eq!(st_wh_replay, 401);
+
+    // Service Account WS does NOT receive email.received and is closed on SA deletion
+    let (st_sa, _) = http_json(
+        srv.addr,
+        "POST",
+        "/api/service-accounts",
+        Some(&token),
+        Some(json!({
+            "id": "sa_acl",
+            "name": "ACL SA",
+            "authSecret": "sa-secret-99",
+            "vaultKeys": [{ "vaultId": "v1", "encryptedVaultKey": "evk1" }]
+        })),
+    )
+    .await;
+    assert_eq!(st_sa, 201);
+    let (_, sa_login) = http_json(
+        srv.addr,
+        "POST",
+        "/api/auth/service-account",
+        None,
+        Some(json!({ "tokenId": "sa_acl", "authSecret": "sa-secret-99" })),
+    )
+    .await;
+    let sa_token = sa_login["token"].as_str().unwrap().to_string();
+
+    let (sa_ws, _) = tokio_tungstenite::connect_async(format!(
+        "ws://127.0.0.1:{}/api/ws?token={sa_token}",
+        srv.addr.port()
+    ))
+    .await
+    .unwrap();
+    let (_, mut sa_read) = sa_ws.split();
+    let _hello = sa_read.next().await;
+
+    let (st_sim, _) = http_json(
+        srv.addr,
+        "POST",
+        "/api/emails/simulate",
+        Some(&token),
+        Some(json!({
+            "from": "x@y.com",
+            "to": "sec@example.com",
+            "subject": "Secret OTP",
+            "text": "Code 445566"
+        })),
+    )
+    .await;
+    assert_eq!(st_sim, 201);
+
+    let leaked = tokio::time::timeout(Duration::from_millis(120), sa_read.next()).await;
+    assert!(leaked.is_err(), "SA WS must not receive email.received");
+
+    let (st_del_sa, _) = http_json(
+        srv.addr,
+        "DELETE",
+        "/api/service-accounts/sa_acl",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(st_del_sa, 200);
+    let closed_frame = tokio::time::timeout(Duration::from_secs(2), sa_read.next())
+        .await
+        .expect("SA WS should close after deletion");
+    match closed_frame {
+        None | Some(Err(_)) => {}
+        Some(Ok(msg)) => assert!(msg.is_close(), "expected close frame, got {msg:?}"),
+    }
+
+    // Owner WS is closed on /api/auth/logout
+    let (owner_ws, _) = tokio_tungstenite::connect_async(format!(
+        "ws://127.0.0.1:{}/api/ws?token={token}",
+        srv.addr.port()
+    ))
+    .await
+    .unwrap();
+    let (_, mut owner_read) = owner_ws.split();
+    let _owner_hello = owner_read.next().await;
+    let (st_logout, _) = http_json(srv.addr, "POST", "/api/auth/logout", Some(&token), None).await;
+    assert_eq!(st_logout, 200);
+    let owner_closed = tokio::time::timeout(Duration::from_secs(2), owner_read.next())
+        .await
+        .expect("owner WS should close after logout");
+    match owner_closed {
+        None | Some(Err(_)) => {}
+        Some(Ok(msg)) => assert!(msg.is_close(), "expected close frame, got {msg:?}"),
+    }
+
+    srv.shutdown().await;
+    let _ = fs::remove_dir_all(&data_dir);
 }

@@ -8,6 +8,7 @@ import {
 } from '@nonepwd/core/worker';
 import {
   authenticateToken,
+  claimWebhookSignature,
   createSession,
   extractBearerToken,
   hashSecret,
@@ -30,7 +31,9 @@ import { armImapAlarmFromEnv } from './imap-alarm.js';
 import {
   ImapAccountValidationError,
   computeAggregateImapConfig,
+  decryptImapPassword,
   deleteImapAccount,
+  encryptImapPassword,
   getImapAccountById,
   listImapAccounts,
   resolveImapTestParams,
@@ -57,7 +60,7 @@ import {
   syncDeletionStatement,
 } from './sync-delta.js';
 import type { CfServerEnv, EmailFilterConfig } from './types.js';
-import { broadcastEvent } from './ws-hub.js';
+import { broadcastEvent, revokeWsSessions } from './ws-hub.js';
 
 const OWNER_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const SA_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -249,6 +252,15 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       return c.json({ error: 'Missing required setup fields' }, 400);
     }
 
+    if (
+      typeof body.kdfIterations !== 'number' ||
+      !Number.isInteger(body.kdfIterations) ||
+      body.kdfIterations < 1_000 ||
+      body.kdfIterations > 5_000_000
+    ) {
+      return c.json({ error: 'kdfIterations must be an integer between 1000 and 5000000' }, 400);
+    }
+
     const existing = await c.env.DB.prepare('SELECT id FROM account WHERE id = 1').first<{
       id: number;
     }>();
@@ -396,6 +408,7 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     const auth = await getAuth(c);
     if (auth) {
       await c.env.DB.prepare('DELETE FROM sessions WHERE token_hash = ?').bind(auth.tokenHash).run();
+      await revokeWsSessions(c.env, { tokenHash: auth.tokenHash });
     }
     return c.json({ ok: true });
   });
@@ -702,6 +715,27 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     }
 
     const now = new Date().toISOString();
+    const resolvedEntries = body.items.map((entry) => ({
+      id: entry.id?.trim() || randomId(),
+      encryptedData: entry.encryptedData!,
+    }));
+
+    const existingMap = new Map<string, { vault_id: string; created_at: string; version: number }>();
+    const uniqueIds = [...new Set(resolvedEntries.map((e) => e.id))];
+    for (const id of uniqueIds) {
+      const row = await c.env.DB.prepare(
+        'SELECT vault_id, created_at, version FROM items WHERE id = ?'
+      )
+        .bind(id)
+        .first<{ vault_id: string; created_at: string; version: number }>();
+      if (row) {
+        if (row.vault_id !== vaultId) {
+          return c.json({ error: `Item ${id} belongs to another vault` }, 409);
+        }
+        existingMap.set(id, row);
+      }
+    }
+
     const inserted: Array<{
       id: string;
       vaultId: string;
@@ -712,22 +746,29 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     }> = [];
     const stmts: D1PreparedStatement[] = [];
 
-    for (const entry of body.items) {
-      const id = entry.id?.trim() || randomId();
-      const encryptedData = entry.encryptedData!;
+    for (const entry of resolvedEntries) {
+      const prev = existingMap.get(entry.id);
+      const nextVersion = prev ? prev.version + 1 : 1;
+      const createdAt = prev ? prev.created_at : now;
+      existingMap.set(entry.id, { vault_id: vaultId, created_at: createdAt, version: nextVersion });
       stmts.push(
         c.env.DB.prepare(
-          `INSERT OR REPLACE INTO items (id, vault_id, encrypted_data, created_at, updated_at, version)
-           VALUES (?, ?, ?, ?, ?, 1)`
-        ).bind(id, vaultId, encryptedData, now, now)
+          `INSERT INTO items (id, vault_id, encrypted_data, created_at, updated_at, version)
+           VALUES (?, ?, ?, ?, ?, 1)
+           ON CONFLICT(id) DO UPDATE SET
+             encrypted_data = excluded.encrypted_data,
+             updated_at = excluded.updated_at,
+             version = items.version + 1
+           WHERE items.vault_id = excluded.vault_id`
+        ).bind(entry.id, vaultId, entry.encryptedData, now, now)
       );
       inserted.push({
-        id,
+        id: entry.id,
         vaultId,
-        encryptedData,
-        createdAt: now,
+        encryptedData: entry.encryptedData,
+        createdAt,
         updatedAt: now,
-        version: 1,
+        version: nextVersion,
       });
     }
 
@@ -743,7 +784,7 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
 
     const vaultId = c.req.param('vaultId');
     const itemId = c.req.param('itemId');
-    const body = (await c.req.json()) as { encryptedData?: string };
+    const body = (await c.req.json()) as { encryptedData?: string; expectedVersion?: number };
     if (!body.encryptedData) {
       return c.json({ error: 'Missing encryptedData' }, 400);
     }
@@ -759,25 +800,44 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     let createdAt = now;
 
     if (existing) {
+      if (body.expectedVersion !== undefined && existing.version !== body.expectedVersion) {
+        return c.json(
+          { error: 'Version conflict', currentVersion: existing.version },
+          409
+        );
+      }
       version = existing.version + 1;
       createdAt = existing.created_at;
-      await c.env.DB.prepare(
-        'UPDATE items SET encrypted_data = ?, updated_at = ?, version = ? WHERE id = ?'
+      const updateRes = await c.env.DB.prepare(
+        'UPDATE items SET encrypted_data = ?, updated_at = ?, version = ? WHERE id = ? AND vault_id = ? AND version = ?'
       )
-        .bind(body.encryptedData, now, version, itemId)
+        .bind(body.encryptedData, now, version, itemId, vaultId, existing.version)
         .run();
+      if (Number(updateRes.meta?.changes ?? 0) === 0) {
+        return c.json({ error: 'Version conflict' }, 409);
+      }
     } else {
+      if (body.expectedVersion !== undefined && body.expectedVersion !== 0) {
+        return c.json({ error: 'Version conflict', currentVersion: 0 }, 409);
+      }
       const vault = await c.env.DB.prepare('SELECT id FROM vaults WHERE id = ?')
         .bind(vaultId)
         .first<{ id: string }>();
       if (!vault) return c.json({ error: 'Vault not found' }, 404);
 
-      await c.env.DB.prepare(
-        `INSERT INTO items (id, vault_id, encrypted_data, created_at, updated_at, version)
-         VALUES (?, ?, ?, ?, ?, 1)`
-      )
-        .bind(itemId, vaultId, body.encryptedData, now, now)
-        .run();
+      try {
+        await c.env.DB.prepare(
+          `INSERT INTO items (id, vault_id, encrypted_data, created_at, updated_at, version)
+           VALUES (?, ?, ?, ?, ?, 1)`
+        )
+          .bind(itemId, vaultId, body.encryptedData, now, now)
+          .run();
+      } catch (err) {
+        return c.json(
+          { error: err instanceof Error ? err.message : 'Item conflict' },
+          409
+        );
+      }
     }
 
     const item = {
@@ -1137,6 +1197,7 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       c.env.DB.prepare('DELETE FROM service_account_vaults WHERE service_account_id = ?').bind(id),
       c.env.DB.prepare('DELETE FROM service_accounts WHERE id = ?').bind(id),
     ]);
+    await revokeWsSessions(c.env, { serviceAccountId: id });
     return c.json({ ok: true });
   });
 
@@ -1169,9 +1230,50 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     }
     if (body.rotateWebhookSecret) {
       const nextSecret = randomHex(32);
-      await c.env.DB.prepare('UPDATE account SET cf_webhook_secret = ? WHERE id = 1')
-        .bind(nextSecret)
-        .run();
+      const useDedicatedImapKey = Boolean(c.env.IMAP_ENCRYPTION_KEY?.trim());
+      if (!useDedicatedImapKey) {
+        const current = await c.env.DB.prepare(
+          'SELECT cf_webhook_secret FROM account WHERE id = 1'
+        ).first<{ cf_webhook_secret: string }>();
+        const oldSecret = current?.cf_webhook_secret;
+        const now = new Date().toISOString();
+        const stmts: D1PreparedStatement[] = [
+          c.env.DB.prepare('UPDATE account SET cf_webhook_secret = ? WHERE id = 1').bind(
+            nextSecret
+          ),
+        ];
+        if (oldSecret) {
+          const imapRows = await c.env.DB.prepare(
+            "SELECT id, password_enc FROM imap_accounts WHERE password_enc != ''"
+          ).all<{ id: string; password_enc: string }>();
+          for (const row of imapRows.results ?? []) {
+            const plain = await decryptImapPassword(oldSecret, row.password_enc);
+            const reEncrypted = await encryptImapPassword(nextSecret, plain);
+            stmts.push(
+              c.env.DB.prepare(
+                'UPDATE imap_accounts SET password_enc = ?, updated_at = ? WHERE id = ?'
+              ).bind(reEncrypted, now, row.id)
+            );
+          }
+          const legacyRow = await c.env.DB.prepare(
+            "SELECT password_enc FROM imap_config WHERE id = 1 AND password_enc != ''"
+          ).first<{ password_enc: string }>();
+          if (legacyRow?.password_enc) {
+            const plain = await decryptImapPassword(oldSecret, legacyRow.password_enc);
+            const reEncrypted = await encryptImapPassword(nextSecret, plain);
+            stmts.push(
+              c.env.DB.prepare(
+                'UPDATE imap_config SET password_enc = ?, updated_at = ? WHERE id = 1'
+              ).bind(reEncrypted, now)
+            );
+          }
+        }
+        await c.env.DB.batch(stmts);
+      } else {
+        await c.env.DB.prepare('UPDATE account SET cf_webhook_secret = ? WHERE id = 1')
+          .bind(nextSecret)
+          .run();
+      }
     }
 
     const row = await c.env.DB.prepare(
@@ -1196,7 +1298,7 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
     const body = (await c.req.json()) as SaveImapAccountInput;
 
     try {
-      await saveImapAccount(c.env.DB, body, 'legacy_put');
+      await saveImapAccount(c.env.DB, body, 'legacy_put', c.env.IMAP_ENCRYPTION_KEY);
     } catch (err) {
       if (err instanceof ImapAccountValidationError) {
         return c.json({ error: err.message }, err.statusCode);
@@ -1216,7 +1318,12 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
 
     let saved: Awaited<ReturnType<typeof saveImapAccount>>;
     try {
-      saved = await saveImapAccount(c.env.DB, body, 'create_or_upsert');
+      saved = await saveImapAccount(
+        c.env.DB,
+        body,
+        'create_or_upsert',
+        c.env.IMAP_ENCRYPTION_KEY
+      );
     } catch (err) {
       if (err instanceof ImapAccountValidationError) {
         return c.json({ error: err.message }, err.statusCode);
@@ -1245,7 +1352,12 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
 
     let saved: Awaited<ReturnType<typeof saveImapAccount>>;
     try {
-      saved = await saveImapAccount(c.env.DB, { ...body, id }, 'update_strict');
+      saved = await saveImapAccount(
+        c.env.DB,
+        { ...body, id },
+        'update_strict',
+        c.env.IMAP_ENCRYPTION_KEY
+      );
     } catch (err) {
       if (err instanceof ImapAccountValidationError) {
         return c.json({ error: err.message }, err.statusCode);
@@ -1297,10 +1409,12 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       'SELECT cf_webhook_secret FROM account WHERE id = 1'
     ).first<{ cf_webhook_secret: string }>();
 
+    const explicitImapKey = c.env.IMAP_ENCRYPTION_KEY?.trim() || undefined;
     const resolved = await resolveImapTestParams(
       c.env.DB,
-      account?.cf_webhook_secret,
-      body
+      explicitImapKey ?? account?.cf_webhook_secret,
+      body,
+      explicitImapKey ? account?.cf_webhook_secret : undefined
     );
 
     if (!resolved.host || !resolved.username || !resolved.password) {
@@ -1367,6 +1481,10 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
       ))
     ) {
       return c.json({ error: 'Invalid webhook signature' }, 401);
+    }
+
+    if (!claimWebhookSignature(timestampHeader!, signatureHeader!)) {
+      return c.json({ error: 'Webhook signature replay detected' }, 401);
     }
 
     const contentType = (c.req.header('content-type') ?? '').toLowerCase();
@@ -1504,6 +1622,13 @@ export function createCfApp(): Hono<{ Bindings: CfServerEnv }> {
 
     const headers = new Headers(c.req.raw.headers);
     headers.set('X-NP-Auth-Kind', auth.kind);
+    headers.set('X-NP-Token-Hash', auth.tokenHash);
+    headers.set('X-NP-Expires-At', String(auth.expiresAt));
+    if (auth.kind === 'service_account') {
+      headers.set('X-NP-Service-Account-Id', auth.serviceAccountId);
+    } else {
+      headers.delete('X-NP-Service-Account-Id');
+    }
     headers.set(
       'X-NP-Allowed-Vaults',
       auth.kind === 'service_account'

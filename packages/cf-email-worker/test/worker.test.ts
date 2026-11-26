@@ -144,5 +144,74 @@ describe('@nonepwd/cf-email-worker', () => {
     );
     expect(openedCodes).toContain('519382');
     expect(openedCodes).toContain('904211');
+
+    // Non-OK response (wrong webhook secret -> 401) must NOT call message.forward
+    const badForwardSpy = vi.fn(async () => {});
+    const badRes = await processIncomingEmail(
+      {
+        from: 'no-reply@cursor.com',
+        to: 'cursor.k9x2m@mail.example.com',
+        raw: streamFromText(rawMime),
+        forward: badForwardSpy,
+      },
+      {
+        NONEPWD_SERVER_URL: url,
+        WEBHOOK_SECRET: 'wrong-secret',
+        FORWARD_TO_EMAIL: 'primary@gmail.com',
+      }
+    );
+    expect(badRes.status).toBe(401);
+    expect(badForwardSpy).not.toHaveBeenCalled();
+
+    // Accepted === false (disabled alias -> 202) must NOT call message.forward
+    const aliasCreate = await fetch(`${url}/api/aliases`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ address: 'blocked.alias@mail.example.com' }),
+    });
+    const { alias } = (await aliasCreate.json()) as { alias: { id: string } };
+    await fetch(`${url}/api/aliases/${alias.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ enabled: false }),
+    });
+    const blockedForwardSpy = vi.fn(async () => {});
+    const blockedRes = await processIncomingEmail(
+      {
+        from: 'spam@example.com',
+        to: 'blocked.alias@mail.example.com',
+        raw: streamFromText('From: spam@example.com\r\nTo: blocked.alias@mail.example.com\r\nSubject: Hi\r\n\r\nHello'),
+        forward: blockedForwardSpy,
+      },
+      {
+        NONEPWD_SERVER_URL: url,
+        WEBHOOK_SECRET: account.cfWebhookSecret,
+        FORWARD_TO_EMAIL: 'primary@gmail.com',
+      }
+    );
+    expect(blockedRes.status).toBe(202);
+    expect(blockedForwardSpy).not.toHaveBeenCalled();
+
+    // Oversized stream (> 4 MiB) is rejected before buffering
+    const hugeStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(4 * 1024 * 1024 + 1));
+        controller.close();
+      },
+    });
+    await expect(
+      processIncomingEmail(
+        {
+          from: 'big@example.com',
+          to: 'me@mail.example.com',
+          raw: hugeStream,
+          forward: async () => {},
+        },
+        {
+          NONEPWD_SERVER_URL: url,
+          WEBHOOK_SECRET: account.cfWebhookSecret,
+        }
+      )
+    ).rejects.toThrow(/byte limit/);
   });
 });

@@ -219,7 +219,10 @@ fn store_sealed_email(
             "type": "email.received",
             "email": record,
         }),
-        BroadcastOptions::default(),
+        BroadcastOptions {
+            vault_id: None,
+            owner_only: true,
+        },
     );
 
     Ok(record)

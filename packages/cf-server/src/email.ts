@@ -269,7 +269,7 @@ async function storeSealedEmail(
     receivedAt: params.receivedAt,
   };
 
-  await broadcastEvent(env, { type: 'email.received', email: record });
+  await broadcastEvent(env, { type: 'email.received', email: record }, { ownerOnly: true });
   return record;
 }
 

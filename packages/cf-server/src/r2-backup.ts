@@ -160,8 +160,10 @@ export async function createEncryptedSnapshot(
   ]);
 
   if (reason === 'scheduled') {
-    const listed = await env.BUCKET.list({ prefix: 'backups/snapshot-', limit: 200 });
-    const sorted = [...listed.objects].sort((a, b) => b.key.localeCompare(a.key));
+    const listed = await env.BUCKET.list({ prefix: 'backups/snapshot-', limit: 1000 });
+    const sorted = listed.objects
+      .filter((obj) => obj.key.includes('-scheduled-'))
+      .sort((a, b) => b.key.localeCompare(a.key));
     const stale = sorted.slice(MAX_SCHEDULED_SNAPSHOTS);
     if (stale.length > 0) {
       await Promise.all(stale.map((obj) => env.BUCKET!.delete(obj.key)));
@@ -252,13 +254,14 @@ export async function restoreEncryptedSnapshot(
     env.DB.prepare('DELETE FROM vaults'),
     env.DB.prepare('DELETE FROM aliases'),
     env.DB.prepare('DELETE FROM encrypted_emails'),
+    env.DB.prepare('DELETE FROM sync_deletions'),
   ];
 
   if (snapshot.account) {
     const a = snapshot.account;
     stmts.push(
       env.DB.prepare(
-        `INSERT OR IGNORE INTO account
+        `INSERT OR REPLACE INTO account
          (id, email, kdf_salt, kdf_iterations, auth_verifier_hash, encrypted_root_keyset, email_public_key, cf_webhook_secret, alias_domain, created_at)
          VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).bind(

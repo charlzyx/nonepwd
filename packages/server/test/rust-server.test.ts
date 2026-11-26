@@ -980,7 +980,6 @@ describe('nonepwd-server (100% Rust via `np server`)', () => {
     expect(paramsRes.status).toBe(200);
     expect(await paramsRes.json()).toEqual({
       initialized: true,
-      email: 'legacy@example.com',
       kdfSalt: salt,
       kdfIterations: 10_000,
     });

@@ -181,7 +181,13 @@ fn imap_tls_config() -> Arc<ClientConfig> {
         .clone()
 }
 
-fn imap_quote_string(s: &str) -> String {
+const MAX_IMAP_LINE_BYTES: usize = 65_536;
+const IMAP_CMD_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn imap_quote_string(s: &str) -> Result<String, String> {
+    if s.contains(['\r', '\n', '\0']) {
+        return Err("IMAP parameter must not contain CR/LF/NUL".to_string());
+    }
     let mut out = String::with_capacity(s.len() + 4);
     out.push('"');
     for ch in s.chars() {
@@ -191,7 +197,32 @@ fn imap_quote_string(s: &str) -> String {
         out.push(ch);
     }
     out.push('"');
-    out
+    Ok(out)
+}
+
+fn is_blocked_imap_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_blocked_imap_ip(std::net::IpAddr::V4(v4));
+            }
+            let seg0 = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (seg0 & 0xfe00) == 0xfc00
+                || (seg0 & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 fn parse_literal_len(line: &str) -> Option<usize> {
@@ -209,19 +240,44 @@ struct ImapClient {
 
 impl ImapClient {
     async fn connect(host: &str, port: u16, tls: bool) -> Result<Self, String> {
-        let addr = format!("{host}:{port}");
-        let tcp = TcpStream::connect(&addr)
+        let host = host.trim();
+        if host.is_empty() {
+            return Err("IMAP host must not be empty".to_string());
+        }
+
+        let allow_private = std::env::var("NONEPWD_ALLOW_PRIVATE_IMAP").as_deref() == Ok("1");
+        let addrs: Vec<std::net::SocketAddr> = tokio::time::timeout(
+            IMAP_CMD_TIMEOUT,
+            tokio::net::lookup_host((host, port)),
+        )
+        .await
+        .map_err(|_| format!("IMAP DNS lookup for {host}:{port} timed out"))?
+        .map_err(|e| format!("IMAP DNS lookup for {host}:{port} failed: {e}"))?
+        .collect();
+
+        if addrs.is_empty() {
+            return Err(format!("IMAP host {host} resolved to no addresses"));
+        }
+        if !allow_private && addrs.iter().any(|sa| is_blocked_imap_ip(sa.ip())) {
+            return Err(format!(
+                "IMAP host {host} resolves to a blocked private/local IP address"
+            ));
+        }
+
+        let target = addrs[0];
+        let tcp = tokio::time::timeout(IMAP_CMD_TIMEOUT, TcpStream::connect(target))
             .await
-            .map_err(|e| format!("IMAP TCP connect to {addr} failed: {e}"))?;
+            .map_err(|_| format!("IMAP TCP connect to {host}:{port} timed out"))?
+            .map_err(|e| format!("IMAP TCP connect to {host}:{port} failed: {e}"))?;
         let _ = tcp.set_nodelay(true);
 
         let io = if tls {
             let server_name = ServerName::try_from(host.to_string())
                 .map_err(|e| format!("Invalid IMAP TLS server name \"{host}\": {e}"))?;
             let connector = TlsConnector::from(imap_tls_config());
-            let tls_stream = connector
-                .connect(server_name, tcp)
+            let tls_stream = tokio::time::timeout(IMAP_CMD_TIMEOUT, connector.connect(server_name, tcp))
                 .await
+                .map_err(|_| "IMAP TLS handshake timed out".to_string())?
                 .map_err(|e| format!("IMAP TLS handshake failed: {e}"))?;
             ImapIo::Tls(Box::new(tls_stream))
         } else {
@@ -234,11 +290,9 @@ impl ImapClient {
         };
 
         let mut greeting = String::new();
-        let n = client
-            .reader
-            .read_line(&mut greeting)
+        let n = tokio::time::timeout(IMAP_CMD_TIMEOUT, client.read_line_capped(&mut greeting))
             .await
-            .map_err(|e| format!("Failed reading IMAP greeting: {e}"))?;
+            .map_err(|_| "IMAP greeting timed out".to_string())??;
         if n == 0 {
             return Err("IMAP server closed connection before greeting".to_string());
         }
@@ -250,6 +304,41 @@ impl ImapClient {
         Ok(client)
     }
 
+    async fn read_line_capped(&mut self, out: &mut String) -> Result<usize, String> {
+        out.clear();
+        let mut buf = Vec::new();
+        loop {
+            let available = self
+                .reader
+                .fill_buf()
+                .await
+                .map_err(|e| format!("IMAP read failed: {e}"))?;
+            if available.is_empty() {
+                break;
+            }
+            if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+                let take = pos + 1;
+                if buf.len() + take > MAX_IMAP_LINE_BYTES {
+                    return Err(format!("IMAP line exceeds {MAX_IMAP_LINE_BYTES} byte limit"));
+                }
+                buf.extend_from_slice(&available[..take]);
+                self.reader.consume(take);
+                break;
+            }
+            let len = available.len();
+            if buf.len() + len > MAX_IMAP_LINE_BYTES {
+                return Err(format!("IMAP line exceeds {MAX_IMAP_LINE_BYTES} byte limit"));
+            }
+            buf.extend_from_slice(available);
+            self.reader.consume(len);
+        }
+        let n = buf.len();
+        if n > 0 {
+            out.push_str(&String::from_utf8_lossy(&buf));
+        }
+        Ok(n)
+    }
+
     fn next_tag(&mut self) -> String {
         let t = format!("A{:04}", self.tag_seq);
         self.tag_seq = self.tag_seq.wrapping_add(1);
@@ -257,16 +346,20 @@ impl ImapClient {
     }
 
     async fn send_raw(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.reader
-            .get_mut()
-            .write_all(bytes)
-            .await
-            .map_err(|e| format!("IMAP write failed: {e}"))?;
-        self.reader
-            .get_mut()
-            .flush()
-            .await
-            .map_err(|e| format!("IMAP flush failed: {e}"))
+        tokio::time::timeout(IMAP_CMD_TIMEOUT, async {
+            self.reader
+                .get_mut()
+                .write_all(bytes)
+                .await
+                .map_err(|e| format!("IMAP write failed: {e}"))?;
+            self.reader
+                .get_mut()
+                .flush()
+                .await
+                .map_err(|e| format!("IMAP flush failed: {e}"))
+        })
+        .await
+        .map_err(|_| "IMAP write timed out".to_string())?
     }
 
     async fn run_command(&mut self, cmd_body: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
@@ -277,6 +370,12 @@ impl ImapClient {
     }
 
     async fn read_until_tag(&mut self, tag: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+        tokio::time::timeout(IMAP_CMD_TIMEOUT, self.read_until_tag_inner(tag))
+            .await
+            .map_err(|_| "IMAP command timed out".to_string())?
+    }
+
+    async fn read_until_tag_inner(&mut self, tag: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
         let mut responses = Vec::new();
         let ok_prefix = format!("{tag} OK");
         let no_prefix = format!("{tag} NO");
@@ -284,11 +383,7 @@ impl ImapClient {
 
         loop {
             let mut line = String::new();
-            let n = self
-                .reader
-                .read_line(&mut line)
-                .await
-                .map_err(|e| format!("IMAP read failed: {e}"))?;
+            let n = self.read_line_capped(&mut line).await?;
             if n == 0 {
                 return Err("IMAP connection closed unexpectedly".to_string());
             }
@@ -313,11 +408,7 @@ impl ImapClient {
                 literal.extend_from_slice(&buf);
 
                 // Read trailing line after literal (e.g. `)` + `\r\n`)
-                line.clear();
-                self.reader
-                    .read_line(&mut line)
-                    .await
-                    .map_err(|e| format!("IMAP post-literal read failed: {e}"))?;
+                self.read_line_capped(&mut line).await?;
             }
 
             responses.push((line, literal));
@@ -325,13 +416,10 @@ impl ImapClient {
     }
 
     async fn login(&mut self, host: &str, username: &str, password: &str) -> Result<(), String> {
-        if username.contains(['\r', '\n']) || password.contains(['\r', '\n']) {
-            return Err("IMAP credentials must not contain CR/LF".to_string());
-        }
         let cmd = format!(
             "LOGIN {} {}",
-            imap_quote_string(username),
-            imap_quote_string(password)
+            imap_quote_string(username)?,
+            imap_quote_string(password)?
         );
         self.run_command(&cmd).await?;
 
@@ -349,7 +437,7 @@ impl ImapClient {
     }
 
     async fn status_messages(&mut self, mailbox: &str) -> Result<u32, String> {
-        let cmd = format!("STATUS {} (MESSAGES)", imap_quote_string(mailbox));
+        let cmd = format!("STATUS {} (MESSAGES)", imap_quote_string(mailbox)?);
         let lines = self.run_command(&cmd).await?;
         for (line, _) in lines {
             let upper = line.to_ascii_uppercase();
@@ -957,12 +1045,13 @@ async fn fetch_recent_messages(
     all_uids.sort_unstable();
     all_uids.dedup();
 
-    let max_found = *all_uids.last().unwrap();
     let mut highest_uid = row.last_uid;
     let target_uids: Vec<u32> = if row.last_uid == 0 {
         // On initial sync, only process up to the 5 newest messages to avoid historical flood
-        highest_uid = max_found;
         let start = all_uids.len().saturating_sub(5);
+        if start > 0 {
+            highest_uid = all_uids[start - 1];
+        }
         all_uids[start..].to_vec()
     } else {
         all_uids
@@ -977,13 +1066,23 @@ async fn fetch_recent_messages(
         Some(row.username.trim())
     };
 
+    let mut ingest_err: Option<String> = None;
     for uid in target_uids {
         let fetch_cmd = format!("UID FETCH {uid} (UID BODY.PEEK[])");
         let fetched = client.run_command(&fetch_cmd).await?;
+        let mut uid_ok = true;
         for (_, raw_mime) in fetched {
             if !raw_mime.is_empty() {
-                let _ = ingest_raw_email(db, ws_hub, &raw_mime, "imap", None, envelope_to);
+                if let Err(err) = ingest_raw_email(db, ws_hub, &raw_mime, "imap", None, envelope_to)
+                {
+                    ingest_err = Some(format!("IMAP ingest failed for UID {uid}: {err}"));
+                    uid_ok = false;
+                    break;
+                }
             }
+        }
+        if !uid_ok {
+            break;
         }
         if uid > highest_uid {
             highest_uid = uid;
@@ -997,6 +1096,10 @@ async fn fetch_recent_messages(
             params![highest_uid as i64, now_iso_millis(), account_id],
         );
         sync_legacy_imap_config_from_accounts_conn(&conn);
+    }
+
+    if let Some(err) = ingest_err {
+        return Err(err);
     }
 
     Ok(())
@@ -1331,11 +1434,12 @@ impl ImapWorker {
                 .await?;
 
             let mut cont_line = String::new();
-            let n = client
-                .reader
-                .read_line(&mut cont_line)
-                .await
-                .map_err(|e| format!("IMAP IDLE read failed: {e}"))?;
+            let n = tokio::time::timeout(
+                IMAP_CMD_TIMEOUT,
+                client.read_line_capped(&mut cont_line),
+            )
+            .await
+            .map_err(|_| "IMAP IDLE read timed out".to_string())??;
             if n == 0 {
                 return Err("IMAP connection closed while entering IDLE".to_string());
             }
@@ -1377,8 +1481,8 @@ impl ImapWorker {
                         // RFC 2177: re-issue IDLE at least every 29 minutes
                         break;
                     }
-                    read_res = client.reader.read_line(&mut idle_line) => {
-                        let bytes_read = read_res.map_err(|e| format!("IMAP IDLE stream error: {e}"))?;
+                    read_res = client.read_line_capped(&mut idle_line) => {
+                        let bytes_read = read_res?;
                         if bytes_read == 0 {
                             return Err("IMAP server closed IDLE connection".to_string());
                         }
