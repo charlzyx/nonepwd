@@ -58,7 +58,11 @@ public struct EmailDetailView: View {
                     }
                 }
 
-                if let link = email.magicLink?.nilIfBlank, let url = URL(string: link) {
+                if let link = email.magicLink?.nilIfBlank,
+                   let url = URL(string: link),
+                   let scheme = url.scheme?.lowercased(),
+                   ["http", "https"].contains(scheme)
+                {
                     HStack {
                         Link(destination: url) {
                             Label("打开邮件中的验证链接", systemImage: "safari")

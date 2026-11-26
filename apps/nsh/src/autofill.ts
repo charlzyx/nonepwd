@@ -109,7 +109,11 @@ export async function syncAndroidAutofill(params: {
 
   if (params.unlocked) {
     credentials = (params.items ?? [])
-      .filter((it) => Boolean(it.username?.trim() || it.password || it.totp?.trim()))
+      .filter(
+        (it) =>
+          it.category === "login" &&
+          Boolean(it.username?.trim() || it.password || it.totp?.trim())
+      )
       .map((it) => ({
         id: it.id,
         title: it.title,

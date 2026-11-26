@@ -54,7 +54,7 @@ public struct DesktopPrefs: Codable, Equatable, Sendable {
         aiModel: String? = nil,
         unlockDurationRaw: String? = "24h",
         emailCronMinutes: Int? = 1,
-        aiAutoExtractEmail: Bool? = true,
+        aiAutoExtractEmail: Bool? = false,
         savedGroups: [String]? = nil
     ) {
         self.serverURL = serverURL
@@ -153,10 +153,83 @@ public enum SessionKeychain {
     }
 }
 
-public struct QuickUnlockCredentials: Codable, Sendable {
+public enum AIKeychain {
+    private static let service = "dev.nonepwd.macos.ai_api_key"
+    private static let account = "default"
+
+    public static func save(_ apiKey: String?) {
+        let trimmed = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        clear()
+        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return }
+        let attrs: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecValueData as String: data,
+        ]
+        SecItemAdd(attrs as CFDictionary, nil)
+    }
+
+    public static func load() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess,
+              let data = result as? Data,
+              let value = String(data: data, encoding: .utf8),
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return nil
+        }
+        return value
+    }
+
+    public static func clear() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+}
+
+public struct QuickUnlockCredentials: Codable, Equatable, Sendable {
     public let serverURL: String
     public let secretKey: String
-    public let masterPassword: String
+    public let authVerifierB64: String?
+    public let rootKeyB64: String?
+    public let emailPrivateKeyPkcs8B64: String?
+    public let accountEmail: String?
+    public let aliasDomain: String?
+    // Legacy-only field decoded from pre-migration Keychain items; never persisted by new writes.
+    public let masterPassword: String?
+
+    public init(
+        serverURL: String,
+        secretKey: String,
+        authVerifierB64: String?,
+        rootKeyB64: String,
+        emailPrivateKeyPkcs8B64: String,
+        accountEmail: String,
+        aliasDomain: String
+    ) {
+        self.serverURL = serverURL
+        self.secretKey = secretKey
+        self.authVerifierB64 = authVerifierB64
+        self.rootKeyB64 = rootKeyB64
+        self.emailPrivateKeyPkcs8B64 = emailPrivateKeyPkcs8B64
+        self.accountEmail = accountEmail
+        self.aliasDomain = aliasDomain
+        self.masterPassword = nil
+    }
 }
 
 public enum PrefsStore {
@@ -190,25 +263,69 @@ public enum PrefsStore {
         return dest
     }
 
+    public static func writeSecureFile(_ data: Data, to url: URL) throws {
+        let fm = FileManager.default
+        let dir = url.deletingLastPathComponent()
+        try fm.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let tmpURL = dir.appendingPathComponent(".tmp-\(UUID().uuidString)")
+        let created = fm.createFile(
+            atPath: tmpURL.path,
+            contents: data,
+            attributes: [.posixPermissions: 0o600]
+        )
+        guard created else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(errno),
+                userInfo: [NSLocalizedDescriptionKey: "Unable to create secure preferences file"]
+            )
+        }
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmpURL.path)
+        if rename(tmpURL.path, url.path) != 0 {
+            let err = errno
+            try? fm.removeItem(at: tmpURL)
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(err),
+                userInfo: [NSLocalizedDescriptionKey: "Unable to atomically replace preferences file"]
+            )
+        }
+    }
+
     public static func load() -> DesktopPrefs {
         guard let data = try? Data(contentsOf: prefsURL),
-              let decoded = try? JSONDecoder().decode(DesktopPrefs.self, from: data)
+              var decoded = try? JSONDecoder().decode(DesktopPrefs.self, from: data)
         else {
-            return DesktopPrefs()
+            var defaults = DesktopPrefs()
+            defaults.aiApiKey = AIKeychain.load()
+            return defaults
         }
+        if let legacyKey = decoded.aiApiKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !legacyKey.isEmpty
+        {
+            AIKeychain.save(legacyKey)
+            decoded.aiApiKey = nil
+            if let sanitized = try? JSONEncoder().encode(decoded) {
+                try? writeSecureFile(sanitized, to: prefsURL)
+            }
+        }
+        decoded.aiApiKey = AIKeychain.load()
         return decoded
     }
 
     public static func save(_ prefs: DesktopPrefs) {
-        let dir = prefsURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        AIKeychain.save(prefs.aiApiKey)
         var clean = prefs
+        clean.aiApiKey = nil
         if !clean.rememberDevice {
             clean.secretKey = nil
         }
         guard let data = try? JSONEncoder().encode(clean) else { return }
-        try? data.write(to: prefsURL, options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: prefsURL.path)
+        try? writeSecureFile(data, to: prefsURL)
     }
 }
 

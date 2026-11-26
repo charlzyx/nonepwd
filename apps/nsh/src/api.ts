@@ -3,6 +3,7 @@ import {
   AAD,
   DEFAULT_KDF_ITERATIONS,
   DEFAULT_SERVER_URL,
+  clampKdfIterations,
   decryptBytes,
   decryptJson,
   deriveAccountKeys,
@@ -37,6 +38,8 @@ export * from "./types";
 const PREFS_STORAGE_KEY = "nonepwd.prefs.v1";
 const SESSION_STORAGE_KEY = "nonepwd.session.v1";
 const THEME_STORAGE_KEY = "nonepwd.theme.v1";
+const COPIED_EMAIL_EXPIRATIONS_KEY = "nonepwd.copied_email_expirations.v1";
+export const COPIED_EMAIL_AUTO_DELETE_MS = 5 * 60_000;
 
 export type ThemePreference = "system" | "light" | "dark";
 
@@ -248,6 +251,35 @@ export async function saveThemePreference(theme: ThemePreference): Promise<void>
   await Storage.setItem(THEME_STORAGE_KEY, theme);
 }
 
+export async function loadCopiedEmailExpirations(): Promise<Record<string, number>> {
+  try {
+    const raw = await Storage.getItem(COPIED_EMAIL_EXPIRATIONS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, number> = {};
+    for (const [id, ts] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof id === "string" && id && typeof ts === "number" && Number.isFinite(ts)) {
+        out[id] = ts;
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export async function saveCopiedEmailExpirations(
+  expirations: Record<string, number>
+): Promise<void> {
+  const keys = Object.keys(expirations);
+  if (keys.length === 0) {
+    await Storage.removeItem(COPIED_EMAIL_EXPIRATIONS_KEY);
+    return;
+  }
+  await Storage.setItem(COPIED_EMAIL_EXPIRATIONS_KEY, JSON.stringify(expirations));
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -413,11 +445,12 @@ export async function unlockVault(
     throw new Error("服务端尚未初始化，请先创建主账号");
   }
 
+  const safeIterations = clampKdfIterations(authParams.kdfIterations);
   const { masterUnlockKeyBytes, authVerifierB64 } = await deriveAccountKeys(
     params.masterPassword,
     params.secretKey,
     authParams.kdfSalt,
-    authParams.kdfIterations
+    safeIterations
   );
 
   const loginRes = await apiRequest<{
@@ -521,6 +554,9 @@ export async function syncAll(
         it.encryptedData,
         AAD.vaultItem(it.vaultId, it.id)
       );
+      if (payload.id !== it.id || payload.vaultId !== it.vaultId) {
+        continue;
+      }
       items.push(payload);
     } catch {
       // Skip unreadable item

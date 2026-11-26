@@ -112,6 +112,7 @@ plist["CFBundleIcons"] = {
 plist["UIDeviceFamily"] = [1]
 plist["UIRequiresFullScreen"] = True
 plist["UISupportedInterfaceOrientations"] = ["UIInterfaceOrientationPortrait"]
+# Retained for self-hosted plain http://<IP>:8787 / Tailscale servers (bare hostnames default to https:// in normalizeServerUrl)
 plist["NSAppTransportSecurity"] = {"NSAllowsArbitraryLoads": True}
 plist.pop("UISupportedInterfaceOrientations~ipad", None)
 plist.pop("CFBundleIcons~ipad", None)
@@ -126,7 +127,11 @@ fi
 
 if command -v codesign >/dev/null 2>&1; then
   echo "[package-ios] Ad-hoc signing $APP_BUNDLE..."
-  codesign --force --deep --sign - "$APP_BUNDLE"
+  if [ -d "$APP_BUNDLE/Frameworks" ]; then
+    find "$APP_BUNDLE/Frameworks" -maxdepth 2 \( -name '*.dylib' -o -name '*.framework' \) -print0 \
+      | xargs -0 -I{} codesign --force --sign - "{}"
+  fi
+  codesign --force --sign - "$APP_BUNDLE"
 fi
 
 OUT_IOS_DIR="$APP_DIR/.nsh/out-ios"

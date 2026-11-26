@@ -456,7 +456,10 @@ public struct ItemDetailView: View {
 
                     Spacer(minLength: 12)
 
-                    if let dest = URL(string: rawUrl) {
+                    if let dest = URL(string: rawUrl),
+                       let scheme = dest.scheme?.lowercased(),
+                       ["http", "https"].contains(scheme)
+                    {
                         Link(rawUrl, destination: dest)
                             .font(.system(size: 13))
                             .lineLimit(1)
