@@ -31,7 +31,7 @@ interface LandingPageProps {
   onOpenVault: () => void;
 }
 
-const RELEASE_TAG = 'v0.2.0';
+const RELEASE_TAG = 'v0.2.1';
 const RELEASE_URL = `https://github.com/charlzyx/nonepwd/releases/tag/${RELEASE_TAG}`;
 const RELEASE_DOWNLOAD_BASE = `https://github.com/charlzyx/nonepwd/releases/download/${RELEASE_TAG}`;
 

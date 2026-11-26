@@ -145,7 +145,7 @@ cd packages/cf-server && npx wrangler deploy`}
                 </span>
               </a>
               <a
-                href="https://github.com/charlzyx/nonepwd/releases/download/v0.2.0/NonePwd-macos-arm64.zip"
+                href="https://github.com/charlzyx/nonepwd/releases/download/v0.2.1/NonePwd-macos-arm64.zip"
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-border bg-background px-3.5 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
@@ -154,7 +154,7 @@ cd packages/cf-server && npx wrangler deploy`}
                 <span>{isZh ? 'macOS 桌面端' : 'macOS App'}</span>
               </a>
               <a
-                href="https://github.com/charlzyx/nonepwd/releases/download/v0.2.0/NonePwd-android.apk"
+                href="https://github.com/charlzyx/nonepwd/releases/download/v0.2.1/NonePwd-android.apk"
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-border bg-background px-3.5 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"

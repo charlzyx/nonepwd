@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ASSETS_DIR="$REPO_ROOT/release-assets"
 
-TAG="v0.2.0"
+TAG="v0.2.1"
 MODE="build-and-publish"
 PRERELEASE=false
 TITLE=""
@@ -70,13 +70,17 @@ done
 
 REQUIRED_ASSETS=(
   "NonePwd-macos-arm64.zip"
-  "NonePwd-ios-unsigned.ipa"
-  "NonePwd-ios-sim-arm64.app.zip"
   "NonePwd-android.apk"
   "nonepwd-extension.zip"
   "np-darwin-arm64"
   "install-cli.sh"
 )
+if xcrun --sdk iphoneos --show-sdk-version >/dev/null 2>&1; then
+  REQUIRED_ASSETS+=(
+    "NonePwd-ios-unsigned.ipa"
+    "NonePwd-ios-sim-arm64.app.zip"
+  )
+fi
 
 configure_rust_lld_path() {
   if command -v rustc >/dev/null 2>&1; then
@@ -114,14 +118,15 @@ build_all_assets() {
     "$REPO_ROOT/apps/desktop/dist/NonePwd.app" \
     "$ASSETS_DIR/NonePwd-macos-arm64.zip"
 
-  echo "[release-local] 4/6 Packaging iOS IPA and iOS Simulator app..."
-  bash "$REPO_ROOT/apps/nsh/scripts/package-ios.sh" "$ASSETS_DIR/NonePwd-ios-unsigned.ipa"
-  cp -f "$ASSETS_DIR/NonePwd-ios-unsigned.ipa" "$REPO_ROOT/dist/NonePwd-ios-unsigned.ipa"
+  if xcrun --sdk iphoneos --show-sdk-version >/dev/null 2>&1; then
+    echo "[release-local] 4/6 Packaging iOS IPA and iOS Simulator app..."
+    bash "$REPO_ROOT/apps/nsh/scripts/package-ios.sh" "$ASSETS_DIR/NonePwd-ios-unsigned.ipa"
+    cp -f "$ASSETS_DIR/NonePwd-ios-unsigned.ipa" "$REPO_ROOT/dist/NonePwd-ios-unsigned.ipa"
 
-  local sim_tmp
-  sim_tmp="$(mktemp -d "${TMPDIR:-/tmp}/nonepwd-ios-sim.XXXXXX")"
-  nsh package --target ios-simulator -o "$sim_tmp" "$REPO_ROOT/apps/nsh"
-  python3 -c '
+    local sim_tmp
+    sim_tmp="$(mktemp -d "${TMPDIR:-/tmp}/nonepwd-ios-sim.XXXXXX")"
+    nsh package --target ios-simulator -o "$sim_tmp" "$REPO_ROOT/apps/nsh"
+    python3 -c '
 import plistlib, sys
 p = sys.argv[1]
 with open(p, "rb") as f:
@@ -130,11 +135,14 @@ plist["NSAppTransportSecurity"] = {"NSAllowsArbitraryLoads": True}
 with open(p, "wb") as f:
     plistlib.dump(plist, f)
 ' "$sim_tmp/NonePwd.app/Info.plist"
-  codesign --force --deep --sign - "$sim_tmp/NonePwd.app"
-  ditto -c -k --sequesterRsrc --keepParent \
-    "$sim_tmp/NonePwd.app" \
-    "$ASSETS_DIR/NonePwd-ios-sim-arm64.app.zip"
-  rm -rf "$sim_tmp"
+    codesign --force --deep --sign - "$sim_tmp/NonePwd.app"
+    ditto -c -k --sequesterRsrc --keepParent \
+      "$sim_tmp/NonePwd.app" \
+      "$ASSETS_DIR/NonePwd-ios-sim-arm64.app.zip"
+    rm -rf "$sim_tmp"
+  else
+    echo "[release-local] 4/6 Skipping iOS IPA/Simulator packaging (Xcode iphoneos SDK not installed on this Mac)..."
+  fi
 
   echo "[release-local] 5/6 Packaging signed Android APK..."
   bash "$REPO_ROOT/apps/nsh/scripts/package-android.sh" "$ASSETS_DIR/NonePwd-android.apk"

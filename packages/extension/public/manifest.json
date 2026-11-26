@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "nonepwd — Self-Hosted Vault & Email OTP",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Zero-knowledge self-hosted password manager: Shadow DOM autofill, 2FA TOTP, and real-time Email OTP & Masked Aliases (Rust WASM).",
   "permissions": ["storage", "activeTab", "tabs", "scripting", "alarms"],
   "host_permissions": ["<all_urls>"],
