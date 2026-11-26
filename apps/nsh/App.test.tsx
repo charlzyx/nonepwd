@@ -1,12 +1,16 @@
 import { describe, expect, open, test } from "nsh/test";
 import {
   AAD,
+  DEFAULT_KDF_ITERATIONS,
   auditVaultItems,
   buildOtpAuthUri,
+  clampKdfIterations,
   decryptJson,
   deriveAccountKeys,
+  domainsMatch,
   encryptBytes,
   encryptJson,
+  extractHost,
   fromBase64Url,
   generateEmailKeyPair,
   generatePassword,
@@ -16,7 +20,9 @@ import {
   normalizeSecretKey,
   openSealedJson,
   parseAuthenticatorExport,
+  parseOtpInput,
   planTotpImport,
+  randomInt,
   sealJsonForPublicKey,
   toBase32,
   toBase64Url,
@@ -427,6 +433,41 @@ describe("NonePwd Crypto & Core Interop", () => {
     // Password generator & Security audit
     const pw = generatePassword({ length: 24, symbols: true });
     expect(pw).toHaveLength(24);
+    expect(generatePassword({ length: Number.NaN })).toHaveLength(20);
+    expect(generatePassword({ length: Number.POSITIVE_INFINITY })).toHaveLength(20);
+
+    // KDF iteration clamping
+    expect(clampKdfIterations(10)).toBe(1_000);
+    expect(clampKdfIterations(99_000_000)).toBe(5_000_000);
+    expect(clampKdfIterations(Number.NaN)).toBe(DEFAULT_KDF_ITERATIONS);
+    expect(clampKdfIterations(600_000)).toBe(600_000);
+
+    // HOTP rejection in parseOtpInput
+    expect(() =>
+      parseOtpInput("otpauth://hotp/Legacy:old?secret=JBSWY3DPEHPK3PXP&counter=1")
+    ).toThrow(/hotp/i);
+
+    // randomInt > 2^32 support
+    const bigBound = 0x2_0000_0000;
+    const bigSample = randomInt(bigBound);
+    expect(Number.isSafeInteger(bigSample)).toBe(true);
+    expect(bigSample >= 0 && bigSample < bigBound).toBe(true);
+
+    // Domain matching: multi-tenant suffixes, scheme-less @ query, https->http downgrade
+    expect(extractHost("evil.com/login?email=user@bank.com")).toBe("evil.com");
+    expect(extractHost("evil.com?next=user@bank.com")).toBe("evil.com");
+    expect(extractHost("GitHub <noreply@github.com>")).toBe("github.com");
+    expect(extractHost("user@bank.com")).toBe("bank.com");
+    expect(domainsMatch("https://a.github.io", "https://b.github.io")).toBe(false);
+    expect(domainsMatch("https://a.workers.dev", "https://b.workers.dev")).toBe(false);
+    expect(domainsMatch("https://a.pages.dev", "https://b.pages.dev")).toBe(false);
+    expect(domainsMatch("https://a.vercel.app", "https://b.vercel.app")).toBe(false);
+    expect(domainsMatch("https://a.netlify.app", "https://b.netlify.app")).toBe(false);
+    expect(domainsMatch("https://a.github.io", "https://sub.a.github.io")).toBe(true);
+    expect(domainsMatch("https://example.com", "http://example.com")).toBe(false);
+    expect(domainsMatch("http://example.com", "https://example.com")).toBe(false);
+    expect(domainsMatch("https://example.com", "example.com")).toBe(true);
+
     const audit = auditVaultItems([
       { ...existing[0], password: "123" },
       { ...existing[1], password: "reused-strong-password-123" },
@@ -520,6 +561,49 @@ async function buildTestVaultFixture() {
     updatedAt: "2026-01-01T00:00:00Z",
   };
 
+  const sshItem: VaultItemPayload = {
+    id: "item-ssh",
+    vaultId,
+    category: "ssh_key",
+    title: "Prod SSH Key",
+    favorite: false,
+    tags: [],
+    urls: ["https://github.com"],
+    username: "git",
+    password: "-----BEGIN OPENSSH PRIVATE KEY-----",
+    customFields: [],
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+  };
+  const apiKeyItem: VaultItemPayload = {
+    id: "item-api",
+    vaultId,
+    category: "api_credential",
+    title: "OpenAI API Key",
+    favorite: false,
+    tags: [],
+    urls: ["https://api.openai.com"],
+    username: "org-1",
+    password: "sk-secret-key",
+    customFields: [],
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+  };
+  const tamperedItem: VaultItemPayload = {
+    id: "item-real-id-mismatch",
+    vaultId,
+    category: "login",
+    title: "TamperedEntry",
+    favorite: false,
+    tags: [],
+    urls: ["https://tampered.example.com"],
+    username: "mallory",
+    password: "bad",
+    customFields: [],
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+  };
+
   const encryptedItems = [
     {
       id: githubItem.id,
@@ -533,6 +617,34 @@ async function buildTestVaultFixture() {
       id: weakItem.id,
       vaultId,
       encryptedData: await encryptJson(vaultKey, weakItem, AAD.vaultItem(vaultId, weakItem.id)),
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      version: 1,
+    },
+    {
+      id: sshItem.id,
+      vaultId,
+      encryptedData: await encryptJson(vaultKey, sshItem, AAD.vaultItem(vaultId, sshItem.id)),
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      version: 1,
+    },
+    {
+      id: apiKeyItem.id,
+      vaultId,
+      encryptedData: await encryptJson(vaultKey, apiKeyItem, AAD.vaultItem(vaultId, apiKeyItem.id)),
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      version: 1,
+    },
+    {
+      id: "item-outer-id",
+      vaultId,
+      encryptedData: await encryptJson(
+        vaultKey,
+        tamperedItem,
+        AAD.vaultItem(vaultId, "item-outer-id")
+      ),
       createdAt: "2026-01-01T00:00:00Z",
       updatedAt: "2026-01-01T00:00:00Z",
       version: 1,
@@ -875,6 +987,10 @@ describe("NonePwd App Headless UI & End-to-End Flows", () => {
         (c) => c.title === "GitHub" && c.domains.includes("github.com")
       )
     ).toBe(true);
+    // SSH keys, API keys, and id-mismatched tampered payloads must never enter Android Autofill
+    expect(latestSync.credentials?.some((c) => c.title === "Prod SSH Key")).toBe(false);
+    expect(latestSync.credentials?.some((c) => c.title === "OpenAI API Key")).toBe(false);
+    expect(latestSync.credentials?.some((c) => c.title === "TamperedEntry")).toBe(false);
 
     // SearchBar filters TOTP entries and clears cleanly
     await androidApp.type("id:totp-search-input", "nonexistent");
@@ -1050,5 +1166,33 @@ describe("NonePwd App Headless UI & End-to-End Flows", () => {
     expect(setupCaptures[0]?.email).toBe("newowner@example.com");
     expect(setupCaptures[0]?.aliasDomain).toBe("otp.example.com");
     expect(setupCaptures[0]?.vaults).toHaveLength(2);
+  });
+
+  test("persists copied email OTP auto-delete expiration and prunes expired emails after sync/restart", async () => {
+    const fx = await buildTestVaultFixture();
+    const deletedEmailIds: string[] = [];
+
+    const app = await open("./App.tsx", {
+      platform: "ios",
+      storage: {
+        "nonepwd.copied_email_expirations.v1": JSON.stringify({
+          "em-1": Date.now() - 1_000,
+        }),
+      },
+      network: {
+        ...fx.networkRoutes,
+        "DELETE http://127.0.0.1:8787/api/emails/em-1": () => {
+          deletedEmailIds.push("em-1");
+          return { body: { ok: true } };
+        },
+      },
+    });
+
+    await app.type("id:secret-key-input", fx.sk);
+    await app.type("id:master-password-input", fx.masterPassword);
+    await app.press("id:unlock-button");
+    await app.waitFor("text:GitHub");
+    await app.waitUntil(() => deletedEmailIds.includes("em-1"));
+    expect(deletedEmailIds).toEqual(["em-1"]);
   });
 });

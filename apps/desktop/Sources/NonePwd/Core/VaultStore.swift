@@ -225,6 +225,7 @@ public final class VaultStore: ObservableObject {
     private var wsReconnectAttempt = 0
     private var lastCopiedChangeCount: Int?
     private var timer: Timer?
+    private var terminateObserver: NSObjectProtocol?
     private var aiAttemptedIds: Set<String> = []
     private var deletingExpiredEmailIds: Set<String> = []
     private var lastEmailCronAt = Date()
@@ -265,13 +266,23 @@ public final class VaultStore: ObservableObject {
         self.aiModel = prefs.aiModel ?? "gpt-4o-mini"
         self.unlockDuration = UnlockRememberDuration(rawValue: prefs.unlockDurationRaw ?? "") ?? .hours24
         self.emailCronMinutes = prefs.emailCronMinutes ?? 1
-        self.aiAutoExtractEmail = prefs.aiAutoExtractEmail ?? true
+        self.aiAutoExtractEmail = prefs.aiAutoExtractEmail ?? false
         self.customGroups = prefs.savedGroups ?? []
         if !forTesting {
             self.loadCopiedEmailExpirations()
             self.hasSavedTouchID = TouchIDKeychain.hasSavedQuickUnlock()
             _ = PrefsStore.syncBundledBrowserExtension()
             self.hasFinishedInit = true
+
+            self.terminateObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.willTerminateNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.clearClipboardNow()
+                }
+            }
 
             if let saved = SessionKeychain.loadValid(matchingServerURL: normalizedServerBase()),
                let rk = try? Data(base64URLEncoded: saved.rootKeyB64)
@@ -300,6 +311,9 @@ public final class VaultStore: ObservableObject {
     deinit {
         timer?.invalidate()
         wsTask?.cancel(with: .goingAway, reason: nil)
+        if let terminateObserver {
+            NotificationCenter.default.removeObserver(terminateObserver)
+        }
     }
 
     private func startTicker() {
@@ -350,10 +364,21 @@ public final class VaultStore: ObservableObject {
 
     // MARK: - Clipboard Auto-Clear (30s)
 
+    nonisolated public static let concealedPasteboardType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+    nonisolated public static let transientPasteboardType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+
     public func copySecret(_ value: String, label: String, autoClear: Bool = true) {
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.setString(value, forType: .string)
+        if autoClear {
+            let item = NSPasteboardItem()
+            item.setString(value, forType: .string)
+            item.setData(Data(), forType: Self.concealedPasteboardType)
+            item.setData(Data(), forType: Self.transientPasteboardType)
+            pb.writeObjects([item])
+        } else {
+            pb.setString(value, forType: .string)
+        }
         lastCopiedChangeCount = pb.changeCount
         clipboardStatus = "已复制 \(label)"
         clipboardRemaining = autoClear ? 30 : 0
@@ -662,14 +687,49 @@ public final class VaultStore: ObservableObject {
 
     // MARK: - HTTP Helper
 
-    private func normalizedServerBase() -> String {
-        var raw = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        if raw.isEmpty { raw = "http://127.0.0.1:8787" }
-        if !raw.hasPrefix("http://") && !raw.hasPrefix("https://") {
-            raw = "http://\(raw)"
+    nonisolated public static let minKdfIterations = 1_000
+    nonisolated public static let maxKdfIterations = 5_000_000
+
+    nonisolated public static func clampKdfIterations(_ iterations: Int) -> Int {
+        min(maxKdfIterations, max(minKdfIterations, iterations))
+    }
+
+    nonisolated private static func isLocalOrLanHost(_ rawHost: String) -> Bool {
+        let host = rawHost.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]" {
+            return true
+        }
+        let octets = host.split(separator: ".").compactMap { Int($0) }
+        if octets.count == 4 && octets.allSatisfy({ (0...255).contains($0) }) {
+            if octets[0] == 10 { return true }
+            if octets[0] == 127 { return true }
+            if octets[0] == 192 && octets[1] == 168 { return true }
+            if octets[0] == 172 && (16...31).contains(octets[1]) { return true }
+        }
+        return false
+    }
+
+    nonisolated public static func normalizeServerBase(_ input: String) -> String {
+        var raw = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.isEmpty { return "http://127.0.0.1:8787" }
+        let lower = raw.lowercased()
+        if !lower.hasPrefix("http://") && !lower.hasPrefix("https://") {
+            let authority = raw.split(separator: "/", maxSplits: 1).first.map(String.init) ?? raw
+            let host: String
+            if authority.hasPrefix("["), let end = authority.firstIndex(of: "]") {
+                host = String(authority[...end])
+            } else {
+                host = authority.split(separator: ":", maxSplits: 1).first.map(String.init) ?? authority
+            }
+            let scheme = isLocalOrLanHost(host) ? "http" : "https"
+            raw = "\(scheme)://\(raw)"
         }
         while raw.hasSuffix("/") { raw.removeLast() }
         return raw
+    }
+
+    private func normalizedServerBase() -> String {
+        Self.normalizeServerBase(serverURL)
     }
 
     private func sessionForBase(_ base: String) -> URLSession {
@@ -781,11 +841,12 @@ public final class VaultStore: ObservableObject {
                 throw NpCoreError.rustError("该服务端尚未初始化，请切换至「初始化新服务端」")
             }
 
+            let safeIters = Self.clampKdfIterations(iters)
             let derived = try NpCoreBridge.deriveAccountKeys(
                 masterPassword: masterPassword,
                 secretKey: cleanSK,
                 kdfSaltB64: salt,
-                iterations: iters
+                iterations: safeIters
             )
             let mukData = try Data(base64URLEncoded: derived.masterUnlockKeyB64)
 
@@ -818,7 +879,11 @@ public final class VaultStore: ObservableObject {
                 try? TouchIDKeychain.saveQuickUnlock(QuickUnlockCredentials(
                     serverURL: cleanBase,
                     secretKey: cleanSK,
-                    masterPassword: masterPassword
+                    authVerifierB64: derived.authVerifierB64,
+                    rootKeyB64: keyset.rootKeyB64,
+                    emailPrivateKeyPkcs8B64: keyset.emailPrivateKeyPkcs8B64,
+                    accountEmail: loginRes.account.email,
+                    aliasDomain: loginRes.account.aliasDomain ?? ""
                 ))
                 hasSavedTouchID = TouchIDKeychain.hasSavedQuickUnlock()
             } else {
@@ -855,12 +920,83 @@ public final class VaultStore: ObservableObject {
 
     public func unlockWithTouchID() async {
         errorMessage = nil
+        busy = true
+        defer { busy = false }
         do {
             let creds = try await TouchIDKeychain.authenticateAndLoadQuickUnlock()
-            serverURL = creds.serverURL
+            let cleanBase = Self.normalizeServerBase(creds.serverURL)
+            serverURL = cleanBase
             secretKey = creds.secretKey
             touchIDEnabled = true
-            await unlock(masterPassword: creds.masterPassword, saveTouchID: true)
+
+            // Preferred path: root keys + authVerifier without persisting master password
+            if let rootKeyB64 = creds.rootKeyB64?.nilIfBlank,
+               let emailPrivKey = creds.emailPrivateKeyPkcs8B64?.nilIfBlank
+            {
+                let rk = try Data(base64URLEncoded: rootKeyB64)
+                let token: String
+                let resolvedEmail: String
+                let resolvedAliasDomain: String
+
+                if let verifier = creds.authVerifierB64?.nilIfBlank {
+                    let loginRes: LoginResponse = try await apiRequest(
+                        "/api/auth/login",
+                        method: "POST",
+                        bodyObj: ["authVerifier": verifier],
+                        skipAuth: true
+                    )
+                    token = loginRes.token
+                    resolvedEmail = loginRes.account.email
+                    resolvedAliasDomain = loginRes.account.aliasDomain ?? creds.aliasDomain ?? ""
+                } else if let savedSession = SessionKeychain.loadValid(matchingServerURL: cleanBase) {
+                    token = savedSession.token
+                    resolvedEmail = creds.accountEmail ?? savedSession.accountEmail
+                    resolvedAliasDomain = creds.aliasDomain ?? savedSession.aliasDomain
+                } else {
+                    throw NpCoreError.rustError("请先使用主密码解锁一次以刷新快捷解锁凭据")
+                }
+
+                self.sessionToken = token
+                self.rootKeyBytes = rk
+                self.emailPrivKeyPkcs8B64 = emailPrivKey
+                self.accountEmail = resolvedEmail
+                self.knownEmail = resolvedEmail
+                self.aliasDomain = resolvedAliasDomain
+                persistPrefs(serverURL: cleanBase, email: resolvedEmail, secretKey: creds.secretKey)
+
+                if let secs = unlockDuration.seconds {
+                    let exp = Date().addingTimeInterval(secs)
+                    sessionExpiresAt = exp
+                    SessionKeychain.save(RememberedDesktopSession(
+                        serverURL: cleanBase,
+                        token: token,
+                        rootKeyB64: rootKeyB64,
+                        emailPrivateKeyPkcs8B64: emailPrivKey,
+                        accountEmail: resolvedEmail,
+                        aliasDomain: resolvedAliasDomain,
+                        expiresAt: exp
+                    ))
+                } else {
+                    sessionExpiresAt = nil
+                    SessionKeychain.clear()
+                }
+
+                loadAICache()
+                try await syncAll()
+                isUnlocked = true
+                lastEmailCronAt = Date()
+                connectWebSocket()
+                return
+            }
+
+            // Legacy migration path: re-unlock once and overwrite Keychain item without masterPassword
+            if let legacyPassword = creds.masterPassword, !legacyPassword.isEmpty {
+                busy = false
+                await unlock(masterPassword: legacyPassword, saveTouchID: true)
+                return
+            }
+
+            throw NpCoreError.rustError("钥匙串快捷解锁凭据已失效，请使用主密码重新解锁")
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -958,7 +1094,11 @@ public final class VaultStore: ObservableObject {
                 try? TouchIDKeychain.saveQuickUnlock(QuickUnlockCredentials(
                     serverURL: cleanBase,
                     secretKey: generatedSK,
-                    masterPassword: masterPassword
+                    authVerifierB64: derived.authVerifierB64,
+                    rootKeyB64: rootKey.base64URLEncodedString(),
+                    emailPrivateKeyPkcs8B64: kp.privateKeyPkcs8B64,
+                    accountEmail: res.account.email,
+                    aliasDomain: res.account.aliasDomain ?? ""
                 ))
                 hasSavedTouchID = TouchIDKeychain.hasSavedQuickUnlock()
             }
@@ -1082,7 +1222,7 @@ public final class VaultStore: ObservableObject {
                 key: vk,
                 blob: row.encryptedData,
                 aad: AAD.vaultItem(row.vaultId, row.id)
-            ) {
+            ), payload.id == row.id, payload.vaultId == row.vaultId {
                 nextItems.append(payload)
             }
         }

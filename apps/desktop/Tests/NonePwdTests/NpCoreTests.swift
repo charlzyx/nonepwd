@@ -41,7 +41,8 @@ enum NpCoreTestsMain {
         try testAesGcmEncryptDecryptWithCardAndIdentity()
         try testTotpAndImportParsers()
         try testQrCodeScannerDecodeSyntheticOtpAuth()
-        print("All 4 NonePwd Swift/Rust-FFI core tests passed.")
+        try testSecurityHardeningHelpers()
+        print("All 5 NonePwd Swift/Rust-FFI core tests passed.")
     }
 
     static func testSecretKeyAndDualKeyDerivation() throws {
@@ -190,5 +191,75 @@ enum NpCoreTestsMain {
             expectedUri,
         ])
         try expectEqual(normalized, [expectedUri], "normalized deduplicated otpauth payloads")
+    }
+
+    static func testSecurityHardeningHelpers() throws {
+        // 1. Server URL normalization: default bare remote hosts to https://, keep local/RFC1918 http://
+        try expectEqual(VaultStore.normalizeServerBase(""), "http://127.0.0.1:8787")
+        try expectEqual(VaultStore.normalizeServerBase("vault.example.com"), "https://vault.example.com")
+        try expectEqual(VaultStore.normalizeServerBase("vault.example.com/"), "https://vault.example.com")
+        try expectEqual(VaultStore.normalizeServerBase("1.2.3.4:8787"), "https://1.2.3.4:8787")
+        try expectEqual(VaultStore.normalizeServerBase("http://1.2.3.4:8787/"), "http://1.2.3.4:8787")
+        try expectEqual(VaultStore.normalizeServerBase("localhost:8787"), "http://localhost:8787")
+        try expectEqual(VaultStore.normalizeServerBase("127.0.0.1:8787"), "http://127.0.0.1:8787")
+        try expectEqual(VaultStore.normalizeServerBase("[::1]:8787"), "http://[::1]:8787")
+        try expectEqual(VaultStore.normalizeServerBase("10.0.0.5:8787"), "http://10.0.0.5:8787")
+        try expectEqual(VaultStore.normalizeServerBase("192.168.1.20:8787"), "http://192.168.1.20:8787")
+        try expectEqual(VaultStore.normalizeServerBase("172.16.0.9:8787"), "http://172.16.0.9:8787")
+        try expectEqual(VaultStore.normalizeServerBase("172.32.0.9:8787"), "https://172.32.0.9:8787")
+
+        // 2. KDF iterations clamping (1_000...5_000_000)
+        try expectEqual(VaultStore.clampKdfIterations(0), 1_000)
+        try expectEqual(VaultStore.clampKdfIterations(500), 1_000)
+        try expectEqual(VaultStore.clampKdfIterations(600_000), 600_000)
+        try expectEqual(VaultStore.clampKdfIterations(99_000_000), 5_000_000)
+
+        // 3. DesktopPrefs default aiAutoExtractEmail must be false
+        let defaults = DesktopPrefs()
+        try expectEqual(defaults.aiAutoExtractEmail, false, "DesktopPrefs aiAutoExtractEmail default false")
+
+        // 4. QuickUnlockCredentials stores root keys without masterPassword, and still decodes legacy payloads
+        let modern = QuickUnlockCredentials(
+            serverURL: "https://vault.example.com",
+            secretKey: "NP3-TEST",
+            authVerifierB64: "verifier123",
+            rootKeyB64: "rootkey123",
+            emailPrivateKeyPkcs8B64: "privkey123",
+            accountEmail: "owner@example.com",
+            aliasDomain: "mail.example.com"
+        )
+        let modernJson = try JSONEncoder().encode(modern)
+        let modernStr = String(data: modernJson, encoding: .utf8) ?? ""
+        try expectTrue(!modernStr.contains("masterPassword"), "modern QuickUnlockCredentials must not serialize masterPassword")
+        let decodedModern = try JSONDecoder().decode(QuickUnlockCredentials.self, from: modernJson)
+        try expectEqual(decodedModern, modern)
+
+        let legacyJson = Data(#"{"serverURL":"https://vault.example.com","secretKey":"NP3-TEST","masterPassword":"legacy-secret"}"#.utf8)
+        let decodedLegacy = try JSONDecoder().decode(QuickUnlockCredentials.self, from: legacyJson)
+        try expectEqual(decodedLegacy.masterPassword, "legacy-secret")
+        try expectEqual(decodedLegacy.rootKeyB64, nil)
+
+        // 5. PrefsStore.writeSecureFile enforces 0o600 permissions
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("nonepwd-prefs-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let prefsFile = tmpDir.appendingPathComponent("prefs.json")
+        try PrefsStore.writeSecureFile(Data("{\"serverURL\":\"https://vault.example.com\"}".utf8), to: prefsFile)
+        let attrs = try FileManager.default.attributesOfItem(atPath: prefsFile.path)
+        let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+        try expectEqual(mode & 0o777, 0o600, "prefs.json must have 0600 permissions")
+
+        // 6. VaultStore.copySecret sets ConcealedType & TransientType on NSPasteboard
+        try MainActor.assumeIsolated {
+            let store = VaultStore(forTesting: true)
+            try expectEqual(store.aiAutoExtractEmail, false, "VaultStore aiAutoExtractEmail default false")
+            store.copySecret("TopSecret#2026", label: "密码", autoClear: true)
+            let pb = NSPasteboard.general
+            let types = pb.pasteboardItems?.first?.types ?? []
+            try expectTrue(types.contains(VaultStore.concealedPasteboardType), "ConcealedType set on secret copy")
+            try expectTrue(types.contains(VaultStore.transientPasteboardType), "TransientType set on secret copy")
+            try expectEqual(pb.string(forType: .string), "TopSecret#2026")
+            store.clearClipboardNow()
+            try expectEqual(pb.string(forType: .string), nil)
+        }
     }
 }

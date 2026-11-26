@@ -61,7 +61,6 @@ swiftc "$SWIFT_OPT" -swift-version 5 \
   -import-objc-header "$DESKTOP_DIR/Sources/CNpCore/include/npcore.h" \
   -L "$REPO_ROOT/dist/lib" -lnonepwd_core \
   -Xlinker -rpath -Xlinker "@executable_path/../Frameworks" \
-  -Xlinker -rpath -Xlinker "$REPO_ROOT/dist/lib" \
   -framework SwiftUI -framework AppKit -framework LocalAuthentication -framework Security -framework UniformTypeIdentifiers -framework Vision -framework CoreImage \
   "$DESKTOP_DIR"/Sources/NonePwd/Core/*.swift \
   "$DESKTOP_DIR"/Sources/NonePwd/Views/*.swift \
@@ -207,6 +206,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <true/>
   <key>LSUIElement</key>
   <false/>
+  <!-- Retained for self-hosted plain http://<IP>:8787 / Tailscale servers (bare hostnames default to https:// in VaultStore) -->
   <key>NSAppTransportSecurity</key>
   <dict>
     <key>NSAllowsArbitraryLoads</key>
@@ -218,7 +218,7 @@ PLIST
 fi
 
 echo "[4/4] Signing and verifying NonePwd.app..."
-codesign --force --sign - "$APP_DIR/Contents/Frameworks/libnonepwd_core.dylib"
-codesign --force --deep --sign - "$APP_DIR"
+codesign --force --options runtime --sign - "$APP_DIR/Contents/Frameworks/libnonepwd_core.dylib"
+codesign --force --options runtime --sign - "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
 echo "Built clean macOS bundle -> $APP_DIR"

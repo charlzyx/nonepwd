@@ -22,6 +22,7 @@ import { BackHandler, Haptics, TabBar, isAvailable as mobileApisAvailable } from
 import appIcon from "./icon.png";
 import {
   ApiError,
+  COPIED_EMAIL_AUTO_DELETE_MS,
   clearRememberedSession,
   createVault,
   deleteEmail,
@@ -30,12 +31,14 @@ import {
   getAuthParams,
   getEmailFilter,
   loadClientPrefs,
+  loadCopiedEmailExpirations,
   loadRememberedSession,
   loadThemePreference,
   logoutSession,
   normalizeServerUrl,
   rememberDurationMs,
   saveClientPrefs,
+  saveCopiedEmailExpirations,
   saveEmailFilter,
   saveImapAccount,
   saveItem,
@@ -177,6 +180,19 @@ function getImapStatusInfo(acc: ImapAccountPublic): { label: string; tone: Badge
   return { label: "连接异常", tone: "danger" };
 }
 
+function isSafeHttpUrl(raw: string): boolean {
+  const trimmed = raw.trim();
+  return /^https?:\/\/\S+$/i.test(trimmed);
+}
+
+function toSafeOpenUrl(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return null;
+  return `https://${trimmed}`;
+}
+
 function App() {
   const isWideDesktop = computed(() => platform.desktop && windowSize().width >= 720);
 
@@ -232,6 +248,11 @@ function App() {
   const selectedMailbox = signal<string>("all");
   const expandedEmailId = signal<string | null>(null);
   const syncingImap = signal(false);
+  const copiedEmailExpirations = signal<Record<string, number>>({});
+  const deletingExpiredEmailIds = new Set<string>();
+  const copiedEmailDeleteTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  let clipboardClearTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastCopiedSecret: string | null = null;
 
   // Sheets / Modals
   const qrSheetOpen = signal(false);
@@ -325,17 +346,19 @@ function App() {
         // Ignore if endpoint unavailable
       }
     }
+    void pruneExpiredCopiedEmails();
   }
 
   // Bootstrap persisted prefs, theme & remembered session
   effect(() => {
     let cancelled = false;
     void (async () => {
-      const [prefs, savedTheme, remembered, afStatus] = await Promise.all([
+      const [prefs, savedTheme, remembered, afStatus, savedExpirations] = await Promise.all([
         loadClientPrefs(),
         loadThemePreference(),
         loadRememberedSession(),
         getAndroidAutofillStatus(),
+        loadCopiedEmailExpirations(),
       ]);
       if (cancelled) return;
       batch(() => {
@@ -346,6 +369,7 @@ function App() {
         rememberDuration.set(prefs.rememberDuration);
         themePref.set(savedTheme);
         autofillStatus.set(afStatus);
+        copiedEmailExpirations.set(savedExpirations);
       });
       setColorScheme(savedTheme);
 
@@ -394,21 +418,33 @@ function App() {
     };
   });
 
-  // Refresh Android Autofill status and pending captured logins when app resumes
+  // Refresh Android Autofill status, pending captured logins, and prune expired OTP emails when app resumes
   effect(() => {
     if (phase() === "unlocked" && lifecycle() === "active") {
       void refreshAutofillAndPending();
+      void pruneExpiredCopiedEmails();
     }
   });
 
-  // Live 1s ticker for TOTP codes while unlocked
+  // Live 1s ticker for TOTP codes & copied email OTP auto-delete while unlocked
   effect(() => {
     if (phase() !== "unlocked") return;
-    nowMs.set(Date.now());
+    const initialNow = Date.now();
+    nowMs.set(initialNow);
+    void pruneExpiredCopiedEmails(initialNow);
     const timer = setInterval(() => {
-      nowMs.set(Date.now());
+      const now = Date.now();
+      nowMs.set(now);
+      void pruneExpiredCopiedEmails(now);
     }, 1000);
     cleanup(() => clearInterval(timer));
+  });
+
+  cleanup(() => {
+    if (toastTimer !== undefined) clearTimeout(toastTimer);
+    if (clipboardClearTimer !== undefined) clearTimeout(clipboardClearTimer);
+    for (const timer of copiedEmailDeleteTimers.values()) clearTimeout(timer);
+    copiedEmailDeleteTimers.clear();
   });
 
   const totpItems = computed(() =>
@@ -692,6 +728,13 @@ function App() {
     }
     await clearRememberedSession();
     void syncAndroidAutofill({ unlocked: false });
+    if (clipboardClearTimer !== undefined) {
+      clearTimeout(clipboardClearTimer);
+      clipboardClearTimer = undefined;
+    }
+    void clearClipboardIfUnchanged();
+    for (const timer of copiedEmailDeleteTimers.values()) clearTimeout(timer);
+    copiedEmailDeleteTimers.clear();
     if (clearCredentials) {
       secretKeyInput.set("");
       await saveClientPrefs({
@@ -746,29 +789,120 @@ function App() {
     }
   }
 
-  const copiedEmailDeleteTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  async function clearClipboardIfUnchanged(expected?: string | null) {
+    const target = expected ?? lastCopiedSecret;
+    if (!target) return;
+    try {
+      const current = await Clipboard.readText();
+      if (current === target) {
+        await Clipboard.writeText("");
+      }
+    } catch {
+      // Ignore if clipboard read/write is unavailable
+    } finally {
+      if (lastCopiedSecret === target) {
+        lastCopiedSecret = null;
+      }
+    }
+  }
+
+  function scheduleClipboardAutoClear(secretValue: string) {
+    if (clipboardClearTimer !== undefined) clearTimeout(clipboardClearTimer);
+    lastCopiedSecret = secretValue;
+    clipboardClearTimer = setTimeout(() => {
+      clipboardClearTimer = undefined;
+      void clearClipboardIfUnchanged(secretValue);
+    }, 30_000);
+  }
+
+  async function removeCopiedEmailExpiration(emailId: string) {
+    const timer = copiedEmailDeleteTimers.get(emailId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      copiedEmailDeleteTimers.delete(emailId);
+    }
+    const prev = copiedEmailExpirations();
+    if (!(emailId in prev)) return;
+    const next = { ...prev };
+    delete next[emailId];
+    copiedEmailExpirations.set(next);
+    await saveCopiedEmailExpirations(next);
+  }
+
+  async function pruneExpiredCopiedEmails(now = Date.now()) {
+    const currentMap = copiedEmailExpirations();
+    const expiredIds = Object.entries(currentMap)
+      .filter(([, expiresAt]) => expiresAt <= now)
+      .map(([id]) => id);
+    if (expiredIds.length === 0) return;
+
+    const cur = session();
+    const currentEmails = emails();
+    let changed = false;
+    const nextMap = { ...currentMap };
+
+    for (const id of expiredIds) {
+      const timer = copiedEmailDeleteTimers.get(id);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        copiedEmailDeleteTimers.delete(id);
+      }
+
+      if (currentEmails.some((e) => e.id === id)) {
+        if (!cur || deletingExpiredEmailIds.has(id)) continue;
+        deletingExpiredEmailIds.add(id);
+        void deleteEmail(cur.serverUrl, cur.token, id)
+          .catch(() => {})
+          .finally(() => {
+            deletingExpiredEmailIds.delete(id);
+            emails.update((prev) => prev.filter((e) => e.id !== id));
+            if (expandedEmailId() === id) expandedEmailId.set(null);
+            void removeCopiedEmailExpiration(id);
+            void syncAutofillNow();
+          });
+      } else if (!deletingExpiredEmailIds.has(id)) {
+        delete nextMap[id];
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      copiedEmailExpirations.set(nextMap);
+      await saveCopiedEmailExpirations(nextMap);
+    }
+  }
 
   async function handleCopyEmailOtp(em: DecryptedEmailItem, code: string) {
     if (!code) return;
     await Clipboard.writeText(code);
+    scheduleClipboardAutoClear(code);
     Haptics.notification("success");
     showToast("已复制邮箱验证码（5 分钟后自动清除）", "ok");
+
+    const now = Date.now();
+    const existing = copiedEmailExpirations()[em.id];
+    const expiresAt = existing ?? now + COPIED_EMAIL_AUTO_DELETE_MS;
+    if (existing === undefined) {
+      const next = { ...copiedEmailExpirations(), [em.id]: expiresAt };
+      copiedEmailExpirations.set(next);
+      await saveCopiedEmailExpirations(next);
+    }
     if (!copiedEmailDeleteTimers.has(em.id)) {
+      const delay = Math.max(0, expiresAt - now);
       const timer = setTimeout(() => {
         copiedEmailDeleteTimers.delete(em.id);
-        const cur = session();
-        if (!cur) return;
-        void deleteEmail(cur.serverUrl, cur.token, em.id).catch(() => {});
-        emails.update((prev) => prev.filter((e) => e.id !== em.id));
-        if (expandedEmailId() === em.id) expandedEmailId.set(null);
-      }, 5 * 60_000);
+        void pruneExpiredCopiedEmails();
+      }, delay);
       copiedEmailDeleteTimers.set(em.id, timer);
     }
   }
 
-  async function handleCopyText(text: string, label: string) {
+  async function handleCopyText(text: string, label: string, sensitive = true) {
     if (!text) return;
     await Clipboard.writeText(text);
+    if (sensitive) {
+      scheduleClipboardAutoClear(text);
+    }
     Haptics.notification("success");
     showToast(`已复制${label}`, "ok");
   }
@@ -999,6 +1133,7 @@ function App() {
       await deleteEmail(cur.serverUrl, cur.token, em.id);
       emails.update((prev) => prev.filter((e) => e.id !== em.id));
       if (expandedEmailId() === em.id) expandedEmailId.set(null);
+      await removeCopiedEmailExpiration(em.id);
       void syncAutofillNow();
       showToast("已删除邮件记录", "ok");
     } catch (err) {
@@ -1209,7 +1344,7 @@ function App() {
                     label="复制"
                     icon={copyIcon}
                     variant="card"
-                    onPress={() => void handleCopyText(u(), "用户名")}
+                    onPress={() => void handleCopyText(u(), "用户名", false)}
                   />
                 </GroupedRow>
               )}
@@ -1266,7 +1401,7 @@ function App() {
                     label="复制"
                     icon={copyIcon}
                     variant="card"
-                    onPress={() => void handleCopyText(pub(), " SSH 公钥")}
+                    onPress={() => void handleCopyText(pub(), " SSH 公钥", false)}
                   />
                 </GroupedRow>
               )}
@@ -1379,8 +1514,8 @@ function App() {
                   {(u) => (
                     <Button
                       onPress={() => {
-                        const target = /^https?:\/\//i.test(u()) ? u() : `https://${u()}`;
-                        void openUrl(target);
+                        const target = toSafeOpenUrl(u());
+                        if (target) void openUrl(target);
                       }}
                       class="py-1 active:opacity-70"
                     >
@@ -1418,7 +1553,7 @@ function App() {
                       label="复制"
                       icon={copyIcon}
                       variant="tonal"
-                      onPress={() => void handleCopyText(cf().value, cf().label)}
+                      onPress={() => void handleCopyText(cf().value, cf().label, cf().type === "concealed")}
                     />
                   </View>
                 </GroupedRow>
@@ -2178,15 +2313,16 @@ function App() {
                       )}
                     </If>
 
-                    <If when={em().magicLink}>
-                      {(link) => (
-                        <CompactButton
-                          label="打开登录链接"
-                          variant="tonal"
-                          class="self-start"
-                          onPress={() => void openUrl(link())}
-                        />
-                      )}
+                    <If when={em().magicLink && isSafeHttpUrl(em().magicLink!)}>
+                      <CompactButton
+                        label="打开登录链接"
+                        variant="tonal"
+                        class="self-start"
+                        onPress={() => {
+                          const target = em().magicLink;
+                          if (target && isSafeHttpUrl(target)) void openUrl(target.trim());
+                        }}
+                      />
                     </If>
 
                     <Button

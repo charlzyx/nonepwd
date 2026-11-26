@@ -7,6 +7,8 @@ import android.os.Build;
 import android.util.Base64;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
@@ -32,10 +34,17 @@ public final class AutofillStore {
   private static final int GCM_IV_BYTES = 12;
   private static final int GCM_TAG_BITS = 128;
   private static final int MAX_PENDING_SAVES = 20;
+  private static final long AUTH_TOKEN_TTL_MS = 2L * 60L * 1000L;
+  private static final long SESSION_MAX_TTL_MS = 4L * 60L * 60L * 1000L;
+
+  private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+  private static String activeAuthToken;
+  private static long activeAuthTokenExpiresAtMs;
 
   private static AutofillStore instance;
 
   private final SharedPreferences prefs;
+  private VaultSnapshot volatileSessionVault;
 
   public static final class Credential {
     public final String id;
@@ -98,6 +107,45 @@ public final class AutofillStore {
     return instance;
   }
 
+  public static String issueAuthToken() {
+    byte[] bytes = new byte[16];
+    SECURE_RANDOM.nextBytes(bytes);
+    StringBuilder hex = new StringBuilder(bytes.length * 2);
+    for (byte b : bytes) {
+      hex.append(Character.forDigit((b >>> 4) & 0x0f, 16));
+      hex.append(Character.forDigit(b & 0x0f, 16));
+    }
+    String token = hex.toString();
+    synchronized (AutofillStore.class) {
+      activeAuthToken = token;
+      activeAuthTokenExpiresAtMs = System.currentTimeMillis() + AUTH_TOKEN_TTL_MS;
+    }
+    return token;
+  }
+
+  public static boolean consumeAuthToken(String candidate) {
+    synchronized (AutofillStore.class) {
+      if (candidate == null || candidate.isEmpty() || activeAuthToken == null) {
+        return false;
+      }
+      if (System.currentTimeMillis() > activeAuthTokenExpiresAtMs) {
+        activeAuthToken = null;
+        activeAuthTokenExpiresAtMs = 0L;
+        return false;
+      }
+      boolean matched =
+          MessageDigest.isEqual(
+              activeAuthToken.getBytes(StandardCharsets.UTF_8),
+              candidate.getBytes(StandardCharsets.UTF_8));
+      if (matched) {
+        activeAuthToken = null;
+        activeAuthTokenExpiresAtMs = 0L;
+        return true;
+      }
+      return false;
+    }
+  }
+
   public void sync(
       boolean unlocked,
       long expiresAtMs,
@@ -105,19 +153,18 @@ public final class AutofillStore {
       String latestOtpCode,
       String latestOtpSender) {
     synchronized (AutofillStore.class) {
-      if (!unlocked || isExpired(expiresAtMs)) {
+      if (!unlocked || (expiresAtMs > 0L && isExpired(expiresAtMs))) {
         clearVaultLocked();
         return;
       }
 
-      try {
-        JSONObject root = new JSONObject();
-        root.put("unlocked", true);
-        root.put("expiresAtMs", Math.max(0L, expiresAtMs));
-        root.put("latestOtpCode", safeTrim(latestOtpCode));
-        root.put("latestOtpSender", safeTrim(latestOtpSender));
+      boolean sessionOnly = expiresAtMs <= 0L;
+      String cleanOtpCode = safeTrim(latestOtpCode);
+      String cleanOtpSender = safeTrim(latestOtpSender);
 
+      try {
         JSONArray normalizedList = new JSONArray();
+        List<Credential> memoryCredentials = new ArrayList<>();
         if (credentialsJson != null) {
           for (int i = 0; i < credentialsJson.length(); i++) {
             JSONObject item = credentialsJson.optJSONObject(i);
@@ -143,21 +190,49 @@ public final class AutofillStore {
               hostSet.add(singleDomain);
             }
 
-            JSONObject entry = new JSONObject();
-            entry.put("id", safeTrim(item.optString("id", "")));
-            entry.put("title", safeTrim(item.optString("title", "")));
-            entry.put("username", username);
-            entry.put("password", password);
-            entry.put("totp", totp);
-            entry.put("emailAlias", emailAlias);
-            JSONArray domainsArr = new JSONArray();
-            for (String host : hostSet) {
-              domainsArr.put(host);
+            String id = safeTrim(item.optString("id", ""));
+            String title = safeTrim(item.optString("title", ""));
+            List<String> hostList = Collections.unmodifiableList(new ArrayList<>(hostSet));
+
+            if (sessionOnly) {
+              memoryCredentials.add(
+                  new Credential(id, title, username, password, totp, emailAlias, hostList));
+            } else {
+              JSONObject entry = new JSONObject();
+              entry.put("id", id);
+              entry.put("title", title);
+              entry.put("username", username);
+              entry.put("password", password);
+              entry.put("totp", totp);
+              entry.put("emailAlias", emailAlias);
+              JSONArray domainsArr = new JSONArray();
+              for (String host : hostList) {
+                domainsArr.put(host);
+              }
+              entry.put("domains", domainsArr);
+              normalizedList.put(entry);
             }
-            entry.put("domains", domainsArr);
-            normalizedList.put(entry);
           }
         }
+
+        if (sessionOnly) {
+          prefs.edit().remove(KEY_VAULT_ENC).commit();
+          volatileSessionVault =
+              new VaultSnapshot(
+                  true,
+                  System.currentTimeMillis() + SESSION_MAX_TTL_MS,
+                  cleanOtpCode,
+                  cleanOtpSender,
+                  Collections.unmodifiableList(memoryCredentials));
+          return;
+        }
+
+        volatileSessionVault = null;
+        JSONObject root = new JSONObject();
+        root.put("unlocked", true);
+        root.put("expiresAtMs", expiresAtMs);
+        root.put("latestOtpCode", cleanOtpCode);
+        root.put("latestOtpSender", cleanOtpSender);
         root.put("credentials", normalizedList);
 
         String encrypted = encryptString(root.toString());
@@ -303,10 +378,18 @@ public final class AutofillStore {
   }
 
   private void clearVaultLocked() {
+    volatileSessionVault = null;
     prefs.edit().remove(KEY_VAULT_ENC).commit();
   }
 
   private VaultSnapshot loadVaultLocked() {
+    if (volatileSessionVault != null) {
+      if (isExpired(volatileSessionVault.expiresAtMs)) {
+        volatileSessionVault = null;
+      } else {
+        return volatileSessionVault;
+      }
+    }
     String enc = prefs.getString(KEY_VAULT_ENC, null);
     if (enc == null || enc.isEmpty()) {
       return null;
@@ -320,7 +403,7 @@ public final class AutofillStore {
       JSONObject root = new JSONObject(plain);
       boolean unlocked = root.optBoolean("unlocked", false);
       long expiresAtMs = root.optLong("expiresAtMs", 0L);
-      if (!unlocked || isExpired(expiresAtMs)) {
+      if (!unlocked || expiresAtMs <= 0L || isExpired(expiresAtMs)) {
         clearVaultLocked();
         return null;
       }

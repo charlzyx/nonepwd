@@ -18,7 +18,7 @@ import org.json.JSONTokener;
  * Custom NSH host Activity registering native Android Autofill host handlers alongside NshView.
  */
 public final class NonePwdHostActivity extends Activity {
-  public static final String EXTRA_AUTOFILL_AUTH = "dev.nonepwd.app.AUTOFILL_AUTH";
+  public static final String EXTRA_AUTOFILL_AUTH_TOKEN = "dev.nonepwd.app.AUTOFILL_AUTH_TOKEN";
 
   private NshView view;
   private boolean pendingAutofillAuth;
@@ -217,6 +217,10 @@ public final class NonePwdHostActivity extends Activity {
     if (intent == null) {
       return;
     }
+    String authToken = intent.getStringExtra(EXTRA_AUTOFILL_AUTH_TOKEN);
+    if (!AutofillStore.consumeAuthToken(authToken)) {
+      return;
+    }
     Object structure = null;
     Class<?> bridge = loadAutofillBridge();
     if (bridge != null) {
@@ -226,7 +230,7 @@ public final class NonePwdHostActivity extends Activity {
         structure = null;
       }
     }
-    if (intent.getBooleanExtra(EXTRA_AUTOFILL_AUTH, false) || structure != null) {
+    if (structure != null) {
       pendingAutofillAuth = true;
       pendingAssistStructure = structure;
     }

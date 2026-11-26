@@ -19,8 +19,21 @@ const TWO_LEVEL_TLDS = new Set([
   "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
   "co.jp", "ne.jp", "or.jp",
   "com.au", "net.au", "org.au",
-  "com.br", "com.tw", "com.hk", "co.kr", "co.in",
+  "com.br", "com.tw", "com.hk", "co.kr", "co.in", "com.sg", "com.mx", "co.nz", "co.za",
+  "github.io", "gitlab.io", "workers.dev", "pages.dev",
+  "vercel.app", "netlify.app", "herokuapp.com", "fly.dev",
+  "appspot.com", "azurewebsites.net", "cloudfront.net",
+  "firebaseapp.com", "web.app", "onrender.com", "railway.app",
+  "deno.dev", "surge.sh", "replit.dev",
 ]);
+
+export const MIN_KDF_ITERATIONS = 1_000;
+export const MAX_KDF_ITERATIONS = 5_000_000;
+
+export function clampKdfIterations(iterations: number): number {
+  if (!Number.isFinite(iterations)) return DEFAULT_KDF_ITERATIONS;
+  return Math.min(MAX_KDF_ITERATIONS, Math.max(MIN_KDF_ITERATIONS, Math.trunc(iterations)));
+}
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -114,16 +127,28 @@ export function randomBytes(length: number): Uint8Array {
 }
 
 export function randomInt(maxExclusive: number): number {
-  if (!Number.isInteger(maxExclusive) || maxExclusive <= 0) {
-    throw new RangeError("maxExclusive must be a positive integer");
+  if (!Number.isSafeInteger(maxExclusive) || maxExclusive <= 0) {
+    throw new RangeError("maxExclusive must be a positive safe integer");
   }
   if (maxExclusive === 1) return 0;
-  const limit = Math.floor(0x1_0000_0000 / maxExclusive) * maxExclusive;
-  const buf = new Uint32Array(1);
+  if (maxExclusive <= 0x1_0000_0000) {
+    const limit = Math.floor(0x1_0000_0000 / maxExclusive) * maxExclusive;
+    const buf = new Uint32Array(1);
+    while (true) {
+      globalThis.crypto.getRandomValues(buf);
+      if (buf[0] < limit) {
+        return buf[0] % maxExclusive;
+      }
+    }
+  }
+  const MAX_53 = 0x20000000000000;
+  const limit = Math.floor(MAX_53 / maxExclusive) * maxExclusive;
+  const buf = new Uint32Array(2);
   while (true) {
     globalThis.crypto.getRandomValues(buf);
-    if (buf[0] < limit) {
-      return buf[0] % maxExclusive;
+    const val = (buf[0] & 0x1fffff) * 0x1_0000_0000 + buf[1];
+    if (val < limit) {
+      return val % maxExclusive;
     }
   }
 }
@@ -189,12 +214,13 @@ export async function deriveAccountKeys(
     ["deriveBits"]
   );
 
+  const safeIterations = clampKdfIterations(iterations);
   const derivedBits = await globalThis.crypto.subtle.deriveBits(
     {
       name: "PBKDF2",
       hash: "SHA-256",
       salt: saltBuf,
-      iterations,
+      iterations: safeIterations,
     },
     pbkdf2Key,
     512
@@ -560,7 +586,10 @@ export function parseOtpInput(input: string): ParsedTotpConfig {
   }
 
   if (trimmed.toLowerCase().startsWith("otpauth://")) {
-    const { path, query } = splitOtpAuthUrl(trimmed);
+    const { kind, path, query } = splitOtpAuthUrl(trimmed);
+    if (kind !== "totp") {
+      throw new Error(`Unsupported otpauth type "${kind}" (expected totp)`);
+    }
     const params = new URLSearchParams(query);
     const secretRaw = params.get("secret") ?? "";
     if (!secretRaw) {
@@ -707,10 +736,27 @@ export function extractEmailAddress(rawHeader: string): string {
 export function extractHost(input: string): string {
   const trimmed = input.trim().toLowerCase();
   if (!trimmed) return "";
-  if (trimmed.includes("@") && !trimmed.includes("://")) {
-    const addr = extractEmailAddress(trimmed);
-    const idx = addr.lastIndexOf("@");
-    return idx >= 0 ? addr.slice(idx + 1) : "";
+  if (!trimmed.includes("://")) {
+    if (/<[^<>\s]+@[^<>\s]+>/.test(trimmed)) {
+      const addr = extractEmailAddress(trimmed);
+      const idx = addr.lastIndexOf("@");
+      return idx >= 0 ? addr.slice(idx + 1) : "";
+    }
+    const firstDelim = trimmed.search(/[/?#]/);
+    const atIdx = trimmed.indexOf("@");
+    if (atIdx >= 0 && (firstDelim < 0 || atIdx < firstDelim)) {
+      const authority = firstDelim >= 0 ? trimmed.slice(0, firstDelim) : trimmed;
+      const addr = extractEmailAddress(authority);
+      const idx = addr.lastIndexOf("@");
+      if (idx >= 0) {
+        const hostPart = addr.slice(idx + 1);
+        if (hostPart.startsWith("[")) {
+          const endBracket = hostPart.indexOf("]");
+          return endBracket >= 0 ? hostPart.slice(0, endBracket + 1) : hostPart;
+        }
+        return hostPart.split(":")[0] ?? "";
+      }
+    }
   }
   const withoutProto = trimmed.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
   const hostPort = withoutProto.split(/[/?#]/)[0] ?? "";
@@ -721,6 +767,11 @@ export function extractHost(input: string): string {
     return endBracket >= 0 ? cleanHostPort.slice(0, endBracket + 1) : cleanHostPort;
   }
   return cleanHostPort.split(":")[0] ?? "";
+}
+
+function extractHttpScheme(input: string): "http" | "https" | null {
+  const m = input.trim().toLowerCase().match(/^(https?):\/\//);
+  return m ? (m[1] as "http" | "https") : null;
 }
 
 export function extractRegistrableDomain(hostOrEmailOrUrl: string): string {
@@ -739,6 +790,11 @@ export function extractRegistrableDomain(hostOrEmailOrUrl: string): string {
 }
 
 export function domainsMatch(a: string, b: string): boolean {
+  const sa = extractHttpScheme(a);
+  const sb = extractHttpScheme(b);
+  if ((sa === "https" && sb === "http") || (sa === "http" && sb === "https")) {
+    return false;
+  }
   const ha = extractHost(a);
   const hb = extractHost(b);
   if (!ha || !hb) return false;
@@ -1351,7 +1407,10 @@ export interface PasswordOptions {
 }
 
 export function generatePassword(options: PasswordOptions = {}): string {
-  const length = Math.min(128, Math.max(8, options.length ?? 20));
+  const rawLen = options.length;
+  const safeLen =
+    typeof rawLen === "number" && Number.isFinite(rawLen) ? Math.trunc(rawLen) : 20;
+  const length = Math.min(128, Math.max(8, safeLen));
   const useUpper = options.uppercase ?? true;
   const useLower = options.lowercase ?? true;
   const useDigits = options.digits ?? true;

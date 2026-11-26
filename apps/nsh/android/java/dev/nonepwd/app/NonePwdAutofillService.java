@@ -36,16 +36,43 @@ import java.util.Set;
 /** Android System AutofillService (API 26+) backed by Keystore-encrypted AutofillStore. */
 public final class NonePwdAutofillService extends AutofillService {
   private static final int MAX_DATASETS = 15;
-  private static final int MAX_FALLBACK_DATASETS = 10;
+
+  private static final Set<String> TRUSTED_BROWSER_PACKAGES =
+      new HashSet<>(
+          Arrays.asList(
+              "com.android.chrome",
+              "com.chrome.beta",
+              "com.chrome.dev",
+              "com.chrome.canary",
+              "org.mozilla.firefox",
+              "org.mozilla.firefox_beta",
+              "org.mozilla.fenix",
+              "org.mozilla.focus",
+              "com.brave.browser",
+              "com.microsoft.emmx",
+              "com.opera.browser",
+              "com.opera.mini.native",
+              "com.sec.android.app.sbrowser",
+              "com.vivaldi.browser",
+              "com.kiwibrowser.browser",
+              "com.duckduckgo.mobile.android",
+              "mark.via.gp",
+              "com.UCMobile.intl",
+              "com.tencent.mtt"));
 
   private static final Set<String> MULTI_PART_SUFFIXES =
       new HashSet<>(
           Arrays.asList(
               "co.uk", "org.uk", "ac.uk", "gov.uk",
-              "com.cn", "net.cn", "org.cn", "gov.cn",
+              "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
               "com.au", "net.au", "org.au",
               "co.jp", "ne.jp", "or.jp",
-              "com.tw", "com.hk", "co.kr", "com.br", "com.sg"));
+              "com.tw", "com.hk", "co.kr", "com.br", "com.sg", "co.in", "com.mx", "co.nz", "co.za",
+              "github.io", "gitlab.io", "workers.dev", "pages.dev",
+              "vercel.app", "netlify.app", "herokuapp.com", "fly.dev",
+              "appspot.com", "azurewebsites.net", "cloudfront.net",
+              "firebaseapp.com", "web.app", "onrender.com", "railway.app",
+              "deno.dev", "surge.sh", "replit.dev"));
 
   private static final Set<String> IGNORED_PKG_TOKENS =
       new HashSet<>(
@@ -199,10 +226,11 @@ public final class NonePwdAutofillService extends AutofillService {
     if (triggerIds.length == 0) {
       return null;
     }
+    String authToken = AutofillStore.issueAuthToken();
     Intent authIntent = new Intent(context, NonePwdHostActivity.class);
-    authIntent.putExtra(NonePwdHostActivity.EXTRA_AUTOFILL_AUTH, true);
+    authIntent.putExtra(NonePwdHostActivity.EXTRA_AUTOFILL_AUTH_TOKEN, authToken);
     int flags =
-        PendingIntent.FLAG_UPDATE_CURRENT
+        PendingIntent.FLAG_CANCEL_CURRENT
             | (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0);
     PendingIntent pendingIntent = PendingIntent.getActivity(context, 1001, authIntent, flags);
 
@@ -322,7 +350,6 @@ public final class NonePwdAutofillService extends AutofillService {
     Set<String> pkgTokens = extractPackageTokens(parsed.packageName);
 
     List<ScoredCredential> matched = new ArrayList<>();
-    List<ScoredCredential> fallback = new ArrayList<>();
 
     for (AutofillStore.Credential cred : credentials) {
       int score = 0;
@@ -371,25 +398,17 @@ public final class NonePwdAutofillService extends AutofillService {
           score += 15;
         }
         matched.add(new ScoredCredential(cred, score));
-      } else {
-        int fbScore = (parsed.otpId != null && !cred.totp.isEmpty()) ? 15 : 0;
-        fallback.add(new ScoredCredential(cred, fbScore));
       }
+    }
+
+    if (matched.isEmpty()) {
+      return Collections.emptyList();
     }
 
     Comparator<ScoredCredential> byScoreDesc =
         (a, b) -> Integer.compare(b.score, a.score);
-
-    if (!matched.isEmpty()) {
-      Collections.sort(matched, byScoreDesc);
-      return matched;
-    }
-
-    Collections.sort(fallback, byScoreDesc);
-    if (fallback.size() > MAX_FALLBACK_DATASETS) {
-      return fallback.subList(0, MAX_FALLBACK_DATASETS);
-    }
-    return fallback;
+    Collections.sort(matched, byScoreDesc);
+    return matched;
   }
 
   static ParsedForm parseStructure(Context context, AssistStructure structure) {
@@ -401,11 +420,12 @@ public final class NonePwdAutofillService extends AutofillService {
       return null;
     }
 
+    boolean allowWebDomain = TRUSTED_BROWSER_PACKAGES.contains(form.packageName);
     int windows = structure.getWindowNodeCount();
     for (int i = 0; i < windows; i++) {
       AssistStructure.WindowNode window = structure.getWindowNodeAt(i);
       if (window != null && window.getRootViewNode() != null) {
-        traverseNode(context, window.getRootViewNode(), form);
+        traverseNode(context, window.getRootViewNode(), form, allowWebDomain);
       }
     }
 
@@ -419,7 +439,10 @@ public final class NonePwdAutofillService extends AutofillService {
   }
 
   private static void traverseNode(
-      Context context, AssistStructure.ViewNode node, ParsedForm form) {
+      Context context,
+      AssistStructure.ViewNode node,
+      ParsedForm form,
+      boolean allowWebDomain) {
     if (node == null) {
       return;
     }
@@ -430,9 +453,16 @@ public final class NonePwdAutofillService extends AutofillService {
       return;
     }
 
-    String nodeWebDomain = AutofillStore.extractHost(node.getWebDomain());
-    if (!nodeWebDomain.isEmpty()) {
-      form.webDomain = nodeWebDomain;
+    if (allowWebDomain) {
+      String nodeWebDomain = AutofillStore.extractHost(node.getWebDomain());
+      if (!nodeWebDomain.isEmpty()) {
+        if (form.webDomain.isEmpty()) {
+          form.webDomain = nodeWebDomain;
+        } else if (!nodeWebDomain.equals(form.webDomain)) {
+          // Do not allow cross-origin subframes/iframes to overwrite root domain or receive root credentials
+          return;
+        }
+      }
     }
 
     AutofillId autofillId = node.getAutofillId();
@@ -445,7 +475,7 @@ public final class NonePwdAutofillService extends AutofillService {
 
     int count = node.getChildCount();
     for (int i = 0; i < count; i++) {
-      traverseNode(context, node.getChildAt(i), form);
+      traverseNode(context, node.getChildAt(i), form, allowWebDomain);
     }
   }
 
@@ -672,8 +702,18 @@ public final class NonePwdAutofillService extends AutofillService {
     if (host == null || host.isEmpty()) {
       return "";
     }
+    if ("localhost".equals(host)) {
+      return host;
+    }
     String[] parts = host.split("\\.");
-    if (parts.length <= 2) {
+    boolean allNumeric = true;
+    for (String p : parts) {
+      if (p.isEmpty() || !p.matches("\\d+")) {
+        allNumeric = false;
+        break;
+      }
+    }
+    if (allNumeric || parts.length <= 2) {
       return host;
     }
     String lastTwo = parts[parts.length - 2] + "." + parts[parts.length - 1];
