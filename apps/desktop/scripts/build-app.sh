@@ -218,7 +218,12 @@ PLIST
 fi
 
 echo "[4/4] Signing and verifying NonePwd.app..."
-codesign --force --options runtime --sign - "$APP_DIR/Contents/Frameworks/libnonepwd_core.dylib"
-codesign --force --options runtime --sign - "$APP_DIR"
+SIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+RUNTIME_ARGS=()
+if [ "$SIGN_IDENTITY" != "-" ]; then
+  RUNTIME_ARGS=(--options runtime)
+fi
+codesign --force ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} --sign "$SIGN_IDENTITY" "$APP_DIR/Contents/Frameworks/libnonepwd_core.dylib"
+codesign --force ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} --sign "$SIGN_IDENTITY" "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
 echo "Built clean macOS bundle -> $APP_DIR"
