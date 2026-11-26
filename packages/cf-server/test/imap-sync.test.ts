@@ -589,12 +589,128 @@ describe('IMAP sync on the worker', () => {
         uidNext: 13,
       })();
     const failed = await syncImapAccount(env, account.id);
-    expect(failed.error).toBeTruthy();
-    const stuck = await env.DB.prepare('SELECT last_uid FROM imap_accounts WHERE id = ?')
+    expect(failed.error).toBeUndefined();
+    const advanced = await env.DB.prepare('SELECT last_uid FROM imap_accounts WHERE id = ?')
       .bind(account.id)
       .first<{ last_uid: number }>();
-    expect(stuck?.last_uid).toBe(11);
+    // Oversized poison UID is logged and skipped so last_uid is never wedged forever
+    expect(advanced?.last_uid).toBe(12);
+
+    // A transient socket/server failure still must NOT advance last_uid
+    await env.DB.prepare(
+      `UPDATE imap_accounts SET last_uid = 12, last_sync_at = ?, sync_fail_count = 0 WHERE id = ?`
+    )
+      .bind(new Date(Date.now() - 60_000).toISOString(), account.id)
+      .run();
+    mockConnectRef.fn = () =>
+      scriptedImap({
+        commands,
+        loginOk: false,
+        search: '13',
+        internalDate: internal,
+        uidNext: 14,
+      })();
+    const transientFail = await syncImapAccount(env, account.id);
+    expect(transientFail.error).toBeTruthy();
+    const held = await env.DB.prepare('SELECT last_uid FROM imap_accounts WHERE id = ?')
+      .bind(account.id)
+      .first<{ last_uid: number }>();
+    expect(held?.last_uid).toBe(12);
     mockConnectRef.fn = null;
+  });
+
+  it('caps SocketByteReader.readLine at 64 KiB and concatenates split HEADER/TEXT literals', async () => {
+    const oversized = new Uint8Array(70_000).fill(0x41);
+    const reader = new SocketByteReader(byteStream([oversized]).getReader());
+    await expect(reader.readLine()).rejects.toThrow(/byte limit/);
+
+    const { env, token, api } = await setupOwner();
+    const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const now = new Date();
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const internal = `${String(now.getUTCDate()).padStart(2, '0')}-${months[now.getUTCMonth()]}-${now.getUTCFullYear()} ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}:${String(now.getUTCSeconds()).padStart(2, '0')} +0000`;
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+
+    // Mock server sending HEADER and TEXT in two separate * FETCH lines for the same UID
+    mockConnectRef.fn = () => {
+      let controllerRef: ReadableStreamDefaultController<Uint8Array> | null = null;
+      let buf = '';
+      const push = (s: string) => controllerRef?.enqueue(enc.encode(s));
+      const readable = new ReadableStream<Uint8Array>({
+        start(c) {
+          controllerRef = c;
+          push('* OK ready\r\n');
+        },
+      });
+      const writable = new WritableStream<Uint8Array>({
+        write(chunk) {
+          buf += dec.decode(chunk, { stream: true });
+          while (true) {
+            const idx = buf.indexOf('\r\n');
+            if (idx === -1) break;
+            const line = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            const sp = line.indexOf(' ');
+            const tag = sp > 0 ? line.slice(0, sp) : 'A0001';
+            const cmd = (sp > 0 ? line.slice(sp + 1) : line).toUpperCase();
+            if (cmd.startsWith('LOGIN ') || cmd.startsWith('SELECT ')) {
+              push(`${tag} OK\r\n`);
+            } else if (cmd.startsWith('UID SEARCH ')) {
+              push(`* SEARCH 21\r\n${tag} OK\r\n`);
+            } else if (cmd.startsWith('UID FETCH ') && !cmd.includes('BODY')) {
+              push(`* 1 FETCH (UID 21 INTERNALDATE "${internal}")\r\n${tag} OK\r\n`);
+            } else if (cmd.startsWith('UID FETCH ')) {
+              const hdr = enc.encode(
+                `From: Auth <noreply@split.example.com>\r\nTo: alice@gmail.com\r\nSubject: Split OTP\r\nDate: ${now.toUTCString()}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n`
+              );
+              const body = enc.encode('Your login verification code is 884422.\r\n');
+              push(`* 1 FETCH (UID 21 BODY[HEADER] {${hdr.byteLength}}\r\n`);
+              controllerRef?.enqueue(hdr);
+              push(`)\r\n* 1 FETCH (UID 21 BODY[TEXT]<0> {${body.byteLength}}\r\n`);
+              controllerRef?.enqueue(body);
+              push(`)\r\n${tag} OK\r\n`);
+            } else {
+              push(`${tag} OK\r\n`);
+            }
+          }
+        },
+      });
+      return {
+        readable,
+        writable,
+        async close() {
+          try {
+            controllerRef?.close();
+          } catch {}
+        },
+      };
+    };
+
+    try {
+      const created = await api('/api/imap/accounts', {
+        method: 'POST',
+        headers: auth,
+        body: JSON.stringify({
+          enabled: true,
+          host: 'imap.gmail.com',
+          port: 993,
+          tls: true,
+          username: 'alice@gmail.com',
+          password: 'app-password-16',
+        }),
+      });
+      const { account } = (await created.json()) as { account: { id: string } };
+      const res = await syncImapAccount(env, account.id);
+      expect(res.synced).toBe(1);
+      const inbox = (await (await api('/api/emails', { headers: { Authorization: `Bearer ${token}` } })).json()) as {
+        emails: Array<{ hasOtp: boolean }>;
+      };
+      expect(inbox.emails).toHaveLength(1);
+      expect(inbox.emails[0]!.hasOtp).toBe(true);
+    } finally {
+      mockConnectRef.fn = null;
+    }
   });
 
   it('logs a permanent filter drop without the message and still advances that UID', async () => {

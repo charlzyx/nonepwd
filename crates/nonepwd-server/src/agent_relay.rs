@@ -21,11 +21,13 @@ use tokio::sync::{mpsc, Mutex};
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const RENDEZVOUS_TTL: Duration = Duration::from_secs(300);
+const MAX_RENDEZVOUS_PER_FINGERPRINT: usize = 8;
+const OUTBOUND_QUEUE_CAPACITY: usize = 64;
 
 struct Conn {
     id: u64,
     identity: Identity,
-    tx: mpsc::UnboundedSender<Message>,
+    tx: mpsc::Sender<Message>,
 }
 
 struct RendezvousEntry {
@@ -97,7 +99,7 @@ impl AgentRelay {
     pub async fn handle_socket(self: &Arc<Self>, socket: WebSocket) {
         let conn_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (mut write, mut read) = socket.split();
-        let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+        let (tx, mut rx) = mpsc::channel::<Message>(OUTBOUND_QUEUE_CAPACITY);
         let writer = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 if write.send(msg).await.is_err() {
@@ -114,7 +116,7 @@ impl AgentRelay {
                 return;
             }
         };
-        if tx.send(Message::Text(hello.into())).is_err() {
+        if tx.send(Message::Text(hello.into())).await.is_err() {
             writer.abort();
             return;
         }
@@ -186,18 +188,41 @@ impl AgentRelay {
             Messages::GetRendezvous => {
                 let code = {
                     let mut state = self.state.lock().await;
-                    let mut code = RendezvousCode::new();
-                    for _ in 0..8 {
-                        if !state.rendezvous.contains_key(code.as_str()) {
+                    let now = SystemTime::now();
+                    state.rendezvous.retain(|_, entry| {
+                        !entry.used
+                            && now.duration_since(entry.created_at).unwrap_or_default()
+                                <= RENDEZVOUS_TTL
+                    });
+                    let mut active: Vec<(String, SystemTime)> = state
+                        .rendezvous
+                        .iter()
+                        .filter(|(_, entry)| entry.fingerprint == fingerprint)
+                        .map(|(k, entry)| (k.clone(), entry.created_at))
+                        .collect();
+                    if active.len() >= MAX_RENDEZVOUS_PER_FINGERPRINT {
+                        active.sort_by_key(|(_, created_at)| *created_at);
+                        let excess = active.len() - MAX_RENDEZVOUS_PER_FINGERPRINT + 1;
+                        for (old_key, _) in active.into_iter().take(excess) {
+                            state.rendezvous.remove(&old_key);
+                        }
+                    }
+                    let mut chosen: Option<RendezvousCode> = None;
+                    for _ in 0..16 {
+                        let candidate = RendezvousCode::new();
+                        if !state.rendezvous.contains_key(candidate.as_str()) {
+                            chosen = Some(candidate);
                             break;
                         }
-                        code = RendezvousCode::new();
                     }
+                    let Some(code) = chosen else {
+                        return;
+                    };
                     state.rendezvous.insert(
                         code.as_str().to_string(),
                         RendezvousEntry {
                             fingerprint,
-                            created_at: SystemTime::now(),
+                            created_at: now,
                             used: false,
                         },
                     );
@@ -266,7 +291,7 @@ impl AgentRelay {
     }
 
     async fn send_text(&self, fingerprint: IdentityFingerprint, text: String) {
-        let senders: Vec<mpsc::UnboundedSender<Message>> = {
+        let senders: Vec<mpsc::Sender<Message>> = {
             let state = self.state.lock().await;
             state
                 .connections
@@ -276,7 +301,7 @@ impl AgentRelay {
         };
         let msg = Message::Text(text.into());
         for tx in senders {
-            let _ = tx.send(msg.clone());
+            let _ = tx.try_send(msg.clone());
         }
     }
 }
@@ -289,13 +314,16 @@ enum Frame {
 
 async fn next_frame(
     read: &mut futures_util::stream::SplitStream<WebSocket>,
-    tx: &mpsc::UnboundedSender<Message>,
+    tx: &mpsc::Sender<Message>,
 ) -> Frame {
     loop {
         match read.next().await {
             Some(Ok(Message::Text(text))) => return Frame::Text(text.to_string()),
             Some(Ok(Message::Ping(payload))) => {
-                if tx.send(Message::Pong(payload)).is_err() {
+                if matches!(
+                    tx.try_send(Message::Pong(payload)),
+                    Err(mpsc::error::TrySendError::Closed(_))
+                ) {
                     return Frame::Closed;
                 }
                 return Frame::Activity;

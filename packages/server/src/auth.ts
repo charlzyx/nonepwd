@@ -5,12 +5,14 @@ export type AuthContext =
   | {
       kind: 'owner';
       tokenHash: string;
+      expiresAt: number;
     }
   | {
       kind: 'service_account';
       tokenHash: string;
       serviceAccountId: string;
       allowedVaultIds: Set<string>;
+      expiresAt: number;
     };
 
 export function hashSecret(secret: string): string {
@@ -21,12 +23,27 @@ export function hashSecret(secret: string): string {
 
 export function verifySecret(secret: string, stored: string): boolean {
   const parts = stored.split('$');
-  if (parts.length !== 3 || parts[0] !== 's1') return false;
-  const salt = Buffer.from(parts[1], 'base64url');
-  const expected = Buffer.from(parts[2], 'base64url');
-  const actual = crypto.scryptSync(secret, salt, expected.length);
-  if (actual.length !== expected.length) return false;
-  return crypto.timingSafeEqual(actual, expected);
+  if (parts.length === 3 && parts[0] === 's1') {
+    const salt = Buffer.from(parts[1], 'base64url');
+    const expected = Buffer.from(parts[2], 'base64url');
+    if (salt.length < 8 || expected.length < 32 || expected.length > 128) return false;
+    const actual = crypto.scryptSync(secret, salt, expected.length);
+    if (actual.length !== expected.length) return false;
+    return crypto.timingSafeEqual(actual, expected);
+  }
+  if (parts.length === 4 && parts[0] === 'pbkdf2') {
+    const iterations = Number.parseInt(parts[1], 10);
+    if (!Number.isFinite(iterations) || iterations < 1000 || iterations > 1_000_000) {
+      return false;
+    }
+    const salt = Buffer.from(parts[2], 'base64url');
+    const expected = Buffer.from(parts[3], 'base64url');
+    if (salt.length < 8 || expected.length < 32 || expected.length > 128) return false;
+    const actual = crypto.pbkdf2Sync(secret, salt, iterations, expected.length, 'sha256');
+    if (actual.length !== expected.length) return false;
+    return crypto.timingSafeEqual(actual, expected);
+  }
+  return false;
 }
 
 export function hashSessionToken(token: string): string {
@@ -75,13 +92,14 @@ export function authenticateToken(db: NonePwdDb, rawToken: string | null | undef
     | undefined;
 
   if (!row) return null;
-  if (new Date(row.expires_at).getTime() < Date.now()) {
+  const expiresAt = Date.parse(row.expires_at);
+  if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) {
     db.sqlite.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
     return null;
   }
 
   if (row.kind === 'owner') {
-    return { kind: 'owner', tokenHash };
+    return { kind: 'owner', tokenHash, expiresAt };
   }
 
   if (!row.service_account_id) return null;
@@ -102,6 +120,7 @@ export function authenticateToken(db: NonePwdDb, rawToken: string | null | undef
     tokenHash,
     serviceAccountId: row.service_account_id,
     allowedVaultIds: new Set(vaultRows.map((v) => v.vault_id)),
+    expiresAt,
   };
 }
 
@@ -136,4 +155,29 @@ export function verifyWebhookHmac(
 
   if (provided.length !== expectedSigHex.length) return false;
   return crypto.timingSafeEqual(Buffer.from(provided, 'utf8'), Buffer.from(expectedSigHex, 'utf8'));
+}
+
+const webhookReplayCache = new Map<string, number>();
+const MAX_REPLAY_CACHE_SIZE = 4096;
+
+export function claimWebhookSignature(
+  timestampHeader: string,
+  signatureHeader: string,
+  ttlMs: number = 310_000
+): boolean {
+  const now = Date.now();
+  for (const [k, exp] of webhookReplayCache) {
+    if (exp <= now) webhookReplayCache.delete(k);
+  }
+  const normalizedSig = signatureHeader.startsWith('v1=')
+    ? signatureHeader.slice(3).trim().toLowerCase()
+    : signatureHeader.trim().toLowerCase();
+  const key = `${timestampHeader.trim()}.${normalizedSig}`;
+  if (webhookReplayCache.has(key)) return false;
+  if (webhookReplayCache.size >= MAX_REPLAY_CACHE_SIZE) {
+    const oldest = webhookReplayCache.keys().next().value;
+    if (oldest !== undefined) webhookReplayCache.delete(oldest);
+  }
+  webhookReplayCache.set(key, now + ttlMs);
+  return true;
 }

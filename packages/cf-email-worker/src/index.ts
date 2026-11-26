@@ -22,17 +22,29 @@ export interface EmailMessageLike {
   forward(rcptTo: string): Promise<void>;
 }
 
-async function readStreamToBytes(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+const MAX_EMAIL_BYTES = 4 * 1024 * 1024;
+
+async function readStreamToBytes(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number = MAX_EMAIL_BYTES
+): Promise<Uint8Array> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      total += value.byteLength;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          throw new Error(`Incoming email exceeds ${maxBytes} byte limit`);
+        }
+        chunks.push(value);
+      }
     }
+  } finally {
+    reader.releaseLock();
   }
   const merged = new Uint8Array(total);
   let offset = 0;
@@ -149,7 +161,19 @@ export async function processIncomingEmail(
     body: asBuffer(bodyBytes),
   });
 
-  if (env.FORWARD_TO_EMAIL && env.FORWARD_TO_EMAIL.trim()) {
+  if (!response.ok) {
+    return response;
+  }
+
+  let accepted: boolean | undefined;
+  try {
+    const parsed = (await response.clone().json()) as { accepted?: boolean };
+    accepted = parsed.accepted;
+  } catch {
+    // Non-JSON 2xx response
+  }
+
+  if (accepted !== false && env.FORWARD_TO_EMAIL && env.FORWARD_TO_EMAIL.trim()) {
     await message.forward(env.FORWARD_TO_EMAIL.trim());
   }
 

@@ -13,7 +13,7 @@ export interface NodeAgentRelay {
 
 export function createNodeAgentRelay(): NodeAgentRelay {
   const relay = new AgentRelay();
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 65536 });
   const sweep = setInterval(() => relay.sweep(), 30_000);
   sweep.unref?.();
 

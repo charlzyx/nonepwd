@@ -372,7 +372,20 @@ describe('@nonepwd/server E2E', () => {
     expect(opened.otpCode).toBe('739104');
     expect(opened.senderDomain).toBe('github.com');
 
-    // Disable alias and verify incoming mail is dropped (202 alias_disabled)
+    // Replaying the exact same signature must be rejected (401)
+    const replayRes = await fetch(`${url}/api/webhooks/email/cf`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'message/rfc822',
+        'X-NonePwd-Timestamp': ts,
+        'X-NonePwd-Signature': `v1=${sigHex}`,
+        'X-NonePwd-Envelope-To': alias.address,
+      },
+      body: rawMime,
+    });
+    expect(replayRes.status).toBe(401);
+
+    // Disable alias and verify incoming mail with fresh signature is dropped (202 alias_disabled)
     await fetch(`${url}/api/aliases/${alias.id}`, {
       method: 'PATCH',
       headers: {
@@ -382,12 +395,19 @@ describe('@nonepwd/server E2E', () => {
       body: JSON.stringify({ enabled: false }),
     });
 
+    const ts2 = String(Number(ts) + 1);
+    const sigHex2 = crypto
+      .createHmac('sha256', account.cfWebhookSecret)
+      .update(`${ts2}.`)
+      .update(rawMime)
+      .digest('hex');
+
     const droppedRes = await fetch(`${url}/api/webhooks/email/cf`, {
       method: 'POST',
       headers: {
         'Content-Type': 'message/rfc822',
-        'X-NonePwd-Timestamp': ts,
-        'X-NonePwd-Signature': `v1=${sigHex}`,
+        'X-NonePwd-Timestamp': ts2,
+        'X-NonePwd-Signature': `v1=${sigHex2}`,
         'X-NonePwd-Envelope-To': alias.address,
       },
       body: rawMime,
@@ -398,6 +418,109 @@ describe('@nonepwd/server E2E', () => {
     expect(droppedJson.reason).toBe('alias_disabled');
 
     ws.close();
+  });
+
+  it('hardens auth params, secret verification, local secret decryption, WS revocation/ACL, and item locking', async () => {
+    const { srv, url } = await spawnTestServer();
+    const { verifySecret } = await import('../src/auth.js');
+
+    // Empty-hash bypass rejected; pbkdf2$ hashes supported
+    expect(verifySecret('anything', 's1$aaaaaaaaaaaaaaaaaaaaaa$')).toBe(false);
+    const salt = crypto.randomBytes(16);
+    const derived = crypto.pbkdf2Sync('my-secret', salt, 10_000, 32, 'sha256');
+    const pbkdf2Stored = `pbkdf2$10000$${salt.toString('base64url')}$${derived.toString('base64url')}`;
+    expect(verifySecret('my-secret', pbkdf2Stored)).toBe(true);
+    expect(verifySecret('wrong', pbkdf2Stored)).toBe(false);
+
+    // Corrupt local secret returns empty string instead of throwing
+    expect(srv.db.decryptLocalSecret('s1.invalid.tag.cipher')).toBe('');
+
+    const sk = generateSecretKey();
+    const kdfSalt = toBase64Url(randomBytes(16));
+    const { masterUnlockKeyBytes, authVerifierB64 } = await deriveAccountKeys(
+      'HardPass!1',
+      sk,
+      kdfSalt,
+      10_000
+    );
+    const emailKp = await generateEmailKeyPair();
+    const encRoot = await encryptJson(
+      masterUnlockKeyBytes,
+      { rootKeyB64: toBase64Url(generateRawAesKey()), emailPrivateKeyPkcs8B64: emailKp.privateKeyPkcs8B64 },
+      AAD.ROOT_KEYSET
+    );
+
+    const setupRes = await fetch(`${url}/api/auth/setup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'private-owner@example.com',
+        kdfSalt,
+        kdfIterations: 10_000,
+        authVerifier: authVerifierB64,
+        encryptedRootKeyset: encRoot,
+        emailPublicKey: emailKp.publicKeyB64,
+        vaults: [
+          { id: 'v1', encryptedKey: 'k1', encryptedMeta: 'm1' },
+          { id: 'v2', encryptedKey: 'k2', encryptedMeta: 'm2' },
+        ],
+      }),
+    });
+    expect(setupRes.status).toBe(201);
+    const { token } = (await setupRes.json()) as { token: string };
+
+    // GET /api/auth/params must NOT leak email
+    const paramsJson = (await (await fetch(`${url}/api/auth/params`)).json()) as Record<string, unknown>;
+    expect(paramsJson.initialized).toBe(true);
+    expect('email' in paramsJson).toBe(false);
+
+    // Create SA and open WS; verify email.received is NOT delivered to SA, and SA delete closes WS
+    await fetch(`${url}/api/service-accounts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        id: 'sa_ws_test',
+        name: 'WS SA',
+        authSecret: 'sa-pw-123',
+        vaultKeys: [{ vaultId: 'v1', encryptedVaultKey: 'vk1' }],
+      }),
+    });
+    const saLoginRes = await fetch(`${url}/api/auth/service-account`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tokenId: 'sa_ws_test', authSecret: 'sa-pw-123' }),
+    });
+    const { token: saToken } = (await saLoginRes.json()) as { token: string };
+
+    const saWs = new WebSocket(url.replace('http://', 'ws://') + `/api/ws?token=${encodeURIComponent(saToken)}`);
+    const saMsgs: string[] = [];
+    await new Promise<void>((resolve) => saWs.once('open', () => resolve()));
+    saWs.on('message', (d) => saMsgs.push(String(d)));
+
+    await fetch(`${url}/api/emails/simulate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ from: 'a@b.com', to: 'private-owner@example.com', subject: 'OTP 112233', text: '112233' }),
+    });
+    await new Promise((r) => setTimeout(r, 80));
+    expect(saMsgs.some((m) => m.includes('email.received'))).toBe(false);
+
+    const saClosed = new Promise<void>((resolve) => saWs.once('close', () => resolve()));
+    await fetch(`${url}/api/service-accounts/sa_ws_test`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    await saClosed;
+
+    // Logout closes owner WS
+    const ownerWs = new WebSocket(url.replace('http://', 'ws://') + `/api/ws?token=${encodeURIComponent(token)}`);
+    await new Promise<void>((resolve) => ownerWs.once('open', () => resolve()));
+    const ownerClosed = new Promise<void>((resolve) => ownerWs.once('close', () => resolve()));
+    await fetch(`${url}/api/auth/logout`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    await ownerClosed;
   });
 
   it('serves CLI install script and native binary downloads with path traversal protection', async () => {

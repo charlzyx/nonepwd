@@ -21,8 +21,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::auth::{
-    authenticate_token, create_session, extract_bearer_token, hash_secret, now_iso_millis,
-    verify_secret, verify_webhook_hmac, AuthContext,
+    authenticate_token, claim_webhook_signature, create_session, extract_bearer_token,
+    hash_secret_async, now_iso_millis, verify_secret_async, verify_webhook_hmac, AuthContext,
 };
 use crate::db::{EmailFilterConfig, NonePwdDb};
 use crate::email_ingest::{ingest_pre_sealed_email, ingest_raw_email, ingest_simulated_email};
@@ -220,12 +220,12 @@ async fn handle_health(State(state): State<AppState>) -> Response {
 }
 
 async fn handle_auth_params(State(state): State<AppState>) -> Response {
-    let row: Option<(String, String, i64)> = {
+    let row: Option<(String, i64)> = {
         let conn = state.db.lock_conn();
         conn.query_row(
-            "SELECT email, kdf_salt, kdf_iterations FROM account WHERE id = 1",
+            "SELECT kdf_salt, kdf_iterations FROM account WHERE id = 1",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
         .ok()
@@ -234,9 +234,8 @@ async fn handle_auth_params(State(state): State<AppState>) -> Response {
 
     match row {
         None => Json(json!({ "initialized": false })).into_response(),
-        Some((email, kdf_salt, kdf_iterations)) => Json(json!({
+        Some((kdf_salt, kdf_iterations)) => Json(json!({
             "initialized": true,
-            "email": email,
             "kdfSalt": kdf_salt,
             "kdfIterations": kdf_iterations,
         }))
@@ -288,12 +287,19 @@ async fn handle_auth_setup(State(state): State<AppState>, body_bytes: Bytes) -> 
         return json_err(StatusCode::BAD_REQUEST, "Missing required setup fields");
     }
 
+    if !(1_000..=5_000_000).contains(&kdf_iterations) {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            "kdfIterations must be between 1000 and 5000000",
+        );
+    }
+
     let now = now_iso_millis();
     let cf_webhook_secret = match random_hex_32() {
         Ok(s) => s,
         Err(res) => return res,
     };
-    let auth_hash = match hash_secret(&auth_verifier) {
+    let auth_hash = match hash_secret_async(auth_verifier).await {
         Ok(h) => h,
         Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
@@ -434,7 +440,7 @@ async fn handle_auth_login(State(state): State<AppState>, body_bytes: Bytes) -> 
         return json_err(StatusCode::NOT_FOUND, "Account not initialized");
     };
 
-    if !verify_secret(&auth_verifier, &auth_verifier_hash) {
+    if !verify_secret_async(auth_verifier, auth_verifier_hash).await {
         return json_err(StatusCode::UNAUTHORIZED, "Invalid credentials");
     }
 
@@ -500,7 +506,7 @@ async fn handle_auth_service_account(
     let Some((sa_id, sa_name, sa_hash)) = sa else {
         return json_err(StatusCode::UNAUTHORIZED, "Invalid Service Account token");
     };
-    if !verify_secret(&auth_secret, &sa_hash) {
+    if !verify_secret_async(auth_secret, sa_hash).await {
         return json_err(StatusCode::UNAUTHORIZED, "Invalid Service Account token");
     }
 
@@ -529,11 +535,14 @@ async fn handle_auth_service_account(
 
 async fn handle_auth_logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(auth) = get_auth(&state.db, &headers) {
-        let conn = state.db.lock_conn();
-        let _ = conn.execute(
-            "DELETE FROM sessions WHERE token_hash = ?1",
-            params![auth.token_hash()],
-        );
+        {
+            let conn = state.db.lock_conn();
+            let _ = conn.execute(
+                "DELETE FROM sessions WHERE token_hash = ?1",
+                params![auth.token_hash()],
+            );
+        }
+        state.ws_hub.close_by_token_hash(auth.token_hash());
     }
     Json(json!({ "ok": true })).into_response()
 }
@@ -1113,41 +1122,77 @@ async fn handle_batch_items(
             return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"));
         }
 
-        let tx_res = (|| -> Result<(), String> {
-            let mut stmt = conn
+        let tx_res = (|| -> Result<(), (StatusCode, String)> {
+            let mut select_stmt = conn
+                .prepare("SELECT vault_id, created_at, version FROM items WHERE id = ?1")
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let mut insert_stmt = conn
                 .prepare(
-                    "INSERT OR REPLACE INTO items (id, vault_id, encrypted_data, created_at, updated_at, version)
+                    "INSERT INTO items (id, vault_id, encrypted_data, created_at, updated_at, version)
                      VALUES (?1, ?2, ?3, ?4, ?5, 1)",
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let mut update_stmt = conn
+                .prepare(
+                    "UPDATE items SET encrypted_data = ?1, updated_at = ?2, version = ?3
+                     WHERE id = ?4 AND vault_id = ?5",
+                )
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
             for entry in entries {
-                let id = match entry.id.filter(|s| !s.is_empty()) {
-                    Some(id) => id,
-                    None => random_id()?,
+                let id = match entry.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    Some(id) => id.to_string(),
+                    None => random_id().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?,
                 };
                 let encrypted_data = entry.encrypted_data.unwrap_or_default();
-                stmt.execute(params![id, vault_id, encrypted_data, now, now])
-                    .map_err(|e| e.to_string())?;
-                inserted.push(json!({
-                    "id": id,
-                    "vaultId": vault_id,
-                    "encryptedData": encrypted_data,
-                    "createdAt": now,
-                    "updatedAt": now,
-                    "version": 1,
-                }));
+                let existing: Option<(String, String, i64)> = select_stmt
+                    .query_row(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                    .optional()
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+                if let Some((existing_vault_id, created_at, old_ver)) = existing {
+                    if existing_vault_id != vault_id {
+                        return Err((
+                            StatusCode::CONFLICT,
+                            format!("Item {id} belongs to another vault"),
+                        ));
+                    }
+                    let next_ver = old_ver + 1;
+                    update_stmt
+                        .execute(params![encrypted_data, now, next_ver, id, vault_id])
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                    inserted.push(json!({
+                        "id": id,
+                        "vaultId": vault_id,
+                        "encryptedData": encrypted_data,
+                        "createdAt": created_at,
+                        "updatedAt": now,
+                        "version": next_ver,
+                    }));
+                } else {
+                    insert_stmt
+                        .execute(params![id, vault_id, encrypted_data, now, now])
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                    inserted.push(json!({
+                        "id": id,
+                        "vaultId": vault_id,
+                        "encryptedData": encrypted_data,
+                        "createdAt": now,
+                        "updatedAt": now,
+                        "version": 1,
+                    }));
+                }
             }
-            drop(stmt);
-            conn.execute_batch("COMMIT").map_err(|e| e.to_string())
+            drop(select_stmt);
+            drop(insert_stmt);
+            drop(update_stmt);
+            conn.execute_batch("COMMIT")
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
         })();
 
-        if let Err(e) = tx_res {
+        if let Err((status, msg)) = tx_res {
             let _ = conn.execute_batch("ROLLBACK");
-            return json_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Batch insert failed: {e}"),
-            );
+            return json_err(status, msg);
         }
     }
 
@@ -1174,6 +1219,7 @@ async fn handle_batch_items(
 #[serde(rename_all = "camelCase")]
 struct PutItemBody {
     encrypted_data: Option<String>,
+    expected_version: Option<i64>,
 }
 
 async fn handle_put_item(
@@ -1208,15 +1254,44 @@ async fn handle_put_item(
             .flatten();
 
         if let Some((created_at, old_ver)) = existing {
+            if let Some(expected_ver) = body.expected_version {
+                if expected_ver != old_ver {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({
+                            "error": "Version conflict",
+                            "currentVersion": old_ver,
+                        })),
+                    )
+                        .into_response();
+                }
+            }
             let next_ver = old_ver + 1;
-            if let Err(e) = conn.execute(
-                "UPDATE items SET encrypted_data = ?1, updated_at = ?2, version = ?3 WHERE id = ?4",
-                params![encrypted_data, now, next_ver, item_id],
+            match conn.execute(
+                "UPDATE items SET encrypted_data = ?1, updated_at = ?2, version = ?3
+                 WHERE id = ?4 AND vault_id = ?5 AND version = ?6",
+                params![encrypted_data, now, next_ver, item_id, vault_id, old_ver],
             ) {
-                return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"));
+                Ok(0) => return json_err(StatusCode::CONFLICT, "Version conflict"),
+                Ok(_) => {}
+                Err(e) => {
+                    return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"));
+                }
             }
             (created_at, next_ver)
         } else {
+            if let Some(expected_ver) = body.expected_version {
+                if expected_ver != 0 {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({
+                            "error": "Version conflict",
+                            "currentVersion": 0,
+                        })),
+                    )
+                        .into_response();
+                }
+            }
             let vault_exists: Option<String> = conn
                 .query_row(
                     "SELECT id FROM vaults WHERE id = ?1",
@@ -1754,7 +1829,7 @@ async fn handle_create_service_account(
         },
     };
     let now = now_iso_millis();
-    let auth_secret_hash = match hash_secret(&auth_secret) {
+    let auth_secret_hash = match hash_secret_async(auth_secret).await {
         Ok(h) => h,
         Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
@@ -1827,6 +1902,7 @@ async fn handle_delete_service_account(
     if changes == 0 {
         return json_err(StatusCode::NOT_FOUND, "Service Account not found");
     }
+    state.ws_hub.close_by_service_account(&id);
     Json(json!({ "ok": true })).into_response()
 }
 
@@ -2239,6 +2315,14 @@ async fn handle_cf_webhook(
         return json_err(StatusCode::UNAUTHORIZED, "Invalid webhook signature");
     }
 
+    if !claim_webhook_signature(
+        timestamp_header.unwrap_or_default(),
+        signature_header.unwrap_or_default(),
+        310,
+    ) {
+        return json_err(StatusCode::UNAUTHORIZED, "Webhook signature replay detected");
+    }
+
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -2357,6 +2441,46 @@ async fn handle_agent_relay(ws: WebSocketUpgrade, State(state): State<AppState>)
     })
 }
 
+fn is_valid_host_header(host: &str) -> bool {
+    if host.is_empty() || host.len() > 255 {
+        return false;
+    }
+    if let Some(rest) = host.strip_prefix('[') {
+        let Some((addr, after)) = rest.split_once(']') else {
+            return false;
+        };
+        if addr.is_empty()
+            || !addr
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+        {
+            return false;
+        }
+        if after.is_empty() {
+            return true;
+        }
+        return after
+            .strip_prefix(':')
+            .and_then(|p| p.parse::<u16>().ok())
+            .is_some_and(|p| p > 0);
+    }
+    let (name, port_opt) = match host.split_once(':') {
+        Some((n, p)) => (n, Some(p)),
+        None => (host, None),
+    };
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
+        return false;
+    }
+    if let Some(port_str) = port_opt {
+        return port_str.parse::<u16>().ok().is_some_and(|p| p > 0);
+    }
+    true
+}
+
 async fn handle_install_sh(headers: HeaderMap) -> Response {
     let scheme = headers
         .get("x-forwarded-proto")
@@ -2365,11 +2489,13 @@ async fn handle_install_sh(headers: HeaderMap) -> Response {
         .map(str::trim)
         .filter(|s| *s == "https" || *s == "http")
         .unwrap_or("http");
-    let host = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("127.0.0.1:8787");
+    let host = match headers.get(header::HOST) {
+        Some(raw) => match raw.to_str().ok().map(str::trim) {
+            Some(h) if is_valid_host_header(h) => h,
+            _ => return json_err(StatusCode::BAD_REQUEST, "Invalid Host header"),
+        },
+        None => "127.0.0.1:8787",
+    };
     let origin = format!("{scheme}://{host}");
 
     let script = format!(

@@ -79,7 +79,7 @@ function storeSealedEmail(
     receivedAt: params.receivedAt,
   };
 
-  wsHub.broadcast({ type: 'email.received', email: record });
+  wsHub.broadcast({ type: 'email.received', email: record }, { ownerOnly: true });
   return record;
 }
 

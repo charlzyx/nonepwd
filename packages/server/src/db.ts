@@ -146,14 +146,18 @@ export function openNonePwdDb(dataDir: string): NonePwdDb {
     },
     decryptLocalSecret(blob: string): string {
       if (!blob) return '';
-      const parts = blob.split('.');
-      if (parts.length !== 4 || parts[0] !== 's1') return '';
-      const iv = Buffer.from(parts[1], 'base64url');
-      const tag = Buffer.from(parts[2], 'base64url');
-      const enc = Buffer.from(parts[3], 'base64url');
-      const decipher = crypto.createDecipheriv('aes-256-gcm', serverKey, iv);
-      decipher.setAuthTag(tag);
-      return Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
+      try {
+        const parts = blob.split('.');
+        if (parts.length !== 4 || parts[0] !== 's1') return '';
+        const iv = Buffer.from(parts[1], 'base64url');
+        const tag = Buffer.from(parts[2], 'base64url');
+        const enc = Buffer.from(parts[3], 'base64url');
+        const decipher = crypto.createDecipheriv('aes-256-gcm', serverKey, iv);
+        decipher.setAuthTag(tag);
+        return Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
+      } catch {
+        return '';
+      }
     },
     close(): void {
       sqlite.close();

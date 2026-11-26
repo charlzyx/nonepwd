@@ -10,7 +10,48 @@
 export const AGENT_RELAY_PATH = '/agent/relay';
 const AUTH_TIMEOUT_MS = 5_000;
 const RENDEZVOUS_TTL_MS = 300_000;
+const MAX_RENDEZVOUS_PER_FINGERPRINT = 8;
+const MAX_COSE_KEY_BYTES = 128;
+const MAX_COSE_SIGN1_BYTES = 256;
+const DESTINATION_BYTES = 32;
+const MAX_PAYLOAD_BYTES = 65_536;
+const MAX_CBOR_DEPTH = 4;
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+export function parseByteArray(value: unknown, minLen: number, maxLen: number): Uint8Array | null {
+  if (!Array.isArray(value)) return null;
+  const len = value.length;
+  if (len < minLen || len > maxLen) return null;
+  const out = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    const n = value[i];
+    if (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > 255) return null;
+    out[i] = n;
+  }
+  return out;
+}
+
+export function isGetRendezvousMessage(parsed: unknown): boolean {
+  return (
+    parsed === 'GetRendezvous' ||
+    (typeof parsed === 'object' &&
+      parsed !== null &&
+      !Array.isArray(parsed) &&
+      'GetRendezvous' in parsed)
+  );
+}
+
+export function generateRendezvousCode(): string {
+  let code = '';
+  while (code.length < 9) {
+    const raw = randomBytes(16);
+    for (let i = 0; i < raw.length && code.length < 9; i++) {
+      const byte = raw[i]!;
+      if (byte < 252) code += ALPHABET[byte % ALPHABET.length];
+    }
+  }
+  return `${code.slice(0, 3)}-${code.slice(3, 6)}-${code.slice(6)}`;
+}
 
 export interface RelaySender {
   send(text: string): void;
@@ -78,9 +119,9 @@ export class AgentRelay {
   private async handle(id: number, text: string): Promise<void> {
     const conn = this.conns.get(id);
     if (!conn) return;
-    let parsed: Record<string, unknown>;
+    let parsed: unknown;
     try {
-      parsed = JSON.parse(text) as Record<string, unknown>;
+      parsed = JSON.parse(text);
     } catch {
       return;
     }
@@ -108,19 +149,42 @@ export class AgentRelay {
       return;
     }
 
-    if ('GetRendezvous' in parsed) {
+    if (isGetRendezvousMessage(parsed)) {
+      const now = Date.now();
+      const activeForFp: Array<[string, Rendezvous]> = [];
+      for (const [k, entry] of this.rendezvous) {
+        if (entry.used || now - entry.createdAt > RENDEZVOUS_TTL_MS) {
+          this.rendezvous.delete(k);
+        } else if (entry.fingerprint === conn.phase.fingerprint) {
+          activeForFp.push([k, entry]);
+        }
+      }
+      if (activeForFp.length >= MAX_RENDEZVOUS_PER_FINGERPRINT) {
+        activeForFp.sort((a, b) => a[1].createdAt - b[1].createdAt);
+        const excess = activeForFp.length - MAX_RENDEZVOUS_PER_FINGERPRINT + 1;
+        for (let i = 0; i < excess; i++) {
+          this.rendezvous.delete(activeForFp[i]![0]);
+        }
+      }
       const code = this.freshCode();
+      if (!code) return;
       this.rendezvous.set(code, {
         fingerprint: conn.phase.fingerprint,
-        createdAt: Date.now(),
+        createdAt: now,
         used: false,
       });
       this.sendToFingerprint(conn.phase.fingerprint, JSON.stringify({ RendezvousInfo: { code } }));
       return;
     }
-    if ('GetIdentity' in parsed) {
-      const body = parsed.GetIdentity as { code?: string } | null;
-      const code = body?.code ?? '';
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    const msg = parsed as Record<string, unknown>;
+
+    if ('GetIdentity' in msg) {
+      const body = msg.GetIdentity;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return;
+      const code = (body as { code?: unknown }).code;
+      if (typeof code !== 'string' || code.length === 0 || code.length > 32) return;
       const entry = this.rendezvous.get(code);
       if (!entry) return;
       const age = Date.now() - entry.createdAt;
@@ -144,32 +208,33 @@ export class AgentRelay {
       );
       return;
     }
-    if ('Send' in parsed) {
-      const body = parsed.Send as { destination?: number[]; payload?: number[] } | null;
-      if (!body?.destination || !body.payload) return;
-      const destination = bytesToHex(Uint8Array.from(body.destination));
+    if ('Send' in msg) {
+      const body = msg.Send;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return;
+      const sendObj = body as { destination?: unknown; payload?: unknown };
+      const destBytes = parseByteArray(sendObj.destination, DESTINATION_BYTES, DESTINATION_BYTES);
+      const payloadBytes = parseByteArray(sendObj.payload, 0, MAX_PAYLOAD_BYTES);
+      if (!destBytes || !payloadBytes) return;
+      const destination = bytesToHex(destBytes);
       this.sendToFingerprint(
         destination,
         JSON.stringify({
           Send: {
             source: hexToBytes(conn.phase.fingerprint),
-            destination: body.destination,
-            payload: body.payload,
+            destination: [...destBytes],
+            payload: [...payloadBytes],
           },
         })
       );
     }
   }
 
-  private freshCode(): string {
-    for (let i = 0; i < 8; i++) {
-      const raw = randomBytes(9);
-      let code = '';
-      for (let n = 0; n < 9; n++) code += ALPHABET[raw[n]! % ALPHABET.length];
-      const formatted = `${code.slice(0, 3)}-${code.slice(3, 6)}-${code.slice(6)}`;
+  private freshCode(): string | null {
+    for (let i = 0; i < 16; i++) {
+      const formatted = generateRendezvousCode();
       if (!this.rendezvous.has(formatted)) return formatted;
     }
-    return 'AAA-AAA-AAA';
+    return null;
   }
 
   private sendToFingerprint(fingerprint: string, text: string): void {
@@ -205,15 +270,34 @@ export interface VerifiedIdentity {
 
 export async function verifyAuthResponse(
   challenge: Uint8Array,
-  message: Record<string, unknown>
+  message: unknown
 ): Promise<VerifiedIdentity | null> {
-  const pair = message.AuthResponse;
+  if (!message || typeof message !== 'object' || Array.isArray(message)) return null;
+  const pair = (message as Record<string, unknown>).AuthResponse;
   if (!Array.isArray(pair) || pair.length < 2) return null;
-  const identity = pair[0] as { cose_key_bytes?: number[] } | null;
-  const response = pair[1] as { cose_sign1_bytes?: number[] } | null;
-  if (!identity?.cose_key_bytes || !response?.cose_sign1_bytes) return null;
-  const keyBytes = Uint8Array.from(identity.cose_key_bytes);
-  const signBytes = Uint8Array.from(response.cose_sign1_bytes);
+  const identity = pair[0];
+  const response = pair[1];
+  if (
+    !identity ||
+    typeof identity !== 'object' ||
+    Array.isArray(identity) ||
+    !response ||
+    typeof response !== 'object' ||
+    Array.isArray(response)
+  ) {
+    return null;
+  }
+  const keyBytes = parseByteArray(
+    (identity as { cose_key_bytes?: unknown }).cose_key_bytes,
+    1,
+    MAX_COSE_KEY_BYTES
+  );
+  const signBytes = parseByteArray(
+    (response as { cose_sign1_bytes?: unknown }).cose_sign1_bytes,
+    1,
+    MAX_COSE_SIGN1_BYTES
+  );
+  if (!keyBytes || !signBytes) return null;
   const publicKey = extractOkpPublicKey(keyBytes);
   const signed = decodeCoseSign1(signBytes);
   if (!publicKey || !signed) return null;
@@ -223,7 +307,7 @@ export async function verifyAuthResponse(
   const fingerprint = new Uint8Array(await crypto.subtle.digest('SHA-256', bytesToArrayBuffer(publicKey)));
   return {
     fingerprintHex: bytesToHex(fingerprint),
-    identity: identity.cose_key_bytes,
+    identity: [...keyBytes],
     publicKey,
   };
 }
@@ -269,13 +353,17 @@ export async function signChallenge(
 function extractOkpPublicKey(coseKey: Uint8Array): Uint8Array | null {
   const decoded = decodeCbor(coseKey);
   if (!decoded || !(decoded.value instanceof Map)) return null;
+  let kty: number | null = null;
   let alg: number | null = null;
+  let crv: number | null = null;
   let x: Uint8Array | null = null;
   for (const [key, value] of decoded.value) {
+    if (key === 1 && typeof value === 'number') kty = value;
     if (key === 3 && typeof value === 'number') alg = value;
+    if (key === -1 && typeof value === 'number') crv = value;
     if (key === -2 && value instanceof Uint8Array) x = value;
   }
-  if (alg !== -8 || !x || x.length !== 32) return null;
+  if (kty !== 1 || alg !== -8 || crv !== -8 || !x || x.length !== 32) return null;
   if (decoded.offset !== coseKey.length) return null;
   return x;
 }
@@ -295,8 +383,8 @@ function decodeCoseSign1(bytes: Uint8Array): { payload: Uint8Array; signature: U
 
 type Cbor = number | Uint8Array | string | Cbor[] | Map<Cbor, Cbor> | null | boolean;
 
-function decodeCbor(data: Uint8Array, offset = 0): { value: Cbor; offset: number } | null {
-  if (offset >= data.length) return null;
+function decodeCbor(data: Uint8Array, offset = 0, depth = 0): { value: Cbor; offset: number } | null {
+  if (depth > MAX_CBOR_DEPTH || offset >= data.length) return null;
   const initial = data[offset]!;
   const major = initial >> 5;
   const additional = initial & 0x1f;
@@ -345,10 +433,10 @@ function decodeCbor(data: Uint8Array, offset = 0): { value: Cbor; offset: number
   }
   if (major === 4) {
     const len = readLen();
-    if (len === null) return null;
+    if (len === null || len > data.length - cursor) return null;
     const items: Cbor[] = [];
     for (let i = 0; i < len; i++) {
-      const item = decodeCbor(data, cursor);
+      const item = decodeCbor(data, cursor, depth + 1);
       if (!item) return null;
       items.push(item.value);
       cursor = item.offset;
@@ -357,12 +445,12 @@ function decodeCbor(data: Uint8Array, offset = 0): { value: Cbor; offset: number
   }
   if (major === 5) {
     const len = readLen();
-    if (len === null) return null;
+    if (len === null || len * 2 > data.length - cursor) return null;
     const map = new Map<Cbor, Cbor>();
     for (let i = 0; i < len; i++) {
-      const key = decodeCbor(data, cursor);
+      const key = decodeCbor(data, cursor, depth + 1);
       if (!key) return null;
-      const value = decodeCbor(data, key.offset);
+      const value = decodeCbor(data, key.offset, depth + 1);
       if (!value) return null;
       map.set(key.value, value.value);
       cursor = value.offset;

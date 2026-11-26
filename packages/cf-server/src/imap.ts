@@ -11,7 +11,8 @@ import type { CfServerEnv } from './types.js';
 
 const MAX_IMAP_LITERAL_BYTES = 8 * 1024 * 1024;
 /** Sync fetches headers plus a short text slice. Refuse anything larger than this. */
-const IMAP_SYNC_MAX_LITERAL_BYTES = 64 * 1024;
+const IMAP_SYNC_MAX_LITERAL_BYTES = 96 * 1024;
+const MAX_IMAP_LINE_BYTES = 65_536;
 /** Minimum gap between sync attempts, including attempts the isolate is killed during. */
 export const IMAP_SYNC_MIN_INTERVAL_MS = 15_000;
 /** First failure waits this long; each further failure doubles it. */
@@ -21,7 +22,7 @@ export const IMAP_SYNC_BACKOFF_MAX_MS = 15 * 60 * 1000;
 export const IMAP_CODE_WINDOW_MS = 15 * 60 * 1000;
 export const IMAP_LONG_GAP_MS = IMAP_CODE_WINDOW_MS;
 export const IMAP_MAX_MESSAGES_PER_ACCOUNT = 2;
-export const IMAP_PARTIAL_TEXT_BYTES = 8192;
+export const IMAP_PARTIAL_TEXT_BYTES = 32768;
 const IMAP_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const IMAP_MONTH_INDEX: Record<string, number> = {
   jan: 0,
@@ -79,6 +80,12 @@ export class ImapAccountValidationError extends Error {
     public readonly statusCode: 400 | 404 = 400
   ) {
     super(message);
+  }
+}
+
+class ImapOversizedLiteralError extends Error {
+  constructor(litLen: number, maxLiteral: number) {
+    super(`IMAP literal (${litLen} bytes) exceeds ${maxLiteral} byte limit`);
   }
 }
 
@@ -154,6 +161,22 @@ export async function decryptImapPassword(secretKeySource: string, encoded: stri
     cipher as BufferSource
   );
   return textDecoder.decode(plainBuf);
+}
+
+async function decryptImapPasswordWithFallback(
+  primaryKey: string,
+  fallbackKey: string | undefined,
+  encoded: string
+): Promise<string> {
+  if (!encoded) return '';
+  try {
+    return await decryptImapPassword(primaryKey, encoded);
+  } catch (err) {
+    if (fallbackKey && fallbackKey !== primaryKey) {
+      return await decryptImapPassword(fallbackKey, encoded);
+    }
+    throw err;
+  }
 }
 
 export function clampImapPort(port: unknown, fallback: number = 993): number {
@@ -244,7 +267,7 @@ async function listImapAccountRows(db: D1Database): Promise<ImapAccountRow[]> {
   let res = await db
     .prepare(
       `SELECT id, label, enabled, host, port, tls, username, password_enc,
-              last_uid, status, last_error, last_sync_at, updated_at
+              last_uid, status, last_error, last_sync_at, sync_fail_count, uid_baselined, updated_at
        FROM imap_accounts ORDER BY rowid ASC`
     )
     .all<ImapAccountRow>();
@@ -254,7 +277,7 @@ async function listImapAccountRows(db: D1Database): Promise<ImapAccountRow[]> {
     res = await db
       .prepare(
         `SELECT id, label, enabled, host, port, tls, username, password_enc,
-                last_uid, status, last_error, last_sync_at, updated_at
+                last_uid, status, last_error, last_sync_at, sync_fail_count, uid_baselined, updated_at
          FROM imap_accounts ORDER BY rowid ASC`
       )
       .all<ImapAccountRow>();
@@ -353,7 +376,8 @@ async function getWebhookSecret(db: D1Database): Promise<string> {
 export async function saveImapAccount(
   db: D1Database,
   input: SaveImapAccountInput,
-  mode: 'create_or_upsert' | 'update_strict' | 'legacy_put'
+  mode: 'create_or_upsert' | 'update_strict' | 'legacy_put',
+  encryptionKey?: string
 ): Promise<{
   id: string | null;
   created: boolean;
@@ -361,7 +385,7 @@ export async function saveImapAccount(
   hasPassword: boolean;
 }> {
   await ensureLegacyImapMigrated(db);
-  const webhookSecret = await getWebhookSecret(db);
+  const secretKeySource = encryptionKey?.trim() || (await getWebhookSecret(db));
   const rows = await listImapAccountRows(db);
 
   let existing: ImapAccountRow | undefined;
@@ -406,7 +430,7 @@ export async function saveImapAccount(
 
   let nextPasswordEnc = existing?.password_enc ?? '';
   if (input.password && input.password.trim().length > 0) {
-    nextPasswordEnc = await encryptImapPassword(webhookSecret, input.password);
+    nextPasswordEnc = await encryptImapPassword(secretKeySource, input.password);
   }
 
   const now = new Date().toISOString();
@@ -457,6 +481,7 @@ export async function saveImapAccount(
     nextPort !== clampImapPort(existing.port) ||
     nextUsername !== existing.username;
   const nextLastUid = endpointChanged ? 0 : existing?.last_uid ?? 0;
+  const nextUidBaselined = endpointChanged ? 0 : Number(existing?.uid_baselined ?? 0);
   const nextStatus: ImapAccountStatus = nextEnabled ? 'listening' : 'disabled';
 
   if (existing) {
@@ -464,7 +489,8 @@ export async function saveImapAccount(
       .prepare(
         `UPDATE imap_accounts
          SET label = ?, enabled = ?, host = ?, port = ?, tls = ?, username = ?, password_enc = ?,
-             last_uid = ?, status = ?, last_error = NULL, updated_at = ?
+             last_uid = ?, status = ?, last_error = NULL, last_sync_at = NULL,
+             sync_fail_count = 0, uid_baselined = ?, updated_at = ?
          WHERE id = ?`
       )
       .bind(
@@ -477,6 +503,7 @@ export async function saveImapAccount(
         nextPasswordEnc,
         nextLastUid,
         nextStatus,
+        nextUidBaselined,
         now,
         targetId
       )
@@ -485,8 +512,8 @@ export async function saveImapAccount(
     await db
       .prepare(
         `INSERT INTO imap_accounts
-         (id, label, enabled, host, port, tls, username, password_enc, last_uid, status, last_error, last_sync_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`
+         (id, label, enabled, host, port, tls, username, password_enc, last_uid, status, last_error, last_sync_at, sync_fail_count, uid_baselined, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 0, ?)`
       )
       .bind(
         targetId,
@@ -533,7 +560,8 @@ export async function resolveImapTestParams(
     tls?: boolean;
     username?: string;
     password?: string;
-  }
+  },
+  fallbackSecret?: string
 ): Promise<{ host: string; port: number; tls: boolean; username: string; password: string }> {
   await ensureLegacyImapMigrated(db);
 
@@ -594,7 +622,11 @@ export async function resolveImapTestParams(
 
   let password = body.password && body.password.trim().length > 0 ? body.password : '';
   if (!password && stored?.password_enc && webhookSecret) {
-    password = await decryptImapPassword(webhookSecret, stored.password_enc);
+    password = await decryptImapPasswordWithFallback(
+      webhookSecret,
+      fallbackSecret,
+      stored.password_enc
+    );
   }
 
   return { host, port, tls, username, password };
@@ -779,6 +811,7 @@ const IMAP_DROP_REASONS = new Set([
   'account_not_initialized',
   'empty',
   'baseline',
+  'oversized',
 ]);
 
 export function logImapDrop(reason: string): void {
@@ -863,15 +896,24 @@ export class SocketByteReader {
     return out;
   }
 
-  async readLine(): Promise<string | null> {
+  async readLine(maxBytes: number = MAX_IMAP_LINE_BYTES): Promise<string | null> {
     while (true) {
       const nlIdx = this.findByte(0x0a);
       if (nlIdx !== -1) {
+        if (nlIdx + 1 > maxBytes) {
+          throw new Error(`IMAP line exceeds ${maxBytes} byte limit`);
+        }
         return textDecoder.decode(this.copyAndDiscard(nlIdx + 1));
+      }
+      if (this.buffered > maxBytes) {
+        throw new Error(`IMAP line exceeds ${maxBytes} byte limit`);
       }
       const ok = await this.pull();
       if (!ok) {
         if (this.buffered === 0) return null;
+        if (this.buffered > maxBytes) {
+          throw new Error(`IMAP line exceeds ${maxBytes} byte limit`);
+        }
         return textDecoder.decode(this.copyAndDiscard(this.buffered));
       }
     }
@@ -974,7 +1016,7 @@ class WorkersImapClient {
         const litLen = parseLiteralLen(currentLine);
         if (litLen === null) break;
         if (litLen > this.maxLiteral) {
-          throw new Error(`IMAP literal (${litLen} bytes) exceeds ${this.maxLiteral} byte limit`);
+          throw new ImapOversizedLiteralError(litLen, this.maxLiteral);
         }
         const rawLit = await this.byteReader.readExact(litLen);
         literalChunks.push(rawLit);
@@ -1159,6 +1201,7 @@ type ImapReadOutcome =
   | 'alias_disabled'
   | 'account_not_initialized'
   | 'empty'
+  | 'oversized'
   | 'failed';
 
 function messageDateFromFetch(items: Array<{ line: string; literal: Uint8Array }>): Date | null {
@@ -1171,8 +1214,8 @@ function messageDateFromFetch(items: Array<{ line: string; literal: Uint8Array }
 
 /**
  * Date probe first so a stale message is not parsed or encrypted.
- * A throw, including an oversized literal, is a failed read: the caller must not
- * move last_uid past this UID.
+ * An oversized literal returns 'oversized' so the caller can drop and advance past
+ * the poison UID; other throws return 'failed' so transient errors do not skip mail.
  */
 async function readOneImapMessage(
   client: WorkersImapClient,
@@ -1190,28 +1233,40 @@ async function readOneImapMessage(
     // older (a forward, or a few minutes of transit) and must not discard it.
     if (!receivedAt && shouldSkipStaleCode(messageDateFromFetch(fetched))) return 'stale';
 
-    let sawBody = false;
-    for (const item of fetched) {
-      if (item.literal.byteLength === 0) continue;
-      sawBody = true;
-      const res = await ingestRawEmail({
-        env,
-        rawMime: item.literal,
-        source: 'imap',
-        envelopeTo,
-      });
-      if (res.accepted) return 'stored';
-      if (
-        res.reason === 'filtered' ||
-        res.reason === 'alias_disabled' ||
-        res.reason === 'account_not_initialized'
-      ) {
-        return res.reason;
+    const parts = fetched.map((item) => item.literal).filter((lit) => lit.byteLength > 0);
+    if (parts.length === 0) return 'empty';
+    let rawMime: Uint8Array;
+    if (parts.length === 1) {
+      rawMime = parts[0]!;
+    } else {
+      const total = parts.reduce((acc, p) => acc + p.byteLength, 0);
+      rawMime = new Uint8Array(total);
+      let offset = 0;
+      for (const p of parts) {
+        rawMime.set(p, offset);
+        offset += p.byteLength;
       }
-      return 'failed';
     }
-    return sawBody ? 'failed' : 'empty';
-  } catch {
+
+    const res = await ingestRawEmail({
+      env,
+      rawMime,
+      source: 'imap',
+      envelopeTo,
+    });
+    if (res.accepted) return 'stored';
+    if (
+      res.reason === 'filtered' ||
+      res.reason === 'alias_disabled' ||
+      res.reason === 'account_not_initialized'
+    ) {
+      return res.reason;
+    }
+    return 'failed';
+  } catch (err) {
+    if (err instanceof ImapOversizedLiteralError) {
+      return 'oversized';
+    }
     return 'failed';
   }
 }
@@ -1249,16 +1304,22 @@ export async function syncImapAccount(
     return { synced: 0, throttled: true };
   }
 
+  const explicitEncKey = env.IMAP_ENCRYPTION_KEY?.trim() || undefined;
   const account = await env.DB.prepare('SELECT cf_webhook_secret FROM account WHERE id = 1').first<{
     cf_webhook_secret: string;
   }>();
-  if (!account?.cf_webhook_secret) {
+  const primaryEncKey = explicitEncKey ?? account?.cf_webhook_secret;
+  if (!primaryEncKey) {
     return { synced: 0 };
   }
 
   let password = '';
   try {
-    password = await decryptImapPassword(account.cf_webhook_secret, row.password_enc);
+    password = await decryptImapPasswordWithFallback(
+      primaryEncKey,
+      explicitEncKey ? account?.cf_webhook_secret : undefined,
+      row.password_enc
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     await markImapFailure(env, row.id, msg);
@@ -1286,6 +1347,7 @@ export async function syncImapAccount(
       const envelopeTo = row.username.trim() || undefined;
       let committedUid = row.last_uid ?? 0;
       let failed = false;
+      let streamDesynced = false;
 
       for (const uid of targetUids) {
         const outcome = await readOneImapMessage(client, env, uid, envelopeTo);
@@ -1301,6 +1363,10 @@ export async function syncImapAccount(
         )
           .bind(committedUid, row.id, committedUid)
           .run();
+        if (outcome === 'oversized') {
+          streamDesynced = true;
+          break;
+        }
       }
 
       if (failed) {
@@ -1309,7 +1375,7 @@ export async function syncImapAccount(
 
       // Nothing in the code window: park last_uid at the mailbox high-water mark
       // so the next alarm does not keep listing history that SINCE already excluded.
-      if (baseline && found.length === 0) {
+      if (!streamDesynced && baseline && found.length === 0) {
         const highWater = await readMailboxHighWater(client);
         if (highWater > committedUid) {
           logImapDrop('baseline');
@@ -1317,7 +1383,9 @@ export async function syncImapAccount(
         }
       }
 
-      await client.logout();
+      if (!streamDesynced) {
+        await client.logout();
+      }
       await markImapSuccess(env, row.id, committedUid);
       return { synced, baselined: baseline };
     });
