@@ -26,6 +26,19 @@ use tungstenite::Message;
 use crate::config::{load_config, save_config, CliSessionData};
 use crate::net::{connect_ws, http_request};
 
+const MIN_KDF_ITERATIONS: u32 = 1_000;
+const MAX_KDF_ITERATIONS: u32 = 5_000_000;
+
+pub enum EmailOtpWaitState {
+    Found(DecryptedEmailItem),
+    Wait {
+        ws_url: String,
+        priv_key: String,
+        lookback_secs: i64,
+        wait_seconds: f64,
+    },
+}
+
 pub fn now_iso_utc() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -270,7 +283,9 @@ impl NonePwdClient {
         self.server_override = Some(clean_server.clone());
         let secret_key = generate_secret_key()?;
         let kdf_salt = to_base64_url(&random_bytes(16)?);
-        let iterations = kdf_iterations.unwrap_or(DEFAULT_KDF_ITERATIONS);
+        let iterations = kdf_iterations
+            .unwrap_or(DEFAULT_KDF_ITERATIONS)
+            .clamp(MIN_KDF_ITERATIONS, MAX_KDF_ITERATIONS);
 
         let (muk, auth_verifier) =
             derive_account_keys_raw(password, &secret_key, &kdf_salt, iterations)?;
@@ -379,7 +394,15 @@ impl NonePwdClient {
             return Err("Server is not initialized. Run `np setup` first.".into());
         }
         let kdf_salt = params["kdfSalt"].as_str().ok_or("Missing kdfSalt")?;
-        let kdf_iter = params["kdfIterations"].as_u64().ok_or("Missing kdfIterations")? as u32;
+        let raw_iter = params["kdfIterations"]
+            .as_u64()
+            .ok_or("Missing kdfIterations")?;
+        if !(MIN_KDF_ITERATIONS as u64..=MAX_KDF_ITERATIONS as u64).contains(&raw_iter) {
+            return Err(format!(
+                "Server kdfIterations ({raw_iter}) out of allowed range ({MIN_KDF_ITERATIONS}..={MAX_KDF_ITERATIONS})"
+            ));
+        }
+        let kdf_iter = raw_iter as u32;
 
         let (muk, auth_verifier) =
             derive_account_keys_raw(password, &secret_key, kdf_salt, kdf_iter)?;
@@ -1200,12 +1223,12 @@ impl NonePwdClient {
         true
     }
 
-    pub fn wait_for_email_otp(
+    pub fn prepare_email_otp_wait(
         &mut self,
         domain: Option<&str>,
         alias: Option<&str>,
         wait_seconds: f64,
-    ) -> Result<DecryptedEmailItem, String> {
+    ) -> Result<EmailOtpWaitState, String> {
         self.sync()?;
         let priv_key = self
             .email_private_key_pkcs8_b64
@@ -1223,10 +1246,15 @@ impl NonePwdClient {
             .iter()
             .find(|em| Self::matches_email_filter(&em.payload, domain, alias, lookback_secs))
         {
-            return Ok(found.clone());
+            return Ok(EmailOtpWaitState::Found(found.clone()));
         }
 
-        if wait_seconds <= 0.0 {
+        let clamped_wait = if wait_seconds.is_finite() && wait_seconds > 0.0 {
+            wait_seconds.min(120.0)
+        } else {
+            0.0
+        };
+        if clamped_wait <= 0.0 {
             return Err("No matching email OTP code found".into());
         }
 
@@ -1244,8 +1272,24 @@ impl NonePwdClient {
             .ok_or("Missing session token")?;
         let ws_url = format!("{ws_base}/api/ws?token={token}");
 
+        Ok(EmailOtpWaitState::Wait {
+            ws_url,
+            priv_key,
+            lookback_secs,
+            wait_seconds: clamped_wait,
+        })
+    }
+
+    pub fn poll_email_otp_ws(
+        ws_url: &str,
+        priv_key: &str,
+        domain: Option<&str>,
+        alias: Option<&str>,
+        lookback_secs: i64,
+        wait_seconds: f64,
+    ) -> Result<DecryptedEmailItem, String> {
         let deadline = Instant::now() + Duration::from_secs_f64(wait_seconds);
-        let mut ws = connect_ws(&ws_url, Some(Duration::from_millis(500)))?;
+        let mut ws = connect_ws(ws_url, Some(Duration::from_millis(500)))?;
 
         loop {
             if Instant::now() >= deadline {
@@ -1261,7 +1305,7 @@ impl NonePwdClient {
                                 serde_json::from_value::<EncryptedEmailRow>(val["email"].clone())
                             {
                                 if let Ok(opened) = open_sealed_json::<DecryptedEmailPayload>(
-                                    &priv_key,
+                                    priv_key,
                                     &row.sealed_envelope,
                                     "nonepwd-email-v1",
                                 ) {
@@ -1300,6 +1344,30 @@ impl NonePwdClient {
                 }
                 Err(e) => return Err(format!("WebSocket error: {e}")),
             }
+        }
+    }
+
+    pub fn wait_for_email_otp(
+        &mut self,
+        domain: Option<&str>,
+        alias: Option<&str>,
+        wait_seconds: f64,
+    ) -> Result<DecryptedEmailItem, String> {
+        match self.prepare_email_otp_wait(domain, alias, wait_seconds)? {
+            EmailOtpWaitState::Found(item) => Ok(item),
+            EmailOtpWaitState::Wait {
+                ws_url,
+                priv_key,
+                lookback_secs,
+                wait_seconds,
+            } => Self::poll_email_otp_ws(
+                &ws_url,
+                &priv_key,
+                domain,
+                alias,
+                lookback_secs,
+                wait_seconds,
+            ),
         }
     }
 

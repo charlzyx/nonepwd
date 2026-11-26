@@ -124,10 +124,12 @@ export async function startConnectServer(
         const domain = url.searchParams.get('domain') ?? undefined;
         const alias = url.searchParams.get('alias') ?? undefined;
         const waitSeconds = Number.parseFloat(url.searchParams.get('waitSeconds') ?? '0');
+        const clampedWait =
+          Number.isFinite(waitSeconds) && waitSeconds > 0 ? Math.min(waitSeconds, 120) : 0;
         const email = await options.client.waitForEmailOtp({
           domain,
           alias,
-          waitSeconds: Number.isFinite(waitSeconds) ? waitSeconds : 0,
+          waitSeconds: clampedWait,
         });
         sendJson(res, 200, {
           otpCode: email.otpCode,

@@ -39,6 +39,10 @@ import {
 } from '@nonepwd/core';
 import { loadCliConfig, saveCliConfig } from './config.js';
 
+const MIN_KDF_ITERATIONS = 1_000;
+const MAX_KDF_ITERATIONS = 5_000_000;
+const MAX_EMAIL_OTP_WAIT_SECONDS = 120;
+
 export interface DecryptedVault {
   id: string;
   metadata: VaultMetadata;
@@ -136,7 +140,14 @@ export class NonePwdCliClient {
     this.serverUrlOverride = params.serverUrl.replace(/\/+$/, '');
     const secretKey = generateSecretKey();
     const kdfSalt = toBase64Url(randomBytes(16));
-    const kdfIterations = params.kdfIterations ?? DEFAULT_KDF_ITERATIONS;
+    const rawIterations = params.kdfIterations ?? DEFAULT_KDF_ITERATIONS;
+    const kdfIterations = Math.min(
+      MAX_KDF_ITERATIONS,
+      Math.max(
+        MIN_KDF_ITERATIONS,
+        Number.isFinite(rawIterations) ? Math.trunc(rawIterations) : DEFAULT_KDF_ITERATIONS
+      )
+    );
 
     const { masterUnlockKeyBytes, authVerifierB64 } = await deriveAccountKeys(
       params.password,
@@ -242,6 +253,15 @@ export class NonePwdCliClient {
 
     if (!authParams.initialized || !authParams.kdfSalt || !authParams.kdfIterations) {
       throw new Error('Server is not initialized. Run `np setup` first.');
+    }
+    if (
+      !Number.isInteger(authParams.kdfIterations) ||
+      authParams.kdfIterations < MIN_KDF_ITERATIONS ||
+      authParams.kdfIterations > MAX_KDF_ITERATIONS
+    ) {
+      throw new Error(
+        `Server kdfIterations (${authParams.kdfIterations}) out of allowed range (${MIN_KDF_ITERATIONS}..=${MAX_KDF_ITERATIONS})`
+      );
     }
 
     const { masterUnlockKeyBytes, authVerifierB64 } = await deriveAccountKeys(
@@ -914,7 +934,11 @@ export class NonePwdCliClient {
     );
     if (existing) return existing;
 
-    const waitSeconds = opts.waitSeconds ?? 0;
+    const rawWait = opts.waitSeconds ?? 0;
+    const waitSeconds =
+      Number.isFinite(rawWait) && rawWait > 0
+        ? Math.min(rawWait, MAX_EMAIL_OTP_WAIT_SECONDS)
+        : 0;
     if (waitSeconds <= 0) {
       throw new Error('No matching email OTP code found');
     }

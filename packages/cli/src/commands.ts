@@ -11,7 +11,44 @@ import {
 } from '@nonepwd/core';
 import { NonePwdCliClient } from './client.js';
 import { startConnectServer } from './connect-server.js';
-import { loadCliConfig } from './config.js';
+import { loadCliConfig, writePrivateFileAtomic } from './config.js';
+
+const SCRUBBED_NONEPWD_ENV_VARS = new Set([
+  'NONEPWD_TOKEN',
+  'NONEPWD_MASTER_PASSWORD',
+  'NONEPWD_SECRET_KEY',
+  'NONEPWD_AGENT_TOKEN',
+  'NONEPWD_CONNECT_TOKEN',
+]);
+
+const DANGEROUS_ENV_VARS = new Set([
+  'PATH',
+  'NODE_OPTIONS',
+  'BASH_ENV',
+  'ENV',
+  'IFS',
+  'PYTHONSTARTUP',
+  'PYTHONPATH',
+  'RUBYOPT',
+  'PERL5OPT',
+]);
+
+export function isDangerousEnvVar(name: string): boolean {
+  const upper = name.trim().toUpperCase();
+  return (
+    upper.startsWith('LD_') ||
+    upper.startsWith('DYLD_') ||
+    DANGEROUS_ENV_VARS.has(upper)
+  );
+}
+
+function scrubNonepwdEnv(env: Record<string, string | undefined>): void {
+  for (const key of Object.keys(env)) {
+    if (SCRUBBED_NONEPWD_ENV_VARS.has(key.toUpperCase())) {
+      delete env[key];
+    }
+  }
+}
 
 export interface CliIo {
   stdout: (text: string) => void;
@@ -373,7 +410,7 @@ export async function runCli(argv: string[], ioOverride?: Partial<CliIo>): Promi
           : fs.readFileSync(0, 'utf8');
         const rendered = await injectSecretRefs(rawTemplate, (ref) => client.resolveSecretRef(ref));
         if (outFile) {
-          fs.writeFileSync(outFile, rendered, 'utf8');
+          writePrivateFileAtomic(outFile, rendered);
           io.stdout(`Injected secrets into ${outFile}`);
         } else {
           io.stdout(rendered);
@@ -391,14 +428,20 @@ export async function runCli(argv: string[], ioOverride?: Partial<CliIo>): Promi
         if (envFile) {
           const parsedEnv = parseDotEnv(fs.readFileSync(envFile, 'utf8'));
           for (const [k, v] of Object.entries(parsedEnv)) {
+            if (isDangerousEnvVar(k)) {
+              throw new Error(
+                `Refusing to load dangerous environment variable "${k}" from --env-file`
+              );
+            }
             childEnv[k] = v;
           }
         }
         for (const [k, v] of Object.entries(childEnv)) {
-          if (typeof v === 'string' && v.includes('np://')) {
+          if (typeof v === 'string' && (v.includes('np://') || v.includes('op://'))) {
             childEnv[k] = await injectSecretRefs(v, (ref) => client.resolveSecretRef(ref));
           }
         }
+        scrubNonepwdEnv(childEnv);
 
         const exitCode = await new Promise<number>((resolve, reject) => {
           const child = spawn(command[0], command.slice(1), {

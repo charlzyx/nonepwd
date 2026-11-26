@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -27,32 +27,60 @@ pub struct CliConfig {
     pub session: Option<CliSessionData>,
 }
 
-pub fn resolve_config_dir(override_dir: Option<&str>) -> PathBuf {
+pub fn resolve_config_dir(override_dir: Option<&str>) -> Result<PathBuf, String> {
     if let Some(d) = override_dir {
         if !d.is_empty() {
-            return PathBuf::from(d);
+            return Ok(PathBuf::from(d));
         }
     }
     if let Ok(d) = env::var("NONEPWD_CONFIG_DIR") {
         if !d.is_empty() {
-            return PathBuf::from(d);
+            return Ok(PathBuf::from(d));
         }
     }
     if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("nonepwd");
+            return Ok(PathBuf::from(xdg).join("nonepwd"));
         }
     }
-    if let Ok(home) = env::var("HOME") {
+    if let Ok(home) = env::var("HOME").or_else(|_| env::var("USERPROFILE")) {
         if !home.is_empty() {
-            return PathBuf::from(home).join(".config").join("nonepwd");
+            return Ok(PathBuf::from(home).join(".config").join("nonepwd"));
         }
     }
-    PathBuf::from(".nonepwd-config")
+    Err(
+        "Unable to determine config directory: set HOME, XDG_CONFIG_HOME, or NONEPWD_CONFIG_DIR"
+            .to_string(),
+    )
+}
+
+pub fn ensure_config_dir(dir: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if !dir.exists() {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .map_err(|e| format!("Failed creating config dir {}: {e}", dir.display()))?;
+        }
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("Failed setting permissions on {}: {e}", dir.display()))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(dir)
+            .map_err(|e| format!("Failed creating config dir {}: {e}", dir.display()))
+    }
 }
 
 pub fn load_config(override_dir: Option<&str>) -> CliConfig {
-    let path = resolve_config_dir(override_dir).join("config.json");
+    let Ok(dir) = resolve_config_dir(override_dir) else {
+        return CliConfig::default();
+    };
+    let path = dir.join("config.json");
     let Ok(bytes) = fs::read(path) else {
         return CliConfig::default();
     };
@@ -60,22 +88,8 @@ pub fn load_config(override_dir: Option<&str>) -> CliConfig {
 }
 
 pub fn save_config(cfg: &CliConfig, override_dir: Option<&str>) -> Result<PathBuf, String> {
-    let dir = resolve_config_dir(override_dir);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        if !dir.exists() {
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&dir)
-                .map_err(|e| format!("Failed creating config dir: {e}"))?;
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        fs::create_dir_all(&dir).map_err(|e| format!("Failed creating config dir: {e}"))?;
-    }
+    let dir = resolve_config_dir(override_dir)?;
+    ensure_config_dir(&dir)?;
 
     let target = dir.join("config.json");
     let tmp = dir.join(format!("config.json.tmp.{}", std::process::id()));

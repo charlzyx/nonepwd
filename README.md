@@ -12,8 +12,8 @@
 
 ## 核心特性
 
-- **双密钥零知识**：`Master Password + Secret Key (NP3-...)` 本地 600k PBKDF2 派生，Per-Vault `AES-256-GCM` 独立加密，服务端零明文。
-- **实时邮箱接码**：同时监听 Gmail / QQ / 163 / iCloud / Outlook 多账号 IMAP，并支持 Cloudflare Email Routing 无限域名别名；`X25519` 密封后经 WebSocket 秒级推送。
+- **双密钥零知识**：`Master Password + Secret Key (NP3-...)` 本地 600k PBKDF2 派生，Per-Vault `AES-256-GCM` 独立加密；密码库条目与边缘密封邮件均保持端到端零知识（服务端无明文访问能力）。
+- **实时邮箱接码**：同时监听 Gmail / QQ / 163 / iCloud / Outlook 多账号 IMAP，并支持 Cloudflare Email Routing 无限域名别名；收到的邮件经 `X25519` 公钥密封后通过 WebSocket 秒级推送（说明：Cloudflare 边缘收信全程零知识密封；若启用服务端后台 IMAP 轮询，服务端需保存加密后的邮箱应用专用密码以便后台登录 IMAP 服务器拉信）。
 - **框选与扫码 2FA**：支持桌面屏幕框选、浏览器网页划区识别、手机相机/相册扫码，以及 Google Authenticator `otpauth-migration://` 一键导入。
 - **全端自动填充**：Android 系统级 `AutofillService`（Keystore 加密缓存 + 包名/域名匹配）与闭合 Shadow DOM 浏览器扩展（支持多步六宫格验证码接力）。
 - **全品类密钥库**：统一托管登录凭据、API Key、SSH 密钥、银行卡、身份地址与安全笔记，支持 Chrome / 1Password CSV 迁移。
@@ -64,7 +64,8 @@ docker compose up -d --build
 ## CLI 速览
 
 ```bash
-np signin --server https://vault.yourdomain.com --secret-key "NP3-..." --password "..."
+export NONEPWD_MASTER_PASSWORD="..."           # 优先通过环境变量传入主密码，避免暴露在命令行参数/历史中
+np signin --server https://vault.yourdomain.com --secret-key "NP3-..."
 np run --env-file .env.tpl -- npm run dev      # 内存解密注入 op:// 与 np://，硬盘零落盘
 OTP=$(np mail otp --domain github.com --wait 30s)
 np service-account create ci-agent --vault DevOps

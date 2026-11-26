@@ -1,8 +1,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nonepwd_agent::{
-    connect_and_request, resolve_items, start_user_agent, ApprovalSource, CredentialQuery,
-    IdentityKeyPair, RemoteSession,
+    connect_and_request, resolve_items, sanitize_terminal_text, start_user_agent, ApprovalSource,
+    CredentialQuery, IdentityKeyPair, RemoteSession,
 };
 use nonepwd_core::types::{ItemCategory, VaultItemPayload};
 use nonepwd_server::agent_relay::AgentRelay;
@@ -106,4 +106,62 @@ async fn pairing_approved_request_then_denied_request() {
     )
     .await;
     assert!(again.is_err());
+}
+
+#[test]
+fn sanitize_terminal_text_strips_ansi_bidi_and_truncates() {
+    let spoofed = "github.com\x1b[2K\r\x1b[1Aevil\u{202E}moc.buhtig\u{2066}\nfake";
+    let clean = sanitize_terminal_text(spoofed);
+    assert!(!clean.chars().any(|c| c.is_control()));
+    assert!(!clean.contains('\x1b'));
+    assert!(!clean.contains('\r'));
+    assert!(!clean.contains('\n'));
+    assert!(!clean.contains('\u{202E}'));
+    assert!(!clean.contains('\u{2066}'));
+    assert!(clean.contains('\u{FFFD}'));
+    assert!(clean.starts_with("github.com"));
+
+    let long = "a".repeat(350);
+    let truncated = sanitize_terminal_text(&long);
+    assert_eq!(truncated.chars().count(), 200);
+}
+
+#[tokio::test]
+async fn prompt_mode_fails_missing_credential_without_blocking_on_stdin() {
+    let relay = AgentRelay::new();
+    let addr = relay.listen_ephemeral().await.unwrap();
+    let relay_url = format!("ws://{addr}/agent/relay");
+
+    let items = vec![login("item-gh", "GitHub", "https://github.com/login", "hunter2")];
+    let user = start_user_agent(
+        relay_url.clone(),
+        IdentityKeyPair::generate(),
+        move |query| {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            resolve_items(&items, query, now_ms)
+        },
+        ApprovalSource::Prompt,
+    )
+    .await
+    .unwrap();
+
+    let remote = RemoteSession::pair(&relay_url, IdentityKeyPair::generate(), &user.token)
+        .await
+        .unwrap();
+
+    // Unknown domain should be rejected immediately by resolver before any stdin prompt.
+    let err = remote
+        .request(
+            &CredentialQuery::Domain("nonexistent.example\x1b[31m".into()),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_lowercase().contains("denied"),
+        "missing item in Prompt mode should fail immediately, got: {err}"
+    );
 }
