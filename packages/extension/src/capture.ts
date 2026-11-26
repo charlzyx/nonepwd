@@ -73,7 +73,7 @@ export function urlsMatchWithLocalhost(pageUrl: string, storedUrl: string): bool
     return true;
   }
 
-  return domainsMatch(pageUrl, storedUrl);
+  return domainsMatch(hostA, hostB);
 }
 
 export function normalizeOriginUrl(rawUrl: string): string {
