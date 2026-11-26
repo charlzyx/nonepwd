@@ -8,7 +8,39 @@ interface CopyButtonProps {
   copiedLabel?: string;
   className?: string;
   variant?: 'default' | 'minimal';
+  autoClearMs?: number | false;
   onCopy?: () => void;
+}
+
+const DEFAULT_CLIPBOARD_CLEAR_MS = 30_000;
+let activeClipboardClearTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleClipboardAutoClear(copiedValue: string, delayMs: number): void {
+  if (activeClipboardClearTimer !== null) {
+    clearTimeout(activeClipboardClearTimer);
+    activeClipboardClearTimer = null;
+  }
+  if (!copiedValue || delayMs <= 0) return;
+  activeClipboardClearTimer = setTimeout(() => {
+    activeClipboardClearTimer = null;
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.clipboard?.readText ||
+      !navigator.clipboard?.writeText
+    ) {
+      return;
+    }
+    void navigator.clipboard
+      .readText()
+      .then((current) => {
+        if (current === copiedValue) {
+          return navigator.clipboard.writeText('');
+        }
+      })
+      .catch(() => {
+        // Silently ignore permission errors when tab is unfocused or clipboard-read is denied
+      });
+  }, delayMs);
 }
 
 async function copyTextWithFallback(text: string): Promise<boolean> {
@@ -53,6 +85,7 @@ export const CopyButton: React.FC<CopyButtonProps> = ({
   copiedLabel,
   className = '',
   variant = 'default',
+  autoClearMs = DEFAULT_CLIPBOARD_CLEAR_MS,
   onCopy,
 }) => {
   const { isZh } = useLocale();
@@ -62,6 +95,9 @@ export const CopyButton: React.FC<CopyButtonProps> = ({
     e.stopPropagation();
     const ok = await copyTextWithFallback(value);
     if (ok) {
+      if (autoClearMs !== false) {
+        scheduleClipboardAutoClear(value, autoClearMs);
+      }
       onCopy?.();
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);

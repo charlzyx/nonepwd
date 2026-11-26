@@ -397,12 +397,12 @@ export const EmailOtpView: React.FC<EmailOtpViewProps> = ({
                           </div>
                         )}
 
-                        {em.magicLink && (
+                        {em.magicLink && /^https?:\/\//i.test(em.magicLink.trim()) && (
                           <div className="mt-2">
                             <a
-                              href={em.magicLink}
+                              href={em.magicLink.trim()}
                               target="_blank"
-                              rel="noreferrer"
+                              rel="noopener noreferrer"
                               className="inline-flex items-center gap-1 text-xs text-foreground underline underline-offset-4 hover:opacity-75"
                             >
                               <span>打开 Magic Link 登录链接</span>

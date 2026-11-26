@@ -36,11 +36,30 @@ import { unlockDurationToMs, type UnlockDuration } from './theme.js';
 import type { ExtendedVaultItem } from './types.js';
 
 const PERSISTED_SESSION_KEY = 'nonepwd_persisted_session';
+const SESSION_EXPIRE_ALARM = 'nonepwd_session_expire';
 const PENDING_QR_IMPORT_KEY = 'pendingQrImport';
 const PENDING_QR_TTL_MS = 10 * 60_000;
 const COPIED_EMAIL_EXPIRATIONS_KEY = 'nonepwd_copied_email_expirations';
 const COPIED_EMAIL_TTL_MS = 5 * 60_000;
 const EMAIL_EXPIRE_ALARM_PREFIX = 'nonepwd_expire_email:';
+const MIN_KDF_ITERATIONS = 1_000;
+const MAX_KDF_ITERATIONS = 5_000_000;
+
+const POPUP_ONLY_COMMANDS = new Set([
+  'NONEPWD_GET_STATE',
+  'NONEPWD_UNLOCK',
+  'NONEPWD_LOCK',
+  'NONEPWD_SYNC',
+  'NONEPWD_START_QR_SNIP',
+  'NONEPWD_IMPORT_QR_URIS',
+]);
+
+function clampKdfIterations(raw: number): number {
+  if (!Number.isFinite(raw)) {
+    throw new Error('Invalid KDF iteration count from server');
+  }
+  return Math.min(MAX_KDF_ITERATIONS, Math.max(MIN_KDF_ITERATIONS, Math.floor(raw)));
+}
 
 export interface PendingQrImport {
   uris: string[];
@@ -128,7 +147,9 @@ async function notifyTabsEmailDeleted(emailId: string): Promise<void> {
     const tabs = await chrome.tabs.query({});
     for (const tab of tabs) {
       if (!tab.id) continue;
-      void chrome.tabs.sendMessage(tab.id, { type: 'NONEPWD_EMAIL_DELETED', id: emailId }).catch(() => {});
+      void chrome.tabs
+        .sendMessage(tab.id, { type: 'NONEPWD_EMAIL_DELETED', id: emailId }, { frameId: 0 })
+        .catch(() => {});
     }
   } catch {
     // ignore
@@ -542,6 +563,14 @@ async function importOtpUrisIntoSession(
 
 async function clearSession(): Promise<void> {
   memoryFallbackSession = null;
+  if (activeWs) {
+    try {
+      activeWs.close();
+    } catch {
+      // ignore
+    }
+    activeWs = null;
+  }
   try {
     await chrome.storage.session?.remove('session');
   } catch {
@@ -549,6 +578,11 @@ async function clearSession(): Promise<void> {
   }
   try {
     await chrome.storage.local?.remove(PERSISTED_SESSION_KEY);
+  } catch {
+    // ignore
+  }
+  try {
+    await chrome.alarms?.clear(SESSION_EXPIRE_ALARM);
   } catch {
     // ignore
   }
@@ -566,19 +600,6 @@ async function getSession(): Promise<SessionCache | null> {
   }
   if (!candidate) {
     candidate = memoryFallbackSession;
-  }
-  if (!candidate) {
-    try {
-      const localRes = await chrome.storage.local?.get(PERSISTED_SESSION_KEY);
-      const persisted = localRes?.[PERSISTED_SESSION_KEY] as SessionCache | undefined;
-      if (persisted?.token && persisted?.rootKeyB64) {
-        candidate = persisted;
-        memoryFallbackSession = persisted;
-        await chrome.storage.session?.set({ session: persisted }).catch(() => {});
-      }
-    } catch {
-      // ignore
-    }
   }
   if (candidate?.expiresAt && Date.now() >= candidate.expiresAt) {
     await clearSession();
@@ -601,10 +622,15 @@ async function saveSession(session: SessionCache | null): Promise<void> {
     // ignore
   }
   try {
+    await chrome.storage.local?.remove(PERSISTED_SESSION_KEY);
+  } catch {
+    // ignore
+  }
+  try {
     if (session.expiresAt && session.expiresAt > Date.now()) {
-      await chrome.storage.local?.set({ [PERSISTED_SESSION_KEY]: session });
+      await chrome.alarms?.create(SESSION_EXPIRE_ALARM, { when: session.expiresAt });
     } else {
-      await chrome.storage.local?.remove(PERSISTED_SESSION_KEY);
+      await chrome.alarms?.clear(SESSION_EXPIRE_ALARM);
     }
   } catch {
     // ignore
@@ -683,6 +709,9 @@ async function decryptSessionSync(
         it.encryptedData,
         AAD.vaultItem(it.vaultId, it.id)
       );
+      if (payload.id !== it.id || payload.vaultId !== it.vaultId) {
+        continue;
+      }
       freshItems.push(payload);
     } catch {
       // skip
@@ -821,10 +850,14 @@ function connectWs(session: SessionCache): void {
             );
             if (matchesPending || matchesUrl || matchesAnyLogin) {
               try {
-                await chrome.tabs.sendMessage(tab.id, {
-                  type: 'NONEPWD_LIVE_OTP',
-                  email: emailItem,
-                });
+                await chrome.tabs.sendMessage(
+                  tab.id,
+                  {
+                    type: 'NONEPWD_LIVE_OTP',
+                    email: emailItem,
+                  },
+                  { frameId: 0 }
+                );
               } catch {
                 // tab might not have content script loaded
               }
@@ -855,7 +888,11 @@ function connectWs(session: SessionCache): void {
   }
 }
 
-async function queryForTabUrl(tabUrl: string, tabId?: number) {
+async function queryForTabUrl(
+  tabUrl: string,
+  tabId?: number,
+  options?: { includeCards?: boolean; includeIdentities?: boolean }
+) {
   const pendingCapture = await getPendingCaptureForTab(tabId);
   const session = await getSession();
   if (!session) {
@@ -891,10 +928,19 @@ async function queryForTabUrl(tabUrl: string, tabId?: number) {
     return 0;
   };
 
-  const cards = allItems.filter((item) => item.category === 'card' && item.card).sort(sortByRelevance);
-  const identities = allItems
-    .filter((item) => item.category === 'identity' && item.identity)
-    .sort(sortByRelevance);
+  const cards = options?.includeCards
+    ? allItems
+        .filter((item) => item.category === 'card' && item.card)
+        .sort(sortByRelevance)
+        .map((item) => ({
+          ...item,
+          card: item.card ? { ...item.card, cvv: undefined } : undefined,
+          hasCvv: Boolean(item.card?.cvv),
+        }))
+    : [];
+  const identities = options?.includeIdentities
+    ? allItems.filter((item) => item.category === 'identity' && item.identity).sort(sortByRelevance)
+    : [];
 
   const loginsWithTotp = await Promise.all(
     matchedItems.map(async (item) => {
@@ -950,6 +996,19 @@ async function queryForTabUrl(tabUrl: string, tabId?: number) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   void (async () => {
     try {
+      const isContentScript = Boolean(sender.tab);
+      if (isContentScript && sender.frameId !== undefined && sender.frameId !== 0) {
+        sendResponse({ ok: false, error: 'Subframe access denied' });
+        return;
+      }
+      const msgType = typeof message?.type === 'string' ? message.type : '';
+      if (isContentScript && POPUP_ONLY_COMMANDS.has(msgType)) {
+        sendResponse({ ok: false, error: 'Forbidden: privileged command' });
+        return;
+      }
+      const senderTabUrl = isContentScript ? sender.url || sender.tab?.url || '' : '';
+      const senderTabId = isContentScript ? sender.tab?.id : undefined;
+
       await initNonePwdCore();
       switch (message?.type) {
         case 'NONEPWD_GET_STATE': {
@@ -1004,7 +1063,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             masterPassword,
             secretKey,
             params.kdfSalt,
-            params.kdfIterations
+            clampKdfIterations(params.kdfIterations)
           );
 
           const loginRes = await apiJson<{
@@ -1147,21 +1206,51 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         case 'NONEPWD_QUERY_TAB': {
-          const tabUrl = String(message.url || sender.tab?.url || '');
-          const tabId = message.tabId ?? sender.tab?.id;
-          const res = await queryForTabUrl(tabUrl, tabId);
+          const tabUrl = isContentScript ? senderTabUrl : String(message.url || '');
+          const tabId = isContentScript
+            ? senderTabId
+            : typeof message.tabId === 'number'
+              ? message.tabId
+              : undefined;
+          const res = await queryForTabUrl(tabUrl, tabId, {
+            includeCards: Boolean(message.includeCards),
+            includeIdentities: Boolean(message.includeIdentities),
+          });
           sendResponse({ ok: true, ...res });
+          return;
+        }
+
+        case 'NONEPWD_GET_CARD_CVV': {
+          const session = await getSession();
+          if (!session) {
+            sendResponse({ ok: false, error: 'Vault is locked' });
+            return;
+          }
+          const itemId = typeof message.itemId === 'string' ? message.itemId : '';
+          const cardItem = (session.items as ExtendedVaultItem[]).find(
+            (it) => it.id === itemId && it.category === 'card' && Boolean(it.card?.cvv)
+          );
+          if (!cardItem?.card?.cvv) {
+            sendResponse({ ok: false, error: 'Card CVV not found' });
+            return;
+          }
+          sendResponse({ ok: true, cvv: cardItem.card.cvv });
           return;
         }
 
         case 'NONEPWD_RECORD_FILL': {
           const session = await getSession();
-          const tabId = sender.tab?.id ?? message.tabId;
+          const tabId = isContentScript
+            ? senderTabId
+            : typeof message.tabId === 'number'
+              ? message.tabId
+              : undefined;
+          const domain = isContentScript ? senderTabUrl : String(message.url || '');
           if (session && tabId) {
             session.pendingByTab[tabId] = {
               itemId: message.itemId,
               title: message.title,
-              domain: message.url || sender.tab?.url || '',
+              domain,
               emailAlias: message.emailAlias,
               expiresAt: Date.now() + 120_000,
             };
@@ -1177,7 +1266,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const vault = session.vaults[0];
           if (!vault) throw new Error('No vault found');
 
-          const pageUrl = String(message.url || sender.tab?.url || '');
+          const pageUrl = isContentScript ? senderTabUrl : String(message.url || '');
           const host = extractHost(pageUrl) || 'site';
           const password = generatePassword({ length: 20 });
           let emailAlias: string | undefined;
@@ -1232,10 +1321,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         case 'NONEPWD_CAPTURE_CREDENTIAL': {
-          const pageUrl = String(message.url || sender.tab?.url || '');
+          const pageUrl = isContentScript ? senderTabUrl : String(message.url || '');
           const username = String(message.username || '').trim();
           const password = String(message.password || '');
-          const tabId = typeof message.tabId === 'number' ? message.tabId : sender.tab?.id;
+          const tabId = isContentScript
+            ? senderTabId
+            : typeof message.tabId === 'number'
+              ? message.tabId
+              : undefined;
 
           const neverSaveDomains = await getNeverSaveDomains();
           const session = await getSession();
@@ -1282,11 +1375,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (tabId !== undefined) {
             setTimeout(() => {
               void chrome.tabs
-                .sendMessage(tabId, {
-                  type: 'NONEPWD_PROMPT_SAVE',
-                  capture,
-                  unlocked: Boolean(session),
-                })
+                .sendMessage(
+                  tabId,
+                  {
+                    type: 'NONEPWD_PROMPT_SAVE',
+                    capture,
+                    unlocked: Boolean(session),
+                  },
+                  { frameId: 0 }
+                )
                 .catch(() => {});
             }, 450);
           }
@@ -1301,7 +1398,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           const captures = await getPendingCaptures();
           const captureId = typeof message.captureId === 'string' ? message.captureId : undefined;
-          const tabId = typeof message.tabId === 'number' ? message.tabId : sender.tab?.id;
+          const tabId = isContentScript
+            ? senderTabId
+            : typeof message.tabId === 'number'
+              ? message.tabId
+              : undefined;
 
           let matchedKey: string | undefined;
           let capture: PendingCredentialCapture | undefined;
@@ -1425,7 +1526,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'NONEPWD_DISMISS_SAVE_CREDENTIAL': {
           const captures = await getPendingCaptures();
           const captureId = typeof message.captureId === 'string' ? message.captureId : undefined;
-          const tabId = typeof message.tabId === 'number' ? message.tabId : sender.tab?.id;
+          const tabId = isContentScript
+            ? senderTabId
+            : typeof message.tabId === 'number'
+              ? message.tabId
+              : undefined;
 
           for (const [k, v] of Object.entries(captures)) {
             if ((captureId && v.id === captureId) || (tabId !== undefined && k === String(tabId))) {
@@ -1435,7 +1540,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           await savePendingCaptures(captures);
 
           if (message.neverForSite && message.host) {
-            await addNeverSaveDomain(String(message.host));
+            const hostToBlock = isContentScript
+              ? extractHost(senderTabUrl)
+              : String(message.host);
+            if (hostToBlock) {
+              await addNeverSaveDomain(hostToBlock);
+            }
           }
 
           await syncActionBadge();
@@ -1485,7 +1595,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const rect = message.rect as
             | (QrCropRect & { pageUrl?: string; pageTitle?: string })
             | undefined;
-          const pageUrl = String(rect?.pageUrl || sender.tab?.url || '');
+          const pageUrl = isContentScript ? senderTabUrl : String(rect?.pageUrl || '');
           const pageTitle = String(rect?.pageTitle || sender.tab?.title || '');
 
           if (tabId === undefined || windowId === undefined) {
@@ -1670,15 +1780,26 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onInstalled) {
 
 if (typeof chrome !== 'undefined' && chrome.alarms?.onAlarm) {
   chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === SESSION_EXPIRE_ALARM) {
+      void clearSession();
+      return;
+    }
     if (alarm.name.startsWith(EMAIL_EXPIRE_ALARM_PREFIX)) {
       void initNonePwdCore().then(() => purgeExpiredCopiedEmails());
     }
   });
 }
 
+if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+  void chrome.storage.local.remove(PERSISTED_SESSION_KEY).catch(() => {});
+}
+
 void initNonePwdCore().then(() =>
   getSession().then((s) => {
     if (s) {
+      if (s.expiresAt && s.expiresAt > Date.now()) {
+        void chrome.alarms?.create(SESSION_EXPIRE_ALARM, { when: s.expiresAt }).catch(() => {});
+      }
       connectWs(s);
       void purgeExpiredCopiedEmails();
     }
