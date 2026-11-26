@@ -13,8 +13,8 @@ pub use nonepwd_core::agent_access::{
 };
 pub use relay_client::RustlsRelayClient;
 pub use session::{
-    connect_and_request, resolve_items, run_with_credential, start_user_agent, ApprovalSource,
-    RemoteSession, UserAgent,
+    connect_and_request, resolve_items, run_with_credential, sanitize_terminal_text,
+    start_user_agent, ApprovalSource, RemoteSession, UserAgent,
 };
 
 pub use ap_client::{CredentialData, CredentialQuery, PskToken};

@@ -30,8 +30,11 @@ np whoami --format json
 ```
 
 ### Interactive Owner Auth
+Prefer passing secrets via environment variables (`NONEPWD_MASTER_PASSWORD` / `NONEPWD_TOKEN`) rather than `--password` CLI arguments so credentials do not appear in process lists (`ps`) or shell history:
+
 ```bash
-np signin --server https://vault.yourdomain.com --secret-key "NP3-..." --password "$NONEPWD_MASTER_PASSWORD"
+export NONEPWD_MASTER_PASSWORD="..."
+np signin --server https://vault.yourdomain.com --secret-key "NP3-..."
 ```
 
 ---
@@ -85,8 +88,8 @@ np item create --vault DevOps --title ProdSSH \
   private_key="$(cat ~/.ssh/id_ed25519)" \
   public_key[text]="$(cat ~/.ssh/id_ed25519.pub)"
 
-# Materialize private key safely with chmod 0600
-np read -o /tmp/deploy_key np://DevOps/ProdSSH/private_key
+# Materialize private key safely inside a user-private directory (created atomically with mode 0600; avoid shared /tmp paths)
+np read -o ~/.ssh/deploy_key np://DevOps/ProdSSH/private_key
 ```
 
 ### C. Inject Secrets into Any Process (No Plaintext `.env` on Disk)

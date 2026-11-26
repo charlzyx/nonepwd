@@ -2,12 +2,16 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use nonepwd_core::encoding::constant_time_eq;
 use nonepwd_core::totp::generate_totp;
 use url::Url;
 
-use crate::client::NonePwdClient;
+use crate::client::{EmailOtpWaitState, NonePwdClient};
+
+const CONNECT_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_EMAIL_OTP_WAIT_SECS: f64 = 120.0;
 
 fn write_json_response(stream: &mut TcpStream, status: u16, body: &serde_json::Value) {
     let reason = match status {
@@ -57,6 +61,8 @@ fn handle_connection(
     client_arc: Arc<Mutex<NonePwdClient>>,
     expected_token: String,
 ) {
+    let _ = stream.set_read_timeout(Some(CONNECT_STREAM_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(CONNECT_STREAM_TIMEOUT));
     let mut buf = [0u8; 8192];
     let n = match stream.read(&mut buf) {
         Ok(n) if n > 0 => n,
@@ -112,7 +118,72 @@ fn handle_connection(
     }
 
     let path = url.path().to_string();
-    let mut client = client_arc.lock().unwrap();
+
+    if path == "/v1/mail/otp" {
+        let mut domain = None;
+        let mut alias = None;
+        let mut wait_secs = 0.0f64;
+        for (k, v) in url.query_pairs() {
+            match k.as_ref() {
+                "domain" => domain = Some(v.to_string()),
+                "alias" => alias = Some(v.to_string()),
+                "waitSeconds" => wait_secs = v.parse().unwrap_or(0.0),
+                _ => {}
+            }
+        }
+        let wait_secs = if wait_secs.is_finite() && wait_secs > 0.0 {
+            wait_secs.min(MAX_EMAIL_OTP_WAIT_SECS)
+        } else {
+            0.0
+        };
+
+        let prep = {
+            let Ok(mut client) = client_arc.lock() else {
+                write_json_response(&mut stream, 500, &serde_json::json!({ "error": "Client lock poisoned" }));
+                return;
+            };
+            client.prepare_email_otp_wait(domain.as_deref(), alias.as_deref(), wait_secs)
+        };
+
+        let result = match prep {
+            Ok(EmailOtpWaitState::Found(em)) => Ok(em),
+            Ok(EmailOtpWaitState::Wait {
+                ws_url,
+                priv_key,
+                lookback_secs,
+                wait_seconds,
+            }) => NonePwdClient::poll_email_otp_ws(
+                &ws_url,
+                &priv_key,
+                domain.as_deref(),
+                alias.as_deref(),
+                lookback_secs,
+                wait_seconds,
+            ),
+            Err(e) => Err(e),
+        };
+
+        match result {
+            Ok(em) => write_json_response(
+                &mut stream,
+                200,
+                &serde_json::json!({
+                    "otpCode": em.payload.otp_code,
+                    "from": em.payload.from,
+                    "to": em.payload.to,
+                    "subject": em.payload.subject,
+                    "receivedAt": em.payload.received_at,
+                }),
+            ),
+            Err(e) => write_json_response(&mut stream, 400, &serde_json::json!({ "error": e })),
+        }
+        return;
+    }
+
+    let Ok(mut client) = client_arc.lock() else {
+        write_json_response(&mut stream, 500, &serde_json::json!({ "error": "Client lock poisoned" }));
+        return;
+    };
 
     if path == "/v1/vaults" {
         if let Err(e) = client.sync() {
@@ -148,35 +219,6 @@ fn handle_connection(
                 &mut stream,
                 200,
                 &serde_json::json!({ "ref": ref_uri, "value": val }),
-            ),
-            Err(e) => write_json_response(&mut stream, 400, &serde_json::json!({ "error": e })),
-        }
-        return;
-    }
-
-    if path == "/v1/mail/otp" {
-        let mut domain = None;
-        let mut alias = None;
-        let mut wait_secs = 0.0f64;
-        for (k, v) in url.query_pairs() {
-            match k.as_ref() {
-                "domain" => domain = Some(v.to_string()),
-                "alias" => alias = Some(v.to_string()),
-                "waitSeconds" => wait_secs = v.parse().unwrap_or(0.0),
-                _ => {}
-            }
-        }
-        match client.wait_for_email_otp(domain.as_deref(), alias.as_deref(), wait_secs) {
-            Ok(em) => write_json_response(
-                &mut stream,
-                200,
-                &serde_json::json!({
-                    "otpCode": em.payload.otp_code,
-                    "from": em.payload.from,
-                    "to": em.payload.to,
-                    "subject": em.payload.subject,
-                    "receivedAt": em.payload.received_at,
-                }),
             ),
             Err(e) => write_json_response(&mut stream, 400, &serde_json::json!({ "error": e })),
         }

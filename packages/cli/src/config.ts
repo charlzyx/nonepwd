@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,11 +18,49 @@ export interface CliConfig {
 }
 
 export function resolveConfigDir(overrideDir?: string): string {
-  return (
-    overrideDir ??
-    process.env.NONEPWD_CONFIG_DIR ??
-    path.join(os.homedir(), '.config', 'nonepwd')
-  );
+  if (overrideDir && overrideDir.length > 0) return overrideDir;
+  if (process.env.NONEPWD_CONFIG_DIR && process.env.NONEPWD_CONFIG_DIR.length > 0) {
+    return process.env.NONEPWD_CONFIG_DIR;
+  }
+  if (process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.length > 0) {
+    return path.join(process.env.XDG_CONFIG_HOME, 'nonepwd');
+  }
+  return path.join(os.homedir(), '.config', 'nonepwd');
+}
+
+export function writePrivateFileAtomic(filePath: string, content: string): void {
+  const dir = path.dirname(filePath);
+  if (dir && dir !== '.') {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+  const rand = crypto.randomBytes(6).toString('hex');
+  const tmpPath = path.join(dir, `.${path.basename(filePath)}.tmp.${process.pid}.${rand}`);
+  try {
+    const fd = fs.openSync(
+      tmpPath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+      0o600
+    );
+    try {
+      if (process.platform !== 'win32') {
+        fs.fchmodSync(fd, 0o600);
+      }
+      fs.writeFileSync(fd, content, 'utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+    if (process.platform !== 'win32') {
+      fs.chmodSync(tmpPath, 0o600);
+    }
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      // ignore cleanup errors
+    }
+    throw err;
+  }
 }
 
 export function loadCliConfig(configDir?: string): CliConfig {
@@ -38,7 +77,10 @@ export function loadCliConfig(configDir?: string): CliConfig {
 export function saveCliConfig(config: CliConfig, configDir?: string): string {
   const dir = resolveConfigDir(configDir);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') {
+    fs.chmodSync(dir, 0o700);
+  }
   const filePath = path.join(dir, 'config.json');
-  fs.writeFileSync(filePath, JSON.stringify(config, null, 2), { mode: 0o600 });
+  writePrivateFileAtomic(filePath, JSON.stringify(config, null, 2));
   return filePath;
 }

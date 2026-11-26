@@ -82,46 +82,86 @@ where
                     match req {
                         UserClientRequest::VerifyFingerprint { reply, .. } => {
                             let _ = reply.send(ap_client::FingerprintVerificationReply {
-                                approved: true,
-                                name: Some("nonepwd".into()),
+                                approved: false,
+                                name: None,
                             });
                         }
                         UserClientRequest::CredentialRequest { query, reply, .. } => {
-                            let summary = query.to_string();
-                            let approved = match &mut approvals {
-                                ApprovalSource::Always => true,
-                                ApprovalSource::Never => false,
-                                ApprovalSource::Prompt => {
-                                    let summary = summary.clone();
-                                    tokio::task::spawn_blocking(move || prompt_yes(&summary))
+                            let safe_summary = sanitize_terminal_text(&query.to_string());
+                            let core_query = to_core_query(&query);
+                            let response = match &mut approvals {
+                                ApprovalSource::Prompt => match resolver(&core_query) {
+                                    Ok(cred) => {
+                                        let matched = format_matched_summary(&cred);
+                                        let prompt_label = format!("{safe_summary} -> [{matched}]");
+                                        let approved = tokio::task::spawn_blocking(move || {
+                                            prompt_yes(&prompt_label)
+                                        })
                                         .await
-                                        .unwrap_or(false)
-                                }
-                                ApprovalSource::Queue(rx) => rx.recv().await.unwrap_or(false),
-                            };
-                            let response = if approved {
-                                let core_query = to_core_query(&query);
-                                match resolver(&core_query) {
-                                    Ok(cred) => CredentialRequestReply {
-                                        approved: true,
-                                        credential_id: cred.credential_id.clone(),
-                                        credential: Some(to_sdk(&cred)),
-                                    },
+                                        .unwrap_or(false);
+                                        if approved {
+                                            CredentialRequestReply {
+                                                approved: true,
+                                                credential_id: cred.credential_id.clone(),
+                                                credential: Some(to_sdk(&cred)),
+                                            }
+                                        } else {
+                                            eprintln!("agent request ({safe_summary}) denied");
+                                            CredentialRequestReply {
+                                                approved: false,
+                                                credential: None,
+                                                credential_id: None,
+                                            }
+                                        }
+                                    }
                                     Err(err) => {
-                                        eprintln!("agent request ({summary}) not fulfilled: {err}");
+                                        let safe_err = sanitize_terminal_text(&err);
+                                        eprintln!(
+                                            "agent request ({safe_summary}) not fulfilled: {safe_err}"
+                                        );
                                         CredentialRequestReply {
                                             approved: false,
                                             credential: None,
                                             credential_id: None,
                                         }
                                     }
-                                }
-                            } else {
-                                eprintln!("agent request ({summary}) denied");
-                                CredentialRequestReply {
-                                    approved: false,
-                                    credential: None,
-                                    credential_id: None,
+                                },
+                                other => {
+                                    let approved = match other {
+                                        ApprovalSource::Always => true,
+                                        ApprovalSource::Never => false,
+                                        ApprovalSource::Queue(rx) => {
+                                            rx.recv().await.unwrap_or(false)
+                                        }
+                                        ApprovalSource::Prompt => unreachable!(),
+                                    };
+                                    if approved {
+                                        match resolver(&core_query) {
+                                            Ok(cred) => CredentialRequestReply {
+                                                approved: true,
+                                                credential_id: cred.credential_id.clone(),
+                                                credential: Some(to_sdk(&cred)),
+                                            },
+                                            Err(err) => {
+                                                let safe_err = sanitize_terminal_text(&err);
+                                                eprintln!(
+                                                    "agent request ({safe_summary}) not fulfilled: {safe_err}"
+                                                );
+                                                CredentialRequestReply {
+                                                    approved: false,
+                                                    credential: None,
+                                                    credential_id: None,
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        eprintln!("agent request ({safe_summary}) denied");
+                                        CredentialRequestReply {
+                                            approved: false,
+                                            credential: None,
+                                            credential_id: None,
+                                        }
+                                    }
                                 }
                             };
                             let _ = reply.send(response);
@@ -134,6 +174,53 @@ where
     });
 
     Ok(UserAgent { token, task })
+}
+
+fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// Sanitize untrusted remote text before printing to stderr/terminal.
+/// Replaces control characters and Unicode bidirectional override characters
+/// with U+FFFD and truncates to at most 200 characters.
+pub fn sanitize_terminal_text(input: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    input
+        .chars()
+        .take(MAX_CHARS)
+        .map(|c| {
+            if c.is_control() || is_bidi_control(c) {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+fn format_matched_summary(cred: &AgentCredential) -> String {
+    let mut parts = Vec::new();
+    if let Some(id) = cred.credential_id.as_deref().filter(|s| !s.is_empty()) {
+        parts.push(format!("id={}", sanitize_terminal_text(id)));
+    }
+    if let Some(domain) = cred.domain.as_deref().filter(|s| !s.is_empty()) {
+        parts.push(format!("domain={}", sanitize_terminal_text(domain)));
+    }
+    if let Some(user) = cred.username.as_deref().filter(|s| !s.is_empty()) {
+        parts.push(format!("username={}", sanitize_terminal_text(user)));
+    }
+    if parts.is_empty() {
+        "matched credential".to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 fn prompt_yes(summary: &str) -> bool {
@@ -200,7 +287,7 @@ impl RemoteSession {
                     req = requests.recv() => {
                         match req {
                             Some(ap_client::RemoteClientRequest::VerifyFingerprint { reply, .. }) => {
-                                let _ = reply.send(ap_client::RemoteClientFingerprintReply { approved: true });
+                                let _ = reply.send(ap_client::RemoteClientFingerprintReply { approved: false });
                             }
                             None => break,
                         }

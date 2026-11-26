@@ -1,5 +1,5 @@
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -7,6 +7,10 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use tungstenite::WebSocket;
 use url::Url;
+
+const IO_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
 
 pub enum HttpStream {
     Plain(TcpStream),
@@ -96,8 +100,35 @@ pub fn connect_stream(url: &Url) -> Result<(HttpStream, String, String), String>
         }
     };
 
-    let tcp = TcpStream::connect(&addr).map_err(|e| format!("TCP connect to {addr} failed: {e}"))?;
+    let addrs: Vec<_> = addr
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolve for {addr} failed: {e}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("No socket addresses resolved for {addr}"));
+    }
+    let mut last_err = None;
+    let mut tcp_opt = None;
+    for sock_addr in addrs {
+        match TcpStream::connect_timeout(&sock_addr, IO_TIMEOUT) {
+            Ok(s) => {
+                tcp_opt = Some(s);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let tcp = tcp_opt.ok_or_else(|| {
+        format!(
+            "TCP connect to {addr} failed: {}",
+            last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown error".to_string())
+        )
+    })?;
     tcp.set_nodelay(true).ok();
+    tcp.set_read_timeout(Some(IO_TIMEOUT)).ok();
+    tcp.set_write_timeout(Some(IO_TIMEOUT)).ok();
 
     if use_tls {
         let server_name = ServerName::try_from(host)
@@ -110,9 +141,16 @@ pub fn connect_stream(url: &Url) -> Result<(HttpStream, String, String), String>
     }
 }
 
+fn validate_header_value(name: &str, value: &str) -> Result<(), String> {
+    if value.contains('\r') || value.contains('\n') || value.contains('\0') {
+        return Err(format!("Invalid CR/LF/NUL character in HTTP {name}"));
+    }
+    Ok(())
+}
+
 fn decode_chunked(body: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
-    let mut pos = 0;
+    let mut pos = 0usize;
     while pos < body.len() {
         let line_end = body[pos..]
             .windows(2)
@@ -126,18 +164,32 @@ fn decode_chunked(body: &[u8]) -> Result<Vec<u8>, String> {
             .trim();
         let chunk_len = usize::from_str_radix(size_str, 16)
             .map_err(|_| format!("Invalid chunk hex size: {size_str}"))?;
-        pos += line_end + 2;
+        pos = pos
+            .checked_add(line_end)
+            .and_then(|p| p.checked_add(2))
+            .ok_or_else(|| "Chunked HTTP response offset overflow".to_string())?;
         if chunk_len == 0 {
-            break;
+            return Ok(out);
         }
-        if pos + chunk_len > body.len() {
-            out.extend_from_slice(&body[pos..]);
-            break;
+        let chunk_end = pos
+            .checked_add(chunk_len)
+            .ok_or_else(|| "Chunked HTTP response length overflow".to_string())?;
+        if chunk_end > body.len() {
+            return Err("Truncated chunked HTTP response body".to_string());
         }
-        out.extend_from_slice(&body[pos..pos + chunk_len]);
-        pos += chunk_len + 2;
+        if out.len().saturating_add(chunk_len) > MAX_RESPONSE_BODY_BYTES {
+            return Err("HTTP response body exceeds 64 MiB limit".to_string());
+        }
+        out.extend_from_slice(&body[pos..chunk_end]);
+        let next_pos = chunk_end
+            .checked_add(2)
+            .ok_or_else(|| "Chunked HTTP response terminator overflow".to_string())?;
+        if next_pos > body.len() || &body[chunk_end..next_pos] != b"\r\n" {
+            return Err("Malformed chunked HTTP response terminator".to_string());
+        }
+        pos = next_pos;
     }
-    Ok(out)
+    Err("Truncated chunked HTTP response".to_string())
 }
 
 pub fn http_request(
@@ -148,6 +200,13 @@ pub fn http_request(
 ) -> Result<(u16, Vec<u8>), String> {
     let url = Url::parse(full_url).map_err(|e| format!("Invalid URL {full_url}: {e}"))?;
     let (mut stream, host_header, path_and_query) = connect_stream(&url)?;
+
+    validate_header_value("method", method)?;
+    validate_header_value("path", &path_and_query)?;
+    validate_header_value("Host", &host_header)?;
+    if let Some(tok) = bearer_token {
+        validate_header_value("Authorization", tok)?;
+    }
 
     let mut req = format!(
         "{method} {path_and_query} HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: nonepwd-cli/0.1.0\r\nAccept: application/json\r\nConnection: close\r\n"
@@ -171,10 +230,15 @@ pub fn http_request(
     }
     stream.flush().ok();
 
+    let max_total = MAX_RESPONSE_BODY_BYTES + MAX_RESPONSE_HEADER_BYTES;
     let mut raw = Vec::new();
-    stream
+    (&mut stream)
+        .take((max_total + 1) as u64)
         .read_to_end(&mut raw)
         .map_err(|e| format!("HTTP read failed: {e}"))?;
+    if raw.len() > max_total {
+        return Err("HTTP response exceeds 64 MiB limit".to_string());
+    }
 
     let header_end = raw
         .windows(4)
@@ -205,9 +269,15 @@ pub fn http_request(
     }
 
     let body_slice = &raw[header_end + 4..];
+    if body_slice.len() > MAX_RESPONSE_BODY_BYTES {
+        return Err("HTTP response body exceeds 64 MiB limit".to_string());
+    }
     let decoded = if is_chunked {
         decode_chunked(body_slice)?
     } else if let Some(len) = content_length {
+        if len > MAX_RESPONSE_BODY_BYTES {
+            return Err("HTTP response Content-Length exceeds 64 MiB limit".to_string());
+        }
         body_slice[..body_slice.len().min(len)].to_vec()
     } else {
         body_slice.to_vec()
@@ -225,4 +295,31 @@ pub fn connect_ws(ws_url: &str, read_timeout: Option<Duration>) -> Result<WebSoc
     let (ws, _) = tungstenite::client(ws_url, stream)
         .map_err(|e| format!("WebSocket handshake failed: {e}"))?;
     Ok(ws)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_chunked_valid_and_rejects_overflow_or_truncation() {
+        let valid = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        assert_eq!(decode_chunked(valid).unwrap(), b"hello world");
+
+        let overflow = b"ffffffffffffffff\r\nabc\r\n0\r\n\r\n";
+        assert!(decode_chunked(overflow).is_err());
+
+        let truncated = b"10\r\nshort";
+        assert!(decode_chunked(truncated).is_err());
+
+        let missing_zero = b"5\r\nhello\r\n";
+        assert!(decode_chunked(missing_zero).is_err());
+    }
+
+    #[test]
+    fn validate_header_value_rejects_crlf() {
+        assert!(validate_header_value("Authorization", "valid-token_123").is_ok());
+        assert!(validate_header_value("Authorization", "bad\r\nX-Injected: 1").is_err());
+        assert!(validate_header_value("Host", "example.com\nEvil: 1").is_err());
+    }
 }

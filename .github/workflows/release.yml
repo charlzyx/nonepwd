@@ -23,9 +23,7 @@ on:
         type: boolean
 
 permissions:
-  actions: read
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
   prepare:
@@ -36,10 +34,14 @@ jobs:
     steps:
       - name: Resolve release metadata
         id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-            PRERELEASE="${{ inputs.prerelease }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+            PRERELEASE="$INPUT_PRERELEASE"
           else
             TAG="${GITHUB_REF_NAME}"
             if [[ "$TAG" == *-* ]]; then
@@ -47,6 +49,14 @@ jobs:
             else
               PRERELEASE="false"
             fi
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "ERROR: Invalid release tag format: $TAG" >&2
+            exit 1
+          fi
+          if [ "$PRERELEASE" != "true" ] && [ "$PRERELEASE" != "false" ]; then
+            echo "ERROR: Invalid prerelease flag: $PRERELEASE" >&2
+            exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
@@ -492,14 +502,25 @@ jobs:
   docker-ghcr:
     needs: [prepare]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
       - name: Set lowercase GHCR image tags
+        env:
+          GITHUB_REPOSITORY_NAME: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          IS_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
-          IMAGE_REPO=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          TAGS="${IMAGE_REPO}:${{ needs.prepare.outputs.tag }}"
-          if [ "${{ needs.prepare.outputs.prerelease }}" != "true" ]; then
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "ERROR: Invalid release tag format: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          IMAGE_REPO=$(echo "ghcr.io/${GITHUB_REPOSITORY_NAME}" | tr '[:upper:]' '[:lower:]')
+          TAGS="${IMAGE_REPO}:${RELEASE_TAG}"
+          if [ "$IS_PRERELEASE" != "true" ]; then
             TAGS="${TAGS},${IMAGE_REPO}:latest"
           fi
           echo "IMAGE_REPO=$IMAGE_REPO" >> "$GITHUB_ENV"
@@ -560,6 +581,7 @@ jobs:
       - name: Install workspace dependencies and build packages
         run: |
           pnpm install --frozen-lockfile
+          pnpm --filter @nonepwd/agent-relay build
           pnpm build
 
       - name: Publish @nonepwd packages idempotently
@@ -570,8 +592,8 @@ jobs:
             echo "NPM_TOKEN secret is not configured; skipping npm publish."
             exit 0
           fi
-          for PKG in @nonepwd/core @nonepwd/cf-email-worker @nonepwd/cli @nonepwd/server; do
-            VER=$(node -p "const fs=require('fs');const dirs={'@nonepwd/core':'core','@nonepwd/cf-email-worker':'cf-email-worker','@nonepwd/cli':'cli','@nonepwd/server':'server'};JSON.parse(fs.readFileSync('packages/'+dirs[process.argv[1]]+'/package.json','utf8')).version" "$PKG")
+          for PKG in @nonepwd/core @nonepwd/agent-relay @nonepwd/cf-email-worker @nonepwd/cli @nonepwd/server; do
+            VER=$(node -p "const fs=require('fs');const dirs={'@nonepwd/core':'core','@nonepwd/agent-relay':'agent-relay','@nonepwd/cf-email-worker':'cf-email-worker','@nonepwd/cli':'cli','@nonepwd/server':'server'};JSON.parse(fs.readFileSync('packages/'+dirs[process.argv[1]]+'/package.json','utf8')).version" "$PKG")
             if npm view "$PKG@$VER" version >/dev/null 2>&1; then
               echo "$PKG@$VER already published on npm; skipping."
             else
@@ -581,6 +603,9 @@ jobs:
 
   publish-release:
     needs: [prepare, build-macos, build-ios, build-android, build-windows, build-linux-and-extension, docker-ghcr]
+    permissions:
+      actions: read
+      contents: write
     if: |
       always() &&
       needs.prepare.result == 'success' &&
@@ -595,11 +620,13 @@ jobs:
       - name: Download workflow artifacts via gh CLI
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
         run: |
           mkdir -p artifacts-raw artifacts
           for attempt in 1 2 3 4; do
             rm -rf artifacts-raw/*
-            if gh run download "${{ github.run_id }}" -R "${{ github.repository }}" --dir artifacts-raw; then
+            if gh run download "$RUN_ID" -R "$REPO" --dir artifacts-raw; then
               break
             fi
             if [ "$attempt" -eq 4 ]; then

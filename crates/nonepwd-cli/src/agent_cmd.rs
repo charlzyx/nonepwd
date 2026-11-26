@@ -14,8 +14,8 @@ use nonepwd_agent::{
 use nonepwd_core::crypto::decode_service_account_token;
 
 use crate::client::NonePwdClient;
-use crate::config::{load_config, resolve_config_dir};
-use crate::{first_flag, has_flag, ParsedArgs};
+use crate::config::{ensure_config_dir, load_config, resolve_config_dir};
+use crate::{first_flag, has_flag, is_dangerous_env_var, scrub_nonepwd_env, ParsedArgs};
 
 pub(crate) fn run_agent(
     client: &mut NonePwdClient,
@@ -126,6 +126,16 @@ pub(crate) fn run_agent(
             let token = require_token(parsed)?;
             let query = require_query(parsed)?;
             let mappings = parsed.flags.get("env").cloned().unwrap_or_default();
+            for spec in &mappings {
+                if let Some((key, _)) = spec.split_once('=') {
+                    if is_dangerous_env_var(key) {
+                        return Err(format!(
+                            "Refusing to set dangerous environment variable \"{}\" via --env",
+                            key.trim()
+                        ));
+                    }
+                }
+            }
             let runtime = tokio_runtime()?;
             let pairs = runtime.block_on(run_with_credential(
                 &relay,
@@ -138,8 +148,14 @@ pub(crate) fn run_agent(
             let mut child_env: std::collections::HashMap<String, String> =
                 std::env::vars().collect();
             for (key, value) in pairs {
+                if is_dangerous_env_var(&key) {
+                    return Err(format!(
+                        "Refusing to set dangerous environment variable \"{key}\" via --env"
+                    ));
+                }
                 child_env.insert(key, value);
             }
+            scrub_nonepwd_env(&mut child_env);
             let mut cmd = Command::new(&parsed.rest_after_dash_dash[0]);
             cmd.args(&parsed.rest_after_dash_dash[1..]);
             cmd.env_clear();
@@ -216,7 +232,7 @@ fn resolve_relay_url(parsed: &ParsedArgs, config_dir: Option<&str>) -> Result<St
 }
 
 fn load_identity(config_dir: Option<&str>, file_name: &str) -> Result<IdentityKeyPair, String> {
-    let path = resolve_config_dir(config_dir).join(file_name);
+    let path = resolve_config_dir(config_dir)?.join(file_name);
     if path.is_file() {
         let bytes =
             fs::read(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
@@ -230,8 +246,7 @@ fn load_identity(config_dir: Option<&str>, file_name: &str) -> Result<IdentityKe
 
 fn write_private_file(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+        ensure_config_dir(parent)?;
     }
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -243,6 +258,12 @@ fn write_private_file(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
     let mut file = options
         .open(path)
         .map_err(|e| format!("failed to create {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("failed to set permissions on {}: {e}", path.display()))?;
+    }
     file.write_all(bytes)
         .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
     Ok(())

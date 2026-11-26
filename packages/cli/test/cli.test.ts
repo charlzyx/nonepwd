@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createNonePwdServer, type NonePwdServerInstance } from '../../server/src/app.js';
 import { NonePwdCliClient } from '../src/client.js';
 import { runCli } from '../src/commands.js';
+import { resolveConfigDir, saveCliConfig } from '../src/config.js';
 import { startConnectServer } from '../src/connect-server.js';
 
 const cleanups: Array<{ close: () => Promise<void>; dirs: string[] }> = [];
@@ -368,6 +369,92 @@ describe('@nonepwd/cli & Connect API', () => {
       });
       const gitlabOtp = await execCli(['otp', 'GitLab', '--vault', 'Personal'], configDir);
       expect(gitlabOtp.stdout.trim()).toMatch(/^\d{6}$/);
+
+      // 11. Security regressions: NONEPWD_* scrubbing, op:// resolution in TS np run, LD_PRELOAD blocking, 0600 permissions
+      const opEnvTplPath = path.join(workDir, '.env.op.tpl');
+      fs.writeFileSync(opEnvTplPath, 'OP_SECRET=op://DevOps/OpenAI/api_key\n', 'utf8');
+      const scrubDumpFile = path.join(workDir, 'scrub-dump.json');
+      const opRunRes = await execCli(
+        [
+          'run',
+          '--env-file',
+          opEnvTplPath,
+          '--',
+          process.execPath,
+          '-e',
+          `require('fs').writeFileSync(${JSON.stringify(scrubDumpFile)}, JSON.stringify({
+            opSecret: process.env.OP_SECRET ?? null,
+            hasToken: 'NONEPWD_TOKEN' in process.env,
+            hasMaster: 'NONEPWD_MASTER_PASSWORD' in process.env,
+            hasSecretKey: 'NONEPWD_SECRET_KEY' in process.env,
+            hasAgentToken: 'NONEPWD_AGENT_TOKEN' in process.env,
+            hasConnectToken: 'NONEPWD_CONNECT_TOKEN' in process.env,
+          }))`,
+        ],
+        isolatedCfgDir,
+        {
+          NONEPWD_TOKEN: pstToken,
+          NONEPWD_MASTER_PASSWORD: 'should-not-leak-master',
+          NONEPWD_SECRET_KEY: 'NP3-SHOULD-NOT-LEAK',
+          NONEPWD_AGENT_TOKEN: 'should-not-leak-agent',
+          NONEPWD_CONNECT_TOKEN: 'should-not-leak-connect',
+        }
+      );
+      expect(opRunRes.code).toBe(0);
+      const scrubDump = JSON.parse(fs.readFileSync(scrubDumpFile, 'utf8')) as {
+        opSecret: string | null;
+        hasToken: boolean;
+        hasMaster: boolean;
+        hasSecretKey: boolean;
+        hasAgentToken: boolean;
+        hasConnectToken: boolean;
+      };
+      expect(scrubDump).toEqual({
+        opSecret: 'sk-field-abc',
+        hasToken: false,
+        hasMaster: false,
+        hasSecretKey: false,
+        hasAgentToken: false,
+        hasConnectToken: false,
+      });
+
+      const evilEnvPath = path.join(workDir, '.env.evil');
+      fs.writeFileSync(evilEnvPath, 'LD_PRELOAD=/tmp/evil.so\nSAFE_VAR=ok\n', 'utf8');
+      const blockedRun = await execCli(
+        ['run', '--env-file', evilEnvPath, '--', process.execPath, '-e', 'process.exit(0)'],
+        configDir
+      );
+      expect(blockedRun.code).toBe(1);
+      expect(blockedRun.stderr).toContain('LD_PRELOAD');
+
+      if (process.platform !== 'win32') {
+        const modeOut = fs.statSync(outPath).mode & 0o777;
+        expect(modeOut).toBe(0o600);
+
+        // Overwriting a pre-existing 0644 config.json must enforce 0600
+        const looseCfgDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nonepwd-loose-cfg-'));
+        cleanups[cleanups.length - 1].dirs.push(looseCfgDir);
+        const looseCfgFile = path.join(looseCfgDir, 'config.json');
+        fs.writeFileSync(looseCfgFile, '{}', { mode: 0o644 });
+        fs.chmodSync(looseCfgFile, 0o644);
+        saveCliConfig({ serverUrl: url }, looseCfgDir);
+        expect(fs.statSync(looseCfgFile).mode & 0o777).toBe(0o600);
+        expect(fs.statSync(looseCfgDir).mode & 0o777).toBe(0o700);
+      }
+
+      // XDG_CONFIG_HOME support matches Rust CLI
+      const prevCfgEnv = process.env.NONEPWD_CONFIG_DIR;
+      const prevXdgEnv = process.env.XDG_CONFIG_HOME;
+      try {
+        delete process.env.NONEPWD_CONFIG_DIR;
+        process.env.XDG_CONFIG_HOME = '/tmp/xdg-nonepwd-test';
+        expect(resolveConfigDir()).toBe(path.join('/tmp/xdg-nonepwd-test', 'nonepwd'));
+      } finally {
+        if (prevCfgEnv === undefined) delete process.env.NONEPWD_CONFIG_DIR;
+        else process.env.NONEPWD_CONFIG_DIR = prevCfgEnv;
+        if (prevXdgEnv === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = prevXdgEnv;
+      }
     } finally {
       await connectSrv.close();
     }

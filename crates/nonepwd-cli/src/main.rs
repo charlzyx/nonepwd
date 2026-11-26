@@ -227,6 +227,66 @@ fn collect_field_overrides(parsed: &ParsedArgs, positional_start: usize) -> Resu
     Ok(out)
 }
 
+pub(crate) fn is_dangerous_env_var(name: &str) -> bool {
+    let upper = name.trim().to_ascii_uppercase();
+    upper.starts_with("LD_")
+        || upper.starts_with("DYLD_")
+        || matches!(
+            upper.as_str(),
+            "PATH"
+                | "NODE_OPTIONS"
+                | "BASH_ENV"
+                | "ENV"
+                | "IFS"
+                | "PYTHONSTARTUP"
+                | "PYTHONPATH"
+                | "RUBYOPT"
+                | "PERL5OPT"
+        )
+}
+
+pub(crate) fn scrub_nonepwd_env(env_map: &mut HashMap<String, String>) {
+    env_map.retain(|k, _| {
+        !matches!(
+            k.to_ascii_uppercase().as_str(),
+            "NONEPWD_TOKEN"
+                | "NONEPWD_MASTER_PASSWORD"
+                | "NONEPWD_SECRET_KEY"
+                | "NONEPWD_AGENT_TOKEN"
+                | "NONEPWD_CONNECT_TOKEN"
+        )
+    });
+}
+
+fn write_secret_file(path: &str, content: &[u8]) -> Result<(), String> {
+    let target = std::path::Path::new(path);
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed creating parent directory for {path}: {e}"))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(target)
+            .map_err(|e| format!("Failed creating {path}: {e}"))?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed setting permissions on {path}: {e}"))?;
+        file.write_all(content)
+            .map_err(|e| format!("Failed writing {path}: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(target, content).map_err(|e| format!("Failed writing {path}: {e}"))
+    }
+}
+
 fn inject_template(client: &mut NonePwdClient, template: &str) -> Result<String, String> {
     let refs = find_secret_refs(template);
     if refs.is_empty() {
@@ -762,13 +822,8 @@ fn run() -> Result<i32, String> {
                 .ok_or("read requires <np://vault/item/field | op://vault/item/field>")?;
             let val = client.resolve_secret_ref(uri)?;
             if let Some(out_file) = first_flag(&parsed, "out").or_else(|| first_flag(&parsed, "out-file")) {
-                fs::write(out_file, &val)
+                write_secret_file(out_file, val.as_bytes())
                     .map_err(|e| format!("Failed writing secret to {out_file}: {e}"))?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(out_file, fs::Permissions::from_mode(0o600));
-                }
                 eprintln!("Wrote secret to {out_file}");
             } else if has_flag(&parsed, "no-newline") {
                 print!("{val}");
@@ -805,7 +860,7 @@ fn run() -> Result<i32, String> {
             };
             let rendered = inject_template(&mut client, &raw_template)?;
             if let Some(out_file) = first_flag(&parsed, "out") {
-                fs::write(out_file, rendered)
+                write_secret_file(out_file, rendered.as_bytes())
                     .map_err(|e| format!("Failed writing {out_file}: {e}"))?;
                 println!("Injected secrets into {out_file}");
             } else {
@@ -823,6 +878,11 @@ fn run() -> Result<i32, String> {
                 let content = fs::read_to_string(env_file)
                     .map_err(|e| format!("Failed reading {env_file}: {e}"))?;
                 for (k, v) in parse_dot_env(&content) {
+                    if is_dangerous_env_var(&k) {
+                        return Err(format!(
+                            "Refusing to load dangerous environment variable \"{k}\" from --env-file"
+                        ));
+                    }
                     child_env.insert(k, v);
                 }
             }
@@ -836,6 +896,7 @@ fn run() -> Result<i32, String> {
                 let resolved = inject_template(&mut client, &raw)?;
                 child_env.insert(k, resolved);
             }
+            scrub_nonepwd_env(&mut child_env);
 
             let mut cmd_proc = Command::new(&parsed.rest_after_dash_dash[0]);
             cmd_proc.args(&parsed.rest_after_dash_dash[1..]);
@@ -1083,5 +1144,73 @@ fn main() {
             eprintln!("Error: {err}");
             exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocks_dangerous_env_vars_and_allows_normal_vars() {
+        for name in [
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "LD_AUDIT",
+            "ld_debug",
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
+            "PATH",
+            "NODE_OPTIONS",
+            "BASH_ENV",
+            "ENV",
+            "IFS",
+            "PYTHONSTARTUP",
+            "PYTHONPATH",
+            "RUBYOPT",
+            "PERL5OPT",
+        ] {
+            assert!(is_dangerous_env_var(name), "expected {name} to be blocked");
+        }
+        for safe in ["API_KEY", "DATABASE_URL", "OPENAI_API_KEY", "MY_LD_VAR"] {
+            assert!(!is_dangerous_env_var(safe), "expected {safe} to be allowed");
+        }
+    }
+
+    #[test]
+    fn scrubs_nonepwd_secret_env_vars() {
+        let mut env_map = HashMap::from([
+            ("NONEPWD_TOKEN".into(), "sa-tok".into()),
+            ("NONEPWD_MASTER_PASSWORD".into(), "pw".into()),
+            ("NONEPWD_SECRET_KEY".into(), "NP3-xxx".into()),
+            ("NONEPWD_AGENT_TOKEN".into(), "psk".into()),
+            ("NONEPWD_CONNECT_TOKEN".into(), "conn".into()),
+            ("APP_SECRET".into(), "keep-me".into()),
+        ]);
+        scrub_nonepwd_env(&mut env_map);
+        assert!(!env_map.contains_key("NONEPWD_TOKEN"));
+        assert!(!env_map.contains_key("NONEPWD_MASTER_PASSWORD"));
+        assert!(!env_map.contains_key("NONEPWD_SECRET_KEY"));
+        assert!(!env_map.contains_key("NONEPWD_AGENT_TOKEN"));
+        assert!(!env_map.contains_key("NONEPWD_CONNECT_TOKEN"));
+        assert_eq!(env_map.get("APP_SECRET").map(String::as_str), Some("keep-me"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_secret_file_enforces_0600_even_on_existing_0644_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = env::temp_dir().join(format!("nonepwd-cli-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("secret.txt");
+        fs::write(&target, "old").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_secret_file(target.to_str().unwrap(), b"top-secret").unwrap();
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "top-secret");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
